@@ -127,16 +127,15 @@ const styles = {
   },
 
   // Logo en fond (translucide) — reprend la charte evidencIA
-  bgLogo: {
-    position: "absolute",
-    inset: 0,
-    backgroundImage: "url('/logopc.png')",
-    backgroundRepeat: "no-repeat",
-    backgroundSize: "cover",
-    backgroundPosition: "50% 45%",
-    opacity: 0.18, // translucide
-    transform: "scale(1.02)",
-    filter: "contrast(1.05) saturate(1.05)",
+bgLogo: {
+  position: "absolute",
+  inset: 0,
+  backgroundImage: "url('/images/logopc.png')",
+  backgroundRepeat: "no-repeat",
+  backgroundSize: "contain",   // LOGO ENTIER
+  backgroundPosition: "center",
+  opacity: 0.16,               // transparence premium
+  filter: "contrast(1.05) saturate(1.05)",
   },
 
   // Voiles + halos (comme ton site)
