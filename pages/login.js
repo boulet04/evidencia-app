@@ -126,29 +126,30 @@ const styles = {
     zIndex: 0,
   },
 
-  // Logo en fond (translucide) — reprend la charte evidencIA
-bgLogo: {
-  position: "absolute",
-  inset: 0,
-  backgroundImage: "url('/images/logopc.png')",
-  backgroundRepeat: "no-repeat",
-  backgroundSize: "contain",   // LOGO ENTIER
-  backgroundPosition: "center",
-  opacity: 0.16,               // transparence premium
-  filter: "contrast(1.05) saturate(1.05)",
+  // Logo en fond (plus visible, logo entier)
+  bgLogo: {
+    position: "absolute",
+    inset: 0,
+    backgroundImage: "url('/images/logopc.png')",
+    backgroundRepeat: "no-repeat",
+    backgroundSize: "contain",
+    backgroundPosition: "center",
+    opacity: 0.30, // ↑ PLUS VISIBLE (avant 0.16)
+    filter: "brightness(1.18) contrast(1.12) saturate(1.10)",
+    transform: "scale(1.02)",
   },
 
-  // Voiles + halos (comme ton site)
+  // Voiles + halos (VOILE ASSOUPLI pour laisser voir le logo)
   bgVeils: {
     position: "absolute",
     inset: 0,
     background:
-      // halo orange
-      "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.20), rgba(0,0,0,0) 62%)," +
+      // halo orange (un peu plus présent)
+      "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.26), rgba(0,0,0,0) 62%)," +
       // halo bleu
-      "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.16), rgba(0,0,0,0) 62%)," +
-      // voile haut/bas sombre (premium)
-      "linear-gradient(to bottom, rgba(0,0,0,.65), rgba(0,0,0,.25) 30%, rgba(0,0,0,.25) 70%, rgba(0,0,0,.70))",
+      "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), rgba(0,0,0,0) 62%)," +
+      // voile haut/bas : allégé (c'était lui qui masquait le logo)
+      "linear-gradient(to bottom, rgba(0,0,0,.45), rgba(0,0,0,.16) 30%, rgba(0,0,0,.16) 70%, rgba(0,0,0,.50))",
   },
 
   // --- Layout ---
@@ -172,7 +173,7 @@ bgLogo: {
     padding: "10px 14px",
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(0,0,0,.45)",
+    background: "rgba(0,0,0,.40)",
     color: "#eef2ff",
     textDecoration: "none",
     fontWeight: 900,
@@ -181,7 +182,7 @@ bgLogo: {
     boxShadow: "0 14px 40px rgba(0,0,0,.45)",
   },
 
-  // --- Card ---
+  // --- Card (un peu plus opaque pour garder la lisibilité) ---
   card: {
     width: "100%",
     maxWidth: 520,
@@ -189,7 +190,7 @@ bgLogo: {
     padding: 24,
     border: "1px solid rgba(255,255,255,.12)",
     background:
-      "linear-gradient(135deg, rgba(0,0,0,.55), rgba(0,0,0,.35))",
+      "linear-gradient(135deg, rgba(0,0,0,.72), rgba(0,0,0,.52))",
     boxShadow: "0 24px 70px rgba(0,0,0,.60)",
     backdropFilter: "blur(14px)",
   },
@@ -234,7 +235,7 @@ bgLogo: {
     margin: "8px 0 0",
     fontSize: 14,
     fontWeight: 800,
-    color: "rgba(238,242,255,.75)",
+    color: "rgba(238,242,255,.78)",
     lineHeight: 1.45,
   },
 
@@ -250,7 +251,7 @@ bgLogo: {
   label: {
     fontSize: 13,
     fontWeight: 900,
-    color: "rgba(238,242,255,.85)",
+    color: "rgba(238,242,255,.88)",
   },
 
   input: {
@@ -258,7 +259,7 @@ bgLogo: {
     padding: "12px 14px",
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(0,0,0,.40)",
+    background: "rgba(0,0,0,.45)",
     color: "#eef2ff",
     outline: "none",
     fontWeight: 800,
@@ -272,7 +273,7 @@ bgLogo: {
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,.14)",
     background:
-      "linear-gradient(135deg, rgba(255,140,40,.20), rgba(80,120,255,.12))",
+      "linear-gradient(135deg, rgba(255,140,40,.28), rgba(80,120,255,.16))",
     color: "#eef2ff",
     fontWeight: 900,
     fontSize: 14,
@@ -283,8 +284,8 @@ bgLogo: {
   alert: {
     padding: 12,
     borderRadius: 16,
-    border: "1px solid rgba(255,140,40,.25)",
-    background: "rgba(255,140,40,.10)",
+    border: "1px solid rgba(255,140,40,.28)",
+    background: "rgba(255,140,40,.12)",
     fontWeight: 900,
     fontSize: 13,
   },
@@ -293,7 +294,7 @@ bgLogo: {
     marginTop: 2,
     fontSize: 12,
     fontWeight: 800,
-    color: "rgba(238,242,255,.72)",
+    color: "rgba(238,242,255,.74)",
   },
 
   footer: {
@@ -303,6 +304,6 @@ bgLogo: {
     textAlign: "center",
     fontSize: 12,
     fontWeight: 800,
-    color: "rgba(238,242,255,.60)",
+    color: "rgba(238,242,255,.62)",
   },
 };
