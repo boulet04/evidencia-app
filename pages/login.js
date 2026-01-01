@@ -16,24 +16,64 @@ export default function Login() {
     } catch (_) {}
   }, []);
 
-  async function onSubmit(e) {
-    e.preventDefault();
-    setMsg("");
-    setLoading(true);
+async function onSubmit(e) {
+  e.preventDefault();
+  setMsg("");
+  setLoading(true);
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+  // 1) Connexion
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
 
+  if (error) {
     setLoading(false);
+    setMsg("Identifiants incorrects ou compte inexistant.");
+    return;
+  }
 
-    if (error) {
-      setMsg("Identifiants incorrects ou compte inexistant.");
+  // 2) Récupérer l'utilisateur connecté
+  const user = data?.user;
+  if (!user) {
+    setLoading(false);
+    setMsg("Connexion OK mais utilisateur introuvable. Réessayez.");
+    return;
+  }
+
+  // 3) Vérifier si un profil existe déjà
+  const { data: profile, error: selErr } = await supabase
+    .from("profiles")
+    .select("id")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  // Si erreur autre que "pas de ligne", on stop
+  if (selErr) {
+    setLoading(false);
+    setMsg("Erreur de lecture du profil. Contactez Evidenc’IA.");
+    return;
+  }
+
+  // 4) Si pas de profil, on le crée
+  if (!profile) {
+    const { error: insErr } = await supabase
+      .from("profiles")
+      .insert([{ user_id: user.id }]);
+
+    if (insErr) {
+      setLoading(false);
+      setMsg("Impossible de créer le profil. Contactez Evidenc’IA.");
       return;
     }
+  }
 
-    window.location.href = "/chat";
+  setLoading(false);
+
+  // 5) Redirection vers le chat
+  window.location.href = "/chat";
+}
+
   }
 
   return (
