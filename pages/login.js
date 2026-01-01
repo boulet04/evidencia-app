@@ -134,7 +134,7 @@ const styles = {
     backgroundRepeat: "no-repeat",
     backgroundSize: "contain",
     backgroundPosition: "center",
-    opacity: 0.30, // ↑ PLUS VISIBLE (avant 0.16)
+    opacity: 0.5, // ↑ PLUS VISIBLE (avant 0.16)
     filter: "brightness(1.18) contrast(1.12) saturate(1.10)",
     transform: "scale(1.02)",
   },
