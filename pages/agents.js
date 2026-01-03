@@ -38,7 +38,11 @@ export default function Agents() {
   }
 
   if (loading) {
-    return <main style={styles.page}><div style={styles.center}>Chargement…</div></main>;
+    return (
+      <main style={styles.page}>
+        <div style={styles.center}>Chargement…</div>
+      </main>
+    );
   }
 
   return (
@@ -65,13 +69,17 @@ export default function Agents() {
             <button
               key={a.id}
               style={styles.card}
-              onClick={() => (window.location.href = `/chat?agent=${encodeURIComponent(a.slug)}`)}
+              onClick={() =>
+                (window.location.href = `/chat?agent=${encodeURIComponent(a.slug)}`)
+              }
             >
               <div style={styles.avatarWrap}>
                 {a.avatar_url ? (
                   <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
                 ) : (
-                  <div style={styles.avatarFallback}>{a.name?.[0] || "A"}</div>
+                  <div style={styles.avatarFallback}>
+                    {a.name?.[0] || "A"}
+                  </div>
                 )}
               </div>
 
@@ -87,6 +95,8 @@ export default function Agents() {
   );
 }
 
+/* ================= STYLES ================= */
+
 const styles = {
   page: {
     minHeight: "100vh",
@@ -96,7 +106,9 @@ const styles = {
     color: "#eef2ff",
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
   },
+
   bg: { position: "absolute", inset: 0, zIndex: 0 },
+
   bgLogo: {
     position: "absolute",
     inset: 0,
@@ -106,6 +118,7 @@ const styles = {
     backgroundPosition: "center",
     opacity: 0.08,
   },
+
   bgVeils: {
     position: "absolute",
     inset: 0,
@@ -114,19 +127,22 @@ const styles = {
       "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), rgba(0,0,0,0) 62%)," +
       "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22) 30%, rgba(0,0,0,.22) 70%, rgba(0,0,0,.66))",
   },
+
   topbar: {
     position: "relative",
     zIndex: 1,
     padding: "16px 18px",
     display: "flex",
-    alignItems: "center",
     justifyContent: "space-between",
     borderBottom: "1px solid rgba(255,255,255,.10)",
     background: "rgba(0,0,0,.28)",
     backdropFilter: "blur(10px)",
   },
-  brandLogo: { height: 22, width: "auto", display: "block" },
+
+  brandLogo: { height: 22 },
+
   topRight: { display: "flex", gap: 10, alignItems: "center" },
+
   userChip: {
     fontSize: 12,
     fontWeight: 900,
@@ -135,42 +151,86 @@ const styles = {
     border: "1px solid rgba(255,255,255,.12)",
     background: "rgba(0,0,0,.35)",
   },
+
   btnGhost: {
     padding: "10px 14px",
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,.14)",
     background: "rgba(0,0,0,.35)",
-    color: "#eef2ff",
+    color: "#fff",
     fontWeight: 900,
     cursor: "pointer",
   },
-  shell: { position: "relative", zIndex: 1, padding: 18, maxWidth: 1100, margin: "0 auto" },
-  h1: { margin: "18px 0 6px", fontSize: 30, fontWeight: 900 },
-  p: { margin: "0 0 16px", fontSize: 14, fontWeight: 800, color: "rgba(238,242,255,.75)" },
-  grid: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14 },
+
+  shell: {
+    position: "relative",
+    zIndex: 1,
+    padding: 18,
+    maxWidth: 1100,
+    margin: "0 auto",
+  },
+
+  h1: { fontSize: 30, fontWeight: 900 },
+  p: { marginBottom: 16, fontSize: 14, fontWeight: 800, opacity: 0.8 },
+
+  grid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))",
+    gap: 14,
+  },
+
   card: {
-    textAlign: "left",
     display: "flex",
     gap: 14,
     padding: 16,
     borderRadius: 22,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
-    boxShadow: "0 18px 55px rgba(0,0,0,.45)",
+    border: "1px solid rgba(255,255,255,.18)",
+    background: "rgba(0,0,0,.55)",
     backdropFilter: "blur(12px)",
     cursor: "pointer",
   },
-  avatarWrap: { width: 56, height: 56, flex: "0 0 56px" },
-  avatar: { width: 56, height: 56, borderRadius: "50%", objectFit: "cover" },
-  avatarFallback: {
-    width: 56, height: 56, borderRadius: "50%",
-    display: "grid", placeItems: "center",
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(255,255,255,.08)",
-    fontWeight: 900,
+
+  avatarWrap: { width: 56, height: 56 },
+
+  avatar: {
+    width: 56,
+    height: 56,
+    borderRadius: "50%",
+    objectFit: "cover",
   },
+
+  avatarFallback: {
+    width: 56,
+    height: 56,
+    borderRadius: "50%",
+    display: "grid",
+    placeItems: "center",
+    fontWeight: 900,
+    color: "#fff",
+    background: "rgba(255,255,255,.15)",
+  },
+
   meta: { display: "grid", gap: 6 },
-  name: { fontSize: 16, fontWeight: 900 },
-  desc: { fontSize: 13, fontWeight: 800, color: "rgba(238,242,255,.75)", lineHeight: 1.35 },
-  center: { minHeight: "100vh", display: "grid", placeItems: "center" },
+
+  // ✅ PRÉNOM BIEN VISIBLE
+  name: {
+    fontSize: 18,
+    fontWeight: 900,
+    color: "#ffffff",
+    letterSpacing: 0.3,
+    textShadow: "0 2px 12px rgba(0,0,0,.65)",
+  },
+
+  desc: {
+    fontSize: 13,
+    fontWeight: 800,
+    color: "rgba(238,242,255,.75)",
+    lineHeight: 1.35,
+  },
+
+  center: {
+    minHeight: "100vh",
+    display: "grid",
+    placeItems: "center",
+  },
 };
