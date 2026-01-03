@@ -1,14 +1,19 @@
-import Mistral from "@mistralai/mistralai";
+import { Mistral } from "@mistralai/mistralai";
 import agentPrompts from "../../lib/agentPrompts";
 
-const client = new Mistral({
-  apiKey: process.env.MISTRAL_API_KEY,
+const mistral = new Mistral({
+  apiKey: process.env.MISTRAL_API_KEY ?? "",
 });
 
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
       return res.status(405).json({ error: "Méthode non autorisée." });
+    }
+
+    // Sécurité : clé manquante
+    if (!process.env.MISTRAL_API_KEY) {
+      return res.status(500).json({ error: "MISTRAL_API_KEY manquante (Vercel > Settings > Env Vars)." });
     }
 
     const { message, agentSlug } = req.body || {};
@@ -26,7 +31,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Message vide." });
     }
 
-    const completion = await client.chat.complete({
+    const result = await mistral.chat.complete({
       model: "mistral-small-latest",
       messages: [
         { role: "system", content: agent.systemPrompt },
@@ -36,7 +41,7 @@ export default async function handler(req, res) {
     });
 
     const reply =
-      completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
+      result?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
 
     return res.status(200).json({ reply });
   } catch (err) {
