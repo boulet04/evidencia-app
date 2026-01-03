@@ -25,7 +25,7 @@ export default function Agents() {
         .order("name", { ascending: true });
 
       if (!mounted) return;
-      setAgents(error ? [] : data || []);
+      setAgents(error ? [] : (data || []));
       setLoading(false);
     }
 
@@ -54,20 +54,28 @@ export default function Agents() {
         <div style={styles.bgVeils} />
       </div>
 
-      {/* BOUTON RETOUR */}
-      <button
-        style={styles.backBtn}
-        onClick={() => window.location.href = "/chat"}
-      >
-        ← Retour
-      </button>
-
-      {/* TOP BAR */}
+      {/* HEADER */}
       <header style={styles.topbar}>
-        <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
+        <div style={styles.brandLeft}>
+          <img
+            src="/images/logolong.png"
+            alt="Evidenc’IA"
+            style={styles.brandLogo}
+          />
+
+          <button
+            style={styles.backBtn}
+            onClick={() => window.location.href = "/agents"}
+          >
+            ← Retour
+          </button>
+        </div>
+
         <div style={styles.topRight}>
           <span style={styles.userChip}>{email}</span>
-          <button onClick={logout} style={styles.btnGhost}>Déconnexion</button>
+          <button onClick={logout} style={styles.btnGhost}>
+            Déconnexion
+          </button>
         </div>
       </header>
 
@@ -84,7 +92,7 @@ export default function Agents() {
                 window.location.href = `/chat?agent=${encodeURIComponent(a.slug)}`
               }
             >
-              {/* AVATAR BIEN VISIBLE */}
+              {/* AVATAR – VISAGE BIEN VISIBLE */}
               <img
                 src={a.avatar_url}
                 alt={a.name}
@@ -136,36 +144,44 @@ const styles = {
       "linear-gradient(to bottom, rgba(0,0,0,.65), rgba(0,0,0,.25) 30%, rgba(0,0,0,.25) 70%, rgba(0,0,0,.70))",
   },
 
-  /* RETOUR */
-  backBtn: {
-    position: "fixed",
-    top: 16,
-    left: 16,
-    zIndex: 3,
-    padding: "10px 14px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.2)",
-    background: "rgba(0,0,0,.45)",
-    color: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
-    backdropFilter: "blur(10px)",
-  },
-
   topbar: {
     position: "relative",
     zIndex: 1,
     padding: "16px 18px",
     display: "flex",
     justifyContent: "space-between",
+    alignItems: "center",
     borderBottom: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(0,0,0,.25)",
+    background: "rgba(0,0,0,.28)",
     backdropFilter: "blur(10px)",
   },
 
-  brandLogo: { height: 22 },
+  brandLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: 16,
+  },
 
-  topRight: { display: "flex", gap: 10, alignItems: "center" },
+  brandLogo: {
+    height: 22,
+    display: "block",
+  },
+
+  backBtn: {
+    padding: "8px 14px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.18)",
+    background: "rgba(0,0,0,.35)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+
+  topRight: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+  },
 
   userChip: {
     fontSize: 12,
@@ -206,31 +222,37 @@ const styles = {
   card: {
     display: "flex",
     alignItems: "center",
-    gap: 16,
+    gap: 18,
     padding: 18,
     borderRadius: 24,
     border: "1px solid rgba(255,255,255,.18)",
     background: "rgba(0,0,0,.55)",
     backdropFilter: "blur(14px)",
     cursor: "pointer",
+    textAlign: "left",
   },
 
-  /* AVATAR CORRIGÉ */
+  /* VISAGE BIEN CADRÉ */
   avatar: {
     width: 72,
     height: 72,
     borderRadius: "50%",
     objectFit: "cover",
-    border: "2px solid rgba(255,255,255,.35)",
+    objectPosition: "center top",
+    border: "2px solid rgba(255,255,255,.45)",
     flexShrink: 0,
+    backgroundColor: "#000",
   },
 
-  meta: { display: "grid", gap: 6 },
+  meta: {
+    display: "grid",
+    gap: 6,
+  },
 
   name: {
     fontSize: 18,
     fontWeight: 900,
-    color: "#fff",
+    color: "#ffffff",
     textShadow: "0 2px 12px rgba(0,0,0,.6)",
   },
 
@@ -238,6 +260,7 @@ const styles = {
     fontSize: 13,
     fontWeight: 800,
     color: "rgba(238,242,255,.75)",
+    lineHeight: 1.35,
   },
 
   center: {
