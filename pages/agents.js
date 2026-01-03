@@ -10,32 +10,28 @@ export default function Agents() {
     let mounted = true;
 
     async function boot() {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
+      const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         window.location.href = "/login";
         return;
       }
-
       if (!mounted) return;
+
       setEmail(session.user.email || "");
 
       const { data, error } = await supabase
         .from("agents")
-        .select("id, slug, name, description, avatar_url")
+        .select("*")
         .order("name", { ascending: true });
 
       if (!mounted) return;
-      setAgents(error ? [] : data || []);
+
+      setAgents(error ? [] : data);
       setLoading(false);
     }
 
     boot();
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, []);
 
   async function logout() {
@@ -44,54 +40,35 @@ export default function Agents() {
   }
 
   if (loading) {
-    return (
-      <main style={styles.page}>
-        <div style={styles.center}>Chargement…</div>
-      </main>
-    );
+    return <main style={styles.page}><div style={styles.center}>Chargement…</div></main>;
   }
 
   return (
     <main style={styles.page}>
-      {/* Background */}
       <div style={styles.bg} aria-hidden="true">
         <div style={styles.bgLogo} />
         <div style={styles.bgVeils} />
       </div>
 
-      {/* Topbar */}
       <header style={styles.topbar}>
-        <img
-          src="/images/logolong.png"
-          alt="Evidenc’IA"
-          style={styles.brandLogo}
-        />
+        <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
 
         <div style={styles.topRight}>
           <span style={styles.userChip}>{email}</span>
-          <button onClick={logout} style={styles.btnGhost}>
-            Déconnexion
-          </button>
+          <button onClick={logout} style={styles.btnGhost}>Déconnexion</button>
         </div>
       </header>
 
-      {/* Content */}
       <section style={styles.shell}>
         <h1 style={styles.h1}>Choisissez votre agent</h1>
-        <p style={styles.p}>
-          Sélectionnez l’agent avec lequel vous souhaitez travailler.
-        </p>
+        <p style={styles.p}>Cliquez sur un agent pour ouvrir son espace.</p>
 
         <div style={styles.grid}>
           {agents.map((a) => (
             <button
               key={a.id}
               style={styles.card}
-              onClick={() =>
-                (window.location.href = `/chat?agent=${encodeURIComponent(
-                  a.slug
-                )}`)
-              }
+              onClick={() => (window.location.href = `/chat?agent=${a.slug}`)}
             >
               <div style={styles.avatarWrap}>
                 <img
@@ -113,8 +90,6 @@ export default function Agents() {
   );
 }
 
-/* ================== STYLES ================== */
-
 const styles = {
   page: {
     minHeight: "100vh",
@@ -122,7 +97,7 @@ const styles = {
     overflow: "hidden",
     fontFamily: "Segoe UI, Arial, sans-serif",
     color: "#eef2ff",
-    background: "linear-gradient(135deg,#05060a,#0a0d16)",
+    background: "linear-gradient(135deg,#05060a,#0a0d16)"
   },
 
   bg: { position: "absolute", inset: 0, zIndex: 0 },
@@ -131,139 +106,100 @@ const styles = {
     position: "absolute",
     inset: 0,
     backgroundImage: "url('/images/logopc.png')",
-    backgroundRepeat: "no-repeat",
     backgroundSize: "contain",
     backgroundPosition: "center",
-    opacity: 0.08,
+    backgroundRepeat: "no-repeat",
+    opacity: 0.05
   },
 
   bgVeils: {
     position: "absolute",
     inset: 0,
     background:
-      "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.22), rgba(0,0,0,0) 62%)," +
-      "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), rgba(0,0,0,0) 62%)," +
-      "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22) 30%, rgba(0,0,0,.22) 70%, rgba(0,0,0,.66))",
+      "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.22), transparent 62%)," +
+      "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), transparent 62%)," +
+      "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22), rgba(0,0,0,.66))"
   },
 
   topbar: {
     position: "relative",
-    zIndex: 1,
-    padding: "16px 18px",
+    zIndex: 2,
+    padding: "16px 20px",
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    borderBottom: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(0,0,0,.28)",
+    background: "rgba(0,0,0,.35)",
     backdropFilter: "blur(10px)",
+    borderBottom: "1px solid rgba(255,255,255,.1)"
   },
 
-  brandLogo: {
-    height: 22,
-  },
+  brandLogo: { height: 32 },
 
-  topRight: {
-    display: "flex",
-    gap: 10,
-    alignItems: "center",
-  },
+  topRight: { display: "flex", alignItems: "center", gap: 10 },
 
   userChip: {
-    fontSize: 12,
-    fontWeight: 900,
     padding: "8px 12px",
+    background: "rgba(255,255,255,.12)",
     borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(0,0,0,.35)",
+    fontWeight: 800
   },
 
   btnGhost: {
     padding: "10px 14px",
     borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(0,0,0,.35)",
-    color: "#eef2ff",
+    background: "rgba(255,255,255,.1)",
+    color: "#fff",
     fontWeight: 900,
-    cursor: "pointer",
+    border: "1px solid rgba(255,255,255,.2)",
+    cursor: "pointer"
   },
 
   shell: {
     position: "relative",
     zIndex: 1,
-    padding: 22,
+    padding: 20,
     maxWidth: 1100,
-    margin: "0 auto",
+    margin: "0 auto"
   },
 
-  h1: {
-    margin: "16px 0 6px",
-    fontSize: 30,
-    fontWeight: 900,
-  },
-
-  p: {
-    margin: "0 0 18px",
-    fontSize: 14,
-    fontWeight: 800,
-    color: "rgba(238,242,255,.75)",
-  },
+  h1: { fontSize: 32, fontWeight: 900, marginBottom: 6 },
+  p: { opacity: 0.8, marginBottom: 20 },
 
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))",
-    gap: 16,
+    gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+    gap: 20
   },
 
   card: {
     display: "flex",
     gap: 14,
-    padding: 16,
-    borderRadius: 24,
+    padding: 18,
+    background: "rgba(0,0,0,.45)",
+    borderRadius: 20,
+    backdropFilter: "blur(10px)",
     border: "1px solid rgba(255,255,255,.12)",
-    background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
-    boxShadow: "0 18px 55px rgba(0,0,0,.45)",
-    backdropFilter: "blur(12px)",
-    cursor: "pointer",
-    textAlign: "left",
+    cursor: "pointer"
   },
 
-  avatarWrap: {
-    width: 64,
-    height: 64,
-    flex: "0 0 64px",
-    borderRadius: "50%",
-    overflow: "hidden",
-    border: "1px solid rgba(255,255,255,.14)",
-  },
+  avatarWrap: { width: 64, height: 64 },
 
   avatar: {
     width: "100%",
     height: "100%",
-    objectFit: "cover",        // 👉 visage visible
-    objectPosition: "top",     // 👉 cadrage tête
+    borderRadius: "50%",
+    objectFit: "cover",
+    objectPosition: "top"
   },
 
-  meta: {
-    display: "grid",
-    gap: 6,
-  },
-
-  name: {
-    fontSize: 16,
-    fontWeight: 900,
-    color: "#ffffff",
-  },
-
-  desc: {
-    fontSize: 13,
-    fontWeight: 800,
-    color: "rgba(238,242,255,.75)",
-    lineHeight: 1.35,
-  },
+  meta: { display: "grid", gap: 4 },
+  name: { fontSize: 18, fontWeight: 900 },
+  desc: { opacity: 0.75, fontWeight: 700 },
 
   center: {
     minHeight: "100vh",
     display: "grid",
     placeItems: "center",
-  },
+    fontSize: 20
+  }
 };
