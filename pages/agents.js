@@ -1,4 +1,3 @@
-// pages/agents.js
 import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 
@@ -25,11 +24,10 @@ export default function Agents() {
 
       const { data, error } = await supabase
         .from("agents")
-        .select("*")
+        .select("id, slug, name, description, avatar_url")
         .order("name", { ascending: true });
 
       if (!mounted) return;
-
       setAgents(error ? [] : data || []);
       setLoading(false);
     }
@@ -48,7 +46,13 @@ export default function Agents() {
   if (loading) {
     return (
       <main style={styles.page}>
-        <div style={styles.center}>Chargement…</div>
+        <div style={styles.bg} aria-hidden="true">
+          <div style={styles.bgLogo} />
+          <div style={styles.bgVeils} />
+        </div>
+        <section style={styles.center}>
+          <div style={styles.loadingCard}>Chargement…</div>
+        </section>
       </main>
     );
   }
@@ -61,14 +65,10 @@ export default function Agents() {
       </div>
 
       <header style={styles.topbar}>
-        <img
-          src="/images/logolong.png"
-          alt="Evidenc’IA"
-          style={styles.brandLogo}
-        />
+        <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
 
         <div style={styles.topRight}>
-          <span style={styles.userChip}>{email}</span>
+          <span style={styles.userChip}>{email || "Connecté"}</span>
           <button onClick={logout} style={styles.btnGhost}>
             Déconnexion
           </button>
@@ -83,26 +83,14 @@ export default function Agents() {
           {agents.map((a) => (
             <button
               key={a.id}
-              type="button"
               style={styles.card}
-              onClick={() =>
-                (window.location.href = `/chat?agent=${encodeURIComponent(
-                  a.slug
-                )}`)
-              }
+              onClick={() => (window.location.href = `/chat?agent=${encodeURIComponent(a.slug)}`)}
             >
               <div style={styles.avatarWrap}>
                 {a.avatar_url ? (
-                  <img
-                    src={a.avatar_url}
-                    alt={a.name}
-                    style={styles.avatar}
-                    loading="lazy"
-                  />
+                  <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
                 ) : (
-                  <div style={styles.avatarFallback}>
-                    {(a.name || "A")[0]}
-                  </div>
+                  <div style={styles.avatarFallback}>{(a.name || "A")[0]}</div>
                 )}
               </div>
 
@@ -120,12 +108,12 @@ export default function Agents() {
 
 const styles = {
   page: {
-    minHeight: "100vh",
+    minHeight: "100dvh",
     position: "relative",
     overflow: "hidden",
     fontFamily: "Segoe UI, Arial, sans-serif",
-    color: "#eef2ff",
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
+    color: "#fff",
   },
 
   bg: { position: "absolute", inset: 0, zIndex: 0 },
@@ -134,19 +122,19 @@ const styles = {
     position: "absolute",
     inset: 0,
     backgroundImage: "url('/images/logopc.png')",
+    backgroundRepeat: "no-repeat",
     backgroundSize: "contain",
     backgroundPosition: "center",
-    backgroundRepeat: "no-repeat",
-    opacity: 0.05,
+    opacity: 0.08,
   },
 
   bgVeils: {
     position: "absolute",
     inset: 0,
     background:
-      "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.22), transparent 62%)," +
-      "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), transparent 62%)," +
-      "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22), rgba(0,0,0,.66))",
+      "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.22), rgba(0,0,0,0) 62%)," +
+      "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), rgba(0,0,0,0) 62%)," +
+      "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22) 30%, rgba(0,0,0,.22) 70%, rgba(0,0,0,.66))",
   },
 
   topbar: {
@@ -156,31 +144,37 @@ const styles = {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    background: "rgba(0,0,0,.35)",
+    borderBottom: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.28)",
     backdropFilter: "blur(10px)",
-    borderBottom: "1px solid rgba(255,255,255,.1)",
   },
 
-  brandLogo: { height: 32, width: "auto", display: "block" },
+  brandLogo: {
+    height: 30,
+    width: "auto",
+    display: "block",
+    filter: "drop-shadow(0 10px 26px rgba(0,0,0,.55))",
+  },
 
   topRight: { display: "flex", alignItems: "center", gap: 10 },
 
   userChip: {
-    padding: "8px 12px",
-    background: "rgba(255,255,255,.12)",
-    borderRadius: 999,
-    fontWeight: 800,
+    fontSize: 12,
+    fontWeight: 900,
     color: "#fff",
-    border: "1px solid rgba(255,255,255,.14)",
+    padding: "8px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.35)",
   },
 
   btnGhost: {
     padding: "10px 14px",
     borderRadius: 999,
-    background: "rgba(255,255,255,.1)",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.35)",
     color: "#fff",
     fontWeight: 900,
-    border: "1px solid rgba(255,255,255,.2)",
     cursor: "pointer",
   },
 
@@ -192,81 +186,79 @@ const styles = {
     margin: "0 auto",
   },
 
-  h1: { fontSize: 32, fontWeight: 900, marginBottom: 6, color: "#fff" },
+  h1: { margin: "18px 0 6px", fontSize: 38, fontWeight: 900, color: "#fff" },
 
   p: {
-    opacity: 0.85,
-    marginBottom: 20,
-    color: "rgba(255,255,255,.78)",
-    fontWeight: 700,
+    margin: "0 0 18px",
+    fontSize: 14,
+    fontWeight: 800,
+    color: "rgba(255,255,255,.80)",
   },
 
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-    gap: 20,
+    gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))",
+    gap: 18,
   },
 
-  // ✅ IMPORTANT: on force la couleur + on neutralise le style bouton
   card: {
+    textAlign: "left",
     display: "flex",
     gap: 14,
     padding: 18,
-    background: "rgba(0,0,0,.45)",
-    borderRadius: 20,
-    backdropFilter: "blur(10px)",
+    borderRadius: 22,
     border: "1px solid rgba(255,255,255,.12)",
+    background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
+    boxShadow: "0 18px 55px rgba(0,0,0,.45)",
+    backdropFilter: "blur(12px)",
     cursor: "pointer",
-    textAlign: "left",
-
-    color: "#eef2ff",
-    appearance: "none",
-    WebkitAppearance: "none",
-    outline: "none",
-    textDecoration: "none",
   },
 
   avatarWrap: { width: 64, height: 64, flex: "0 0 64px" },
 
   avatar: {
-    width: "100%",
-    height: "100%",
+    width: 64,
+    height: 64,
     borderRadius: "50%",
     objectFit: "cover",
-    objectPosition: "top",
-    border: "1px solid rgba(255,255,255,.18)",
-    boxShadow: "0 14px 40px rgba(0,0,0,.45)",
+    objectPosition: "top center",
+    border: "1px solid rgba(255,255,255,.14)",
+    boxShadow: "0 14px 40px rgba(0,0,0,.35)",
+    background: "rgba(0,0,0,.25)",
   },
 
   avatarFallback: {
-    width: "100%",
-    height: "100%",
+    width: 64,
+    height: 64,
     borderRadius: "50%",
     display: "grid",
     placeItems: "center",
-    border: "1px solid rgba(255,255,255,.18)",
+    border: "1px solid rgba(255,255,255,.12)",
     background: "rgba(255,255,255,.08)",
-    fontWeight: 900,
     color: "#fff",
+    fontWeight: 900,
   },
 
   meta: { display: "grid", gap: 6 },
 
-  // ✅ blanc forcé
   name: { fontSize: 18, fontWeight: 900, color: "#fff" },
 
-  // ✅ blanc/gris clair forcé
   desc: {
-    fontWeight: 700,
+    fontSize: 13,
+    fontWeight: 800,
     color: "rgba(255,255,255,.78)",
     lineHeight: 1.35,
   },
 
-  center: {
-    minHeight: "100vh",
-    display: "grid",
-    placeItems: "center",
-    fontSize: 20,
+  center: { minHeight: "100dvh", display: "grid", placeItems: "center" },
+
+  loadingCard: {
+    padding: "14px 18px",
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.45)",
     color: "#fff",
+    fontWeight: 900,
+    backdropFilter: "blur(12px)",
   },
 };
