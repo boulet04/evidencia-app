@@ -1,59 +1,42 @@
-// pages/api/chat.js
-import { supabase } from "../../lib/supabaseClient";
+import OpenAI from "openai";
 import agentPrompts from "../../lib/agentPrompts";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Méthode invalide" });
+    const { message, agentSlug } = req.body || {};
+
+    if (!agentSlug) {
+      return res.status(400).json({ error: "Aucun agent sélectionné." });
     }
 
-    const { message, agent } = req.body;
+    const agent = agentPrompts[agentSlug];
 
-    if (!message || !agent) {
-      return res.status(400).json({ error: "Message ou agent manquant." });
-    }
-
-    // Vérifie si l’agent existe dans la liste
-    const agentData = agentPrompts[agent?.toLowerCase()];
-    if (!agentData) {
+    if (!agent) {
       return res.status(404).json({ error: "Agent introuvable." });
     }
 
-    // Récupération du prompt système
-    const systemPrompt = agentData.systemPrompt;
-
-    // Appel OpenAI Responses (nouvelle API OpenAI)
-    const apiRes = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4.1",
-        input: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: message }
-        ],
-      }),
-    });
-
-    const result = await apiRes.json();
-
-    if (!apiRes.ok) {
-      return res.status(500).json({
-        error: "Erreur OpenAI",
-        detail: result,
-      });
+    if (!message || message.trim().length === 0) {
+      return res.status(400).json({ error: "Message vide." });
     }
 
-    const reply = result.output_text || "Aucune réponse générée.";
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: agent.systemPrompt },
+        { role: "user", content: message },
+      ],
+    });
 
-    return res.status(200).json({ reply });
+    const reply = completion?.choices?.[0]?.message?.content || "Réponse vide.";
+
+    res.status(200).json({ reply });
 
   } catch (err) {
-    console.error("Erreur API Chat:", err);
-    return res.status(500).json({ error: "Erreur serveur." });
+    console.error("Erreur API /chat :", err);
+    res.status(500).json({ error: "Erreur interne de l’agent." });
   }
 }
