@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+// pages/chat.js
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 
 export default function Chat() {
@@ -8,19 +9,51 @@ export default function Chat() {
   const [email, setEmail] = useState("");
   const [expired, setExpired] = useState(false);
 
-  const [messages, setMessages] = useState([
-    {
-      role: "assistant",
-      content:
-        "Bonjour, je suis Max (Agent commercial). Dites-moi ce que vous vendez, à qui, et via quel canal (appel/email/LinkedIn), et je vous propose un script + plan de relance.",
-    },
-  ]);
+  const [agent, setAgent] = useState({
+    slug: "max",
+    name: "Max",
+    description: "Agent commercial",
+    avatar_url: "/images/logolong.png",
+  });
 
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  const canSend = useMemo(() => input.trim().length > 0 && !sending, [input, sending]);
+  const threadRef = useRef(null);
+
+  const canSend = useMemo(
+    () => input.trim().length > 0 && !sending && !expired,
+    [input, sending, expired]
+  );
+
+  function getAgentSlug() {
+    if (typeof window === "undefined") return "max";
+    try {
+      return new URL(window.location.href).searchParams.get("agent") || "max";
+    } catch {
+      return "max";
+    }
+  }
+
+  function seedFirstMessage(agentName = "Max") {
+    return [
+      {
+        role: "assistant",
+        content:
+          `Bonjour, je suis ${agentName} (Agent commercial). ` +
+          "Dites-moi ce que vous vendez, à qui, et via quel canal (appel/email/LinkedIn), " +
+          "et je vous propose un script + un plan de relance.",
+      },
+    ];
+  }
+
+  useEffect(() => {
+    // auto-scroll
+    if (!threadRef.current) return;
+    threadRef.current.scrollTop = threadRef.current.scrollHeight;
+  }, [messages.length, sending]);
 
   useEffect(() => {
     let mounted = true;
@@ -29,7 +62,7 @@ export default function Chat() {
       setErrorMsg("");
       setChecking(true);
 
-      // 1) Session
+      // 1) session
       const {
         data: { session },
         error: sessErr,
@@ -49,36 +82,57 @@ export default function Chat() {
       }
 
       if (!mounted) return;
-
       setEmail(session.user.email || "");
 
-      // 2) Expiration (si tu as bien ajouté profiles.expires_at)
+      // 2) agent choisi via ?agent=
+      const agentSlug = getAgentSlug();
+
+      // Si table agents existe : on essaie de charger l’agent (sinon fallback)
+      const { data: agentRow, error: agentErr } = await supabase
+        .from("agents")
+        .select("slug, name, description, avatar_url")
+        .eq("slug", agentSlug)
+        .maybeSingle();
+
+      if (!mounted) return;
+
+      if (!agentErr && agentRow?.slug) {
+        setAgent({
+          slug: agentRow.slug,
+          name: agentRow.name || "Agent",
+          description: agentRow.description || "",
+          avatar_url: agentRow.avatar_url || "/images/logolong.png",
+        });
+        setMessages(seedFirstMessage(agentRow.name || "Agent"));
+      } else {
+        setAgent((prev) => ({ ...prev, slug: agentSlug }));
+        setMessages(seedFirstMessage("Max"));
+      }
+
+      // 3) expiration (colonne profiles.duree ou profiles.expires_at)
       const userId = session.user.id;
 
-      const { data: profile, error: profErr } = await supabase
+      // On tente duree (timestamptz) d’abord, puis expires_at si tu l’as
+      const { data: prof, error: profErr } = await supabase
         .from("profiles")
-        .select("expires_at")
+        .select("duree, expires_at")
         .eq("user_id", userId)
         .maybeSingle();
 
+      if (!mounted) return;
+
       if (profErr) {
-        // Si profil non lisible, on laisse passer mais on affiche une erreur légère
-        // (Souvent RLS mal configurée. Mais tu as dit que c'est déjà fait.)
-        if (!mounted) return;
         setErrorMsg("Profil non accessible. Vérifiez les policies Supabase.");
       } else {
-        const expiresAt = profile?.expires_at ? new Date(profile.expires_at) : null;
-        if (expiresAt && expiresAt.getTime() < Date.now()) {
-          if (!mounted) return;
-          setExpired(true);
-        }
+        const raw = prof?.duree || prof?.expires_at || null;
+        const expiresAt = raw ? new Date(raw) : null;
+        if (expiresAt && expiresAt.getTime() < Date.now()) setExpired(true);
       }
 
-      if (!mounted) return;
       setChecking(false);
       setLoading(false);
 
-      // 3) Écoute les changements d'auth (logout, expiration session)
+      // 4) écoute auth (logout)
       const {
         data: { subscription },
       } = supabase.auth.onAuthStateChange((_event, newSession) => {
@@ -107,30 +161,26 @@ export default function Chat() {
     const userText = input.trim();
     setInput("");
 
-    // Ajoute côté UI immédiatement
     setMessages((prev) => [...prev, { role: "user", content: userText }]);
-
     setSending(true);
+
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userText }),
+        body: JSON.stringify({
+          message: userText,
+          agent: agent.slug, // utile pour adapter côté API plus tard
+        }),
       });
 
       const data = await resp.json().catch(() => ({}));
-
-      if (!resp.ok) {
-        throw new Error(data?.error || "Erreur API /api/chat");
-      }
+      if (!resp.ok) throw new Error(data?.error || "Erreur API /api/chat");
 
       const reply = data?.reply || "Je n’ai pas pu générer une réponse.";
       setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
-    } catch (err) {
-      setErrorMsg(
-        "Impossible d’envoyer le message. Vérifiez que /api/chat existe et est déployée."
-      );
-      // Option : on ajoute un message assistant d'erreur
+    } catch (e) {
+      setErrorMsg("Erreur d’envoi. Vérifiez /api/chat.");
       setMessages((prev) => [
         ...prev,
         {
@@ -158,13 +208,10 @@ export default function Chat() {
           <div style={styles.bgLogo} />
           <div style={styles.bgVeils} />
         </div>
-
         <section style={styles.center}>
-          <div style={styles.card}>
-            <div style={styles.title}>Chargement…</div>
-            <div style={styles.subtle}>
-              Initialisation de votre espace agent.
-            </div>
+          <div style={styles.cardSmall}>
+            <div style={styles.titleSmall}>Chargement…</div>
+            <div style={styles.subtle}>Initialisation de votre agent.</div>
           </div>
         </section>
       </main>
@@ -184,7 +231,7 @@ export default function Chat() {
         </a>
 
         <section style={styles.center}>
-          <div style={styles.card}>
+          <div style={styles.cardSmall}>
             <div style={styles.brandLine}>
               <img
                 src="/images/logolong.png"
@@ -200,18 +247,12 @@ export default function Chat() {
             </p>
 
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-              <a style={styles.pill} href="tel:+33665752635">
-                Appeler
-              </a>
-              <a style={styles.pill} href="mailto:evidenciatech@gmail.com">
-                Email
-              </a>
-              <button style={styles.pillGhost} onClick={logout}>
-                Déconnexion
-              </button>
+              <a style={styles.pill} href="tel:+33665752635">Appeler</a>
+              <a style={styles.pill} href="mailto:evidenciatech@gmail.com">Email</a>
+              <button style={styles.pillGhost} onClick={logout}>Déconnexion</button>
             </div>
 
-            <div style={{ marginTop: 16, ...styles.subtle }}>
+            <div style={{ marginTop: 14, ...styles.subtle }}>
               Utilisateur : {email || "—"}
             </div>
           </div>
@@ -230,7 +271,10 @@ export default function Chat() {
       <header style={styles.topbar}>
         <div style={styles.topLeft}>
           <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
-          <span style={styles.subtle}>Agent commercial — Max</span>
+          <span style={styles.subtle}>
+            {agent.description ? `${agent.description} — ` : ""}
+            {agent.name}
+          </span>
         </div>
 
         <div style={styles.topRight}>
@@ -245,7 +289,7 @@ export default function Chat() {
         <div style={styles.chatCard}>
           {errorMsg ? <div style={styles.alert}>{errorMsg}</div> : null}
 
-          <div style={styles.thread}>
+          <div ref={threadRef} style={styles.thread}>
             {messages.map((m, idx) => (
               <div
                 key={idx}
@@ -260,9 +304,7 @@ export default function Chat() {
                     ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot),
                   }}
                 >
-                  <div style={styles.role}>
-                    {m.role === "user" ? "Vous" : "Max"}
-                  </div>
+                  <div style={styles.role}>{m.role === "user" ? "Vous" : agent.name}</div>
                   <div style={styles.text}>{m.content}</div>
                 </div>
               </div>
@@ -304,7 +346,6 @@ const styles = {
 
   bg: { position: "absolute", inset: 0, zIndex: 0 },
 
-  // Fond logo (entier)
   bgLogo: {
     position: "absolute",
     inset: 0,
@@ -312,9 +353,7 @@ const styles = {
     backgroundRepeat: "no-repeat",
     backgroundSize: "contain",
     backgroundPosition: "center",
-    opacity: 0.12,
-    filter: "contrast(1.05) saturate(1.05) brightness(.78)",
-    transform: "scale(1.02)",
+    opacity: 0.08,
   },
 
   bgVeils: {
@@ -340,7 +379,6 @@ const styles = {
   },
 
   topLeft: { display: "flex", alignItems: "center", gap: 12 },
-
   topRight: { display: "flex", alignItems: "center", gap: 10 },
 
   brandLogo: {
@@ -420,13 +458,8 @@ const styles = {
     lineHeight: 1.45,
   },
 
-  bubbleUser: {
-    background: "rgba(255,255,255,.10)",
-  },
-
-  bubbleBot: {
-    background: "rgba(0,0,0,.35)",
-  },
+  bubbleUser: { background: "rgba(255,255,255,.10)" },
+  bubbleBot: { background: "rgba(0,0,0,.35)" },
 
   role: {
     fontSize: 11,
@@ -488,7 +521,6 @@ const styles = {
     minWidth: 110,
   },
 
-  // Pages “center”
   center: {
     position: "relative",
     zIndex: 1,
@@ -498,7 +530,7 @@ const styles = {
     padding: 24,
   },
 
-  card: {
+  cardSmall: {
     width: "100%",
     maxWidth: 560,
     borderRadius: 26,
@@ -509,8 +541,7 @@ const styles = {
     backdropFilter: "blur(14px)",
   },
 
-  title: { fontSize: 18, fontWeight: 900 },
-
+  titleSmall: { fontSize: 18, fontWeight: 900 },
   subtle: { fontSize: 12, fontWeight: 800, color: "rgba(238,242,255,.70)" },
 
   backLink: {
@@ -531,6 +562,14 @@ const styles = {
     fontSize: 13,
     backdropFilter: "blur(10px)",
     boxShadow: "0 14px 40px rgba(0,0,0,.45)",
+  },
+
+  brandLine: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 10,
   },
 
   badge: {
