@@ -1,76 +1,74 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 import agentPrompts from "../lib/agentPrompts";
 
 export default function Chat() {
   const [email, setEmail] = useState("");
   const [agent, setAgent] = useState(null);
+
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const bottomRef = useRef(null);
 
-  // Auto-scroll
-  useEffect(() => {
-    if (bottomRef.current) {
-      bottomRef.current.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [messages]);
+  const canSend = useMemo(() => input.trim().length > 0 && !sending, [input, sending]);
 
   useEffect(() => {
+    let mounted = true;
+
     async function init() {
-      // Auth
-      const { data: { session } } = await supabase.auth.getSession();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
       if (!session) {
         window.location.href = "/login";
         return;
       }
-      setEmail(session.user.email);
 
-      // Lire slug URL
+      if (!mounted) return;
+      setEmail(session.user.email || "");
+
+      // slug depuis l'URL
       const url = new URL(window.location.href);
-      const slugRaw = url.searchParams.get("agent");
+      const slug = (url.searchParams.get("agent") || "").trim().toLowerCase();
 
-      // Normalisation anti-accents / anti-majuscules
-      const slug = slugRaw
-        ?.trim()
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/\p{Diacritic}/gu, "");
+      if (!slug) {
+        window.location.href = "/agents";
+        return;
+      }
 
-      if (!slug || !agentPrompts[slug]) {
+      const cfg = agentPrompts[slug];
+      if (!cfg) {
         alert("Agent introuvable.");
         window.location.href = "/agents";
         return;
       }
 
-      // Charger agent
-      setAgent({
-        slug,
-        ...agentPrompts[slug],
-      });
+      setAgent({ slug, ...cfg });
 
-      // Message d'accueil
+      // message d'accueil "propre" (nom capitalisé + description)
+      const displayName = slug.charAt(0).toUpperCase() + slug.slice(1);
       setMessages([
         {
           role: "assistant",
-          content: `Bonjour, je suis ${agentPrompts[slug].systemPrompt.replace("Tu es ", "")}. Comment puis-je vous aider ?`,
+          content: `Bonjour, je suis ${displayName}, ${cfg.systemPrompt.replace(/^Tu es\s+/i, "").replace(/\.$/, "")}. Comment puis-je vous aider ?`,
         },
       ]);
     }
 
     init();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
-  // Logout
   async function logout() {
     await supabase.auth.signOut();
     window.location.href = "/login";
   }
 
-  // Envoi message utilisateur
   async function sendMessage() {
-    if (!input.trim() || !agent) return;
+    if (!canSend || !agent) return;
 
     const userText = input.trim();
     setInput("");
@@ -82,29 +80,31 @@ export default function Chat() {
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: userText,
-          agentSlug: agent.slug,
-        }),
+        body: JSON.stringify({ message: userText, agentSlug: agent.slug }),
       });
 
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
+
+      if (!resp.ok) {
+        // tant que OPENAI_API_KEY pas mise, ça tombera ici
+        throw new Error(data?.error || "Erreur interne");
+      }
 
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: data.reply || "Erreur de réponse." },
+        { role: "assistant", content: data?.reply || "Réponse vide." },
       ]);
-    } catch (err) {
+    } catch (_e) {
       setMessages((prev) => [
         ...prev,
         { role: "assistant", content: "Erreur interne. Réessayez plus tard." },
       ]);
+    } finally {
+      setSending(false);
     }
-
-    setSending(false);
   }
 
-  function handleEnter(e) {
+  function onKeyDown(e) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -113,9 +113,11 @@ export default function Chat() {
 
   if (!agent) return null;
 
+  const agentLabel = agent.slug.charAt(0).toUpperCase() + agent.slug.slice(1);
+
   return (
     <main style={styles.page}>
-      {/* Background */}
+      {/* Fond */}
       <div style={styles.bg} aria-hidden="true">
         <div style={styles.bgLogo} />
         <div style={styles.bgVeils} />
@@ -123,54 +125,72 @@ export default function Chat() {
 
       {/* Topbar */}
       <header style={styles.topbar}>
-        <button
-          style={styles.back}
-          onClick={() => (window.location.href = "/agents")}
-        >
-          ← Retour
-        </button>
+        <div style={styles.topLeft}>
+          <button
+            style={styles.back}
+            onClick={() => (window.location.href = "/agents")}
+            type="button"
+          >
+            ← Retour
+          </button>
 
-        <div style={styles.topCenter}>
-          <img src="/images/logolong.png" style={styles.brandLogo} alt="EvidencIA" />
-          <span style={styles.agentName}>
-            {agentPrompts[agent.slug].systemPrompt.replace("Tu es ", "")}
-          </span>
+          <div style={styles.brandWrap}>
+            <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
+            <span style={styles.agentTitle}>
+              {agentLabel}
+              <span style={styles.agentSubtitle}> — {agent.systemPrompt.replace(/^Tu es\s+/i, "")}</span>
+            </span>
+          </div>
         </div>
 
-        <button style={styles.logout} onClick={logout}>
-          Déconnexion
-        </button>
+        <div style={styles.topRight}>
+          <span style={styles.userChip}>{email}</span>
+          <button style={styles.logout} onClick={logout} type="button">
+            Déconnexion
+          </button>
+        </div>
       </header>
 
-      {/* Chat zone */}
-      <section style={styles.chat}>
-        <div style={styles.thread}>
+      {/* Layout chat : thread + composer */}
+      <section style={styles.shell}>
+        <div style={styles.thread} id="thread">
           {messages.map((m, i) => (
             <div
               key={i}
               style={{
-                ...styles.msg,
-                ...(m.role === "user" ? styles.user : styles.assistant),
+                ...styles.row,
+                justifyContent: m.role === "user" ? "flex-end" : "flex-start",
               }}
             >
-              {m.content}
+              <div
+                style={{
+                  ...styles.bubble,
+                  ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot),
+                }}
+              >
+                <div style={styles.bubbleRole}>
+                  {m.role === "user" ? "Vous" : agentLabel}
+                </div>
+                <div style={styles.bubbleText}>{m.content}</div>
+              </div>
             </div>
           ))}
-          <div ref={bottomRef} />
         </div>
 
-        <div style={styles.inputRow}>
+        <div style={styles.composer}>
           <textarea
             style={styles.textarea}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleEnter}
+            onKeyDown={onKeyDown}
             placeholder="Votre message…"
+            rows={2}
           />
           <button
-            style={styles.send}
-            disabled={sending}
+            style={canSend ? styles.sendBtn : styles.sendBtnDisabled}
             onClick={sendMessage}
+            disabled={!canSend}
+            type="button"
           >
             {sending ? "..." : "Envoyer"}
           </button>
@@ -180,131 +200,209 @@ export default function Chat() {
   );
 }
 
-//
-// STYLES
-//
 const styles = {
   page: {
     minHeight: "100vh",
+    height: "100vh",
     position: "relative",
-    color: "#fff",
-    fontFamily: "Segoe UI, Arial",
+    overflow: "hidden",
+    fontFamily: "Segoe UI, Arial, sans-serif",
+    color: "#ffffff", // IMPORTANT : force blanc partout
+    background: "linear-gradient(135deg,#05060a,#0a0d16)",
   },
 
   bg: { position: "absolute", inset: 0, zIndex: 0 },
-
   bgLogo: {
     position: "absolute",
     inset: 0,
     backgroundImage: "url('/images/logopc.png')",
+    backgroundRepeat: "no-repeat",
     backgroundSize: "contain",
     backgroundPosition: "center",
-    backgroundRepeat: "no-repeat",
-    opacity: 0.07,
+    opacity: 0.08,
   },
-
   bgVeils: {
     position: "absolute",
     inset: 0,
     background:
-      "linear-gradient(to bottom, rgba(0,0,0,.7), rgba(0,0,0,.3), rgba(0,0,0,.75))",
+      "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.18), rgba(0,0,0,0) 62%)," +
+      "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.14), rgba(0,0,0,0) 62%)," +
+      "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.26) 30%, rgba(0,0,0,.26) 70%, rgba(0,0,0,.66))",
   },
 
   topbar: {
-    zIndex: 10,
     position: "relative",
+    zIndex: 2,
+    height: 64,
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    padding: "14px 18px",
-    backdropFilter: "blur(12px)",
+    padding: "0 16px",
     background: "rgba(0,0,0,.35)",
+    backdropFilter: "blur(10px)",
     borderBottom: "1px solid rgba(255,255,255,.12)",
+    color: "#fff",
   },
+
+  topLeft: { display: "flex", alignItems: "center", gap: 14, minWidth: 0 },
 
   back: {
     color: "#fff",
-    fontWeight: 800,
-    background: "transparent",
-    border: "none",
+    fontWeight: 900,
+    fontSize: 13,
+    padding: "10px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.18)",
+    background: "rgba(0,0,0,.35)",
     cursor: "pointer",
+    whiteSpace: "nowrap",
   },
 
-  topCenter: {
+  brandWrap: {
     display: "flex",
     alignItems: "center",
-    gap: 10,
+    gap: 12,
+    minWidth: 0,
   },
 
-  brandLogo: { height: 26 },
-  agentName: { fontWeight: 900, fontSize: 14 },
+  brandLogo: { height: 26, width: "auto", display: "block" },
+
+  agentTitle: {
+    color: "#fff",
+    fontWeight: 900,
+    fontSize: 13,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+
+  agentSubtitle: {
+    color: "rgba(255,255,255,.75)",
+    fontWeight: 800,
+  },
+
+  topRight: { display: "flex", alignItems: "center", gap: 10 },
+
+  userChip: {
+    color: "rgba(255,255,255,.92)",
+    fontSize: 12,
+    fontWeight: 900,
+    padding: "8px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.35)",
+    maxWidth: 320,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
 
   logout: {
     color: "#fff",
-    background: "transparent",
-    border: "1px solid rgba(255,255,255,.3)",
-    padding: "6px 12px",
+    fontWeight: 900,
+    background: "rgba(0,0,0,.35)",
+    border: "1px solid rgba(255,255,255,.18)",
+    padding: "10px 14px",
     borderRadius: 999,
     cursor: "pointer",
-    fontWeight: 800,
   },
 
-  chat: {
+  // IMPORTANT : calc de hauteur correct + pas de "message coupé"
+  shell: {
     position: "relative",
     zIndex: 1,
-    padding: 20,
+    height: "calc(100vh - 64px)", // topbar = 64
     display: "flex",
     flexDirection: "column",
-    height: "calc(100vh - 70px)",
+    padding: 16,
+    gap: 12,
   },
 
   thread: {
     flex: 1,
     overflowY: "auto",
     display: "grid",
-    gap: 10,
-    paddingBottom: 10,
+    gap: 12,
+    padding: 12,
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.28)",
+    backdropFilter: "blur(10px)",
   },
 
-  msg: {
-    padding: "10px 14px",
-    borderRadius: 14,
+  row: { display: "flex" },
+
+  bubble: {
     maxWidth: "70%",
+    borderRadius: 16,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.12)",
+    boxShadow: "0 14px 40px rgba(0,0,0,.35)",
     whiteSpace: "pre-wrap",
-    fontWeight: 600,
+    lineHeight: 1.45,
+    color: "#fff",
   },
 
-  user: {
-    marginLeft: "auto",
-    background: "rgba(255,255,255,.15)",
+  bubbleUser: { background: "rgba(255,255,255,.12)" },
+  bubbleBot: { background: "rgba(0,0,0,.40)" },
+
+  bubbleRole: {
+    fontSize: 11,
+    fontWeight: 900,
+    color: "rgba(255,255,255,.80)", // BLANC (pas noir)
+    marginBottom: 6,
   },
 
-  assistant: {
-    marginRight: "auto",
-    background: "rgba(0,0,0,.35)",
+  bubbleText: {
+    fontSize: 14,
+    fontWeight: 800,
+    color: "rgba(255,255,255,.92)", // BLANC (pas noir)
   },
 
-  inputRow: {
+  composer: {
     display: "flex",
     gap: 10,
+    padding: 12,
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.28)",
+    backdropFilter: "blur(10px)",
   },
 
   textarea: {
     flex: 1,
-    padding: 12,
-    borderRadius: 12,
-    background: "rgba(0,0,0,.25)",
-    border: "1px solid rgba(255,255,255,.15)",
+    resize: "none",
+    padding: "12px 14px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.40)",
     color: "#fff",
+    outline: "none",
+    fontWeight: 800,
+    fontSize: 14,
+    lineHeight: 1.4,
+    minHeight: 44,
   },
 
-  send: {
+  sendBtn: {
     padding: "12px 16px",
-    borderRadius: 12,
-    background: "rgba(255,255,255,.25)",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.12)",
     color: "#fff",
     fontWeight: 900,
-    border: "none",
     cursor: "pointer",
+    minWidth: 110,
+  },
+
+  sendBtnDisabled: {
+    padding: "12px 16px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(255,255,255,.55)",
+    fontWeight: 900,
+    cursor: "not-allowed",
+    minWidth: 110,
   },
 };
