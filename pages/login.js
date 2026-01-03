@@ -32,8 +32,8 @@ export default function Login() {
       return;
     }
 
-window.location.href = "/agents";
-
+    // ✅ REDIRECTION UNIQUE ET PROPRE
+    window.location.href = "/agents";
   }
 
   return (
@@ -44,7 +44,7 @@ window.location.href = "/agents";
         <div style={styles.bgVeils} />
       </div>
 
-      {/* Retour site */}
+      {/* Retour site vitrine */}
       <a href="https://evidencia.me" style={styles.backLink}>
         ← Retour au site
       </a>
@@ -63,6 +63,7 @@ window.location.href = "/agents";
             </p>
           </header>
 
+          {/* ⚠️ FORM HTML STANDARD → Google enregistre le mdp */}
           <form onSubmit={onSubmit} style={styles.form}>
             <div style={styles.field}>
               <label style={styles.label}>Email</label>
@@ -71,6 +72,7 @@ window.location.href = "/agents";
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
+                autoComplete="username"
                 style={styles.input}
               />
             </div>
@@ -82,6 +84,7 @@ window.location.href = "/agents";
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
+                autoComplete="current-password"
                 style={styles.input}
               />
             </div>
@@ -109,8 +112,8 @@ const styles = {
     minHeight: "100vh",
     position: "relative",
     overflow: "hidden",
-    background: "#05060a",
-    color: "#fff",
+    background: "linear-gradient(135deg,#05060a,#0a0d16)",
+    color: "#eef2ff",
     fontFamily: "Segoe UI, Arial, sans-serif",
   },
 
@@ -133,7 +136,7 @@ const styles = {
     position: "absolute",
     inset: 0,
     background:
-      "linear-gradient(to bottom, rgba(0,0,0,.7), rgba(0,0,0,.4), rgba(0,0,0,.7))",
+      "linear-gradient(to bottom, rgba(0,0,0,.7), rgba(0,0,0,.35), rgba(0,0,0,.7))",
   },
 
   shell: {
@@ -147,23 +150,24 @@ const styles = {
 
   backLink: {
     position: "fixed",
-    top: 16,
-    left: 16,
+    top: 18,
+    left: 18,
     zIndex: 2,
-    color: "#fff",
+    color: "#eef2ff",
     textDecoration: "none",
-    fontWeight: 700,
+    fontWeight: 900,
     fontSize: 13,
   },
 
   card: {
     width: "100%",
     maxWidth: 420,
-    padding: 24,
-    borderRadius: 20,
+    padding: 26,
+    borderRadius: 24,
     background: "rgba(0,0,0,.55)",
     backdropFilter: "blur(14px)",
     border: "1px solid rgba(255,255,255,.12)",
+    boxShadow: "0 24px 70px rgba(0,0,0,.6)",
   },
 
   header: {
@@ -178,13 +182,14 @@ const styles = {
 
   title: {
     fontSize: 28,
-    fontWeight: 800,
+    fontWeight: 900,
     margin: 0,
   },
 
   subtitle: {
     fontSize: 14,
-    opacity: 0.8,
+    opacity: 0.75,
+    fontWeight: 800,
   },
 
   form: {
@@ -199,7 +204,7 @@ const styles = {
 
   label: {
     fontSize: 13,
-    fontWeight: 600,
+    fontWeight: 800,
   },
 
   input: {
@@ -207,15 +212,16 @@ const styles = {
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,.2)",
     background: "rgba(0,0,0,.4)",
-    color: "#fff",
+    color: "#eef2ff",
+    fontWeight: 800,
   },
 
   button: {
-    marginTop: 8,
+    marginTop: 6,
     padding: "12px",
     borderRadius: 999,
     border: "none",
-    fontWeight: 800,
+    fontWeight: 900,
     background:
       "linear-gradient(135deg, rgba(255,140,40,.4), rgba(80,120,255,.4))",
     color: "#fff",
@@ -223,11 +229,11 @@ const styles = {
   },
 
   alert: {
-    padding: 10,
+    padding: 12,
     background: "rgba(255,80,80,.15)",
-    borderRadius: 12,
+    borderRadius: 14,
     fontSize: 13,
-    fontWeight: 700,
+    fontWeight: 900,
   },
 
   footer: {
@@ -235,5 +241,6 @@ const styles = {
     textAlign: "center",
     fontSize: 12,
     opacity: 0.6,
+    fontWeight: 800,
   },
 };
