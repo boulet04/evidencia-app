@@ -1,19 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
-
-  useEffect(() => {
-    try {
-      const url = new URL(window.location.href);
-      const e = url.searchParams.get("email");
-      if (e) setEmail(e);
-    } catch (_) {}
-  }, []);
+  const [loading, setLoading] = useState(false);
 
   async function onSubmit(e) {
     e.preventDefault();
@@ -32,68 +24,55 @@ export default function Login() {
       return;
     }
 
-    // ✅ REDIRECTION UNIQUE ET PROPRE
     window.location.href = "/agents";
   }
 
   return (
     <main style={styles.page}>
-      {/* Background */}
+      {/* Fond */}
       <div style={styles.bg} aria-hidden="true">
         <div style={styles.bgLogo} />
         <div style={styles.bgVeils} />
       </div>
 
-      {/* Retour site vitrine */}
-      <a href="https://evidencia.me" style={styles.backLink}>
-        ← Retour au site
-      </a>
+      <a href="https://evidencia.me" style={styles.backLink}>← Retour au site</a>
 
       <section style={styles.shell}>
         <div style={styles.card}>
           <header style={styles.header}>
-            <img
-              src="/images/logolong.png"
-              alt="Evidenc’IA"
-              style={styles.logo}
-            />
+            <img src="/images/logolong.png" alt="logo" style={styles.logo} />
             <h1 style={styles.title}>Connexion</h1>
-            <p style={styles.subtitle}>
-              Accédez à vos agents Evidenc’IA.
-            </p>
+            <p style={styles.subtitle}>Accédez à vos agents Evidenc’IA.</p>
           </header>
 
-          {/* ⚠️ FORM HTML STANDARD → Google enregistre le mdp */}
           <form onSubmit={onSubmit} style={styles.form}>
-            <div style={styles.field}>
-              <label style={styles.label}>Email</label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                autoComplete="username"
-                style={styles.input}
-              />
-            </div>
 
-            <div style={styles.field}>
-              <label style={styles.label}>Mot de passe</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                autoComplete="current-password"
-                style={styles.input}
-              />
-            </div>
+            <label style={styles.label}>Email</label>
+            <input
+              type="email"
+              autoComplete="username"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              style={styles.input}
+              required
+            />
 
-            <button type="submit" disabled={loading} style={styles.button}>
-              {loading ? "Connexion..." : "Connexion"}
-            </button>
+            <label style={styles.label}>Mot de passe</label>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              style={styles.input}
+              required
+            />
 
             {msg && <div style={styles.alert}>{msg}</div>}
+
+            <button type="submit" disabled={loading} style={styles.button}>
+              {loading ? "Connexion…" : "Connexion"}
+            </button>
+
           </form>
 
           <footer style={styles.footer}>
@@ -105,30 +84,22 @@ export default function Login() {
   );
 }
 
-/* ================== STYLES ================== */
-
 const styles = {
   page: {
     minHeight: "100vh",
+    background: "linear-gradient(135deg,#05060a,#0a0d16)",
+    color: "#fff",
     position: "relative",
     overflow: "hidden",
-    background: "linear-gradient(135deg,#05060a,#0a0d16)",
-    color: "#eef2ff",
     fontFamily: "Segoe UI, Arial, sans-serif",
   },
 
-  bg: {
-    position: "absolute",
-    inset: 0,
-  },
+  bg: { position: "absolute", inset: 0 },
 
   bgLogo: {
     position: "absolute",
     inset: 0,
-    backgroundImage: "url('/images/logopc.png')",
-    backgroundRepeat: "no-repeat",
-    backgroundPosition: "center",
-    backgroundSize: "contain",
+    background: "url('/images/logopc.png') center/contain no-repeat",
     opacity: 0.08,
   },
 
@@ -136,111 +107,79 @@ const styles = {
     position: "absolute",
     inset: 0,
     background:
-      "linear-gradient(to bottom, rgba(0,0,0,.7), rgba(0,0,0,.35), rgba(0,0,0,.7))",
-  },
-
-  shell: {
-    position: "relative",
-    zIndex: 1,
-    minHeight: "100vh",
-    display: "grid",
-    placeItems: "center",
-    padding: 24,
+      "linear-gradient(to bottom, rgba(0,0,0,.7), rgba(0,0,0,.3), rgba(0,0,0,.7))",
   },
 
   backLink: {
-    position: "fixed",
-    top: 18,
-    left: 18,
-    zIndex: 2,
-    color: "#eef2ff",
+    position: "absolute",
+    top: 20,
+    left: 20,
+    color: "#fff",
+    fontWeight: 700,
     textDecoration: "none",
-    fontWeight: 900,
-    fontSize: 13,
+    zIndex: 3,
+  },
+
+  shell: {
+    minHeight: "100vh",
+    display: "grid",
+    placeItems: "center",
+    padding: 20,
   },
 
   card: {
     width: "100%",
     maxWidth: 420,
-    padding: 26,
-    borderRadius: 24,
+    padding: 24,
+    borderRadius: 22,
     background: "rgba(0,0,0,.55)",
-    backdropFilter: "blur(14px)",
+    backdropFilter: "blur(12px)",
     border: "1px solid rgba(255,255,255,.12)",
-    boxShadow: "0 24px 70px rgba(0,0,0,.6)",
   },
 
-  header: {
-    textAlign: "center",
-    marginBottom: 20,
-  },
+  header: { textAlign: "center", marginBottom: 18 },
 
-  logo: {
-    width: 180,
-    marginBottom: 12,
-  },
+  logo: { width: 180, marginBottom: 12 },
 
-  title: {
-    fontSize: 28,
-    fontWeight: 900,
-    margin: 0,
-  },
+  title: { fontSize: 28, fontWeight: 900 },
 
-  subtitle: {
-    fontSize: 14,
-    opacity: 0.75,
-    fontWeight: 800,
-  },
+  subtitle: { opacity: 0.8, marginBottom: 20 },
 
-  form: {
-    display: "grid",
-    gap: 14,
-  },
+  form: { display: "grid", gap: 12 },
 
-  field: {
-    display: "grid",
-    gap: 6,
-  },
-
-  label: {
-    fontSize: 13,
-    fontWeight: 800,
-  },
+  label: { fontWeight: 700 },
 
   input: {
     padding: "12px 14px",
-    borderRadius: 999,
+    background: "rgba(255,255,255,.08)",
+    borderRadius: 12,
     border: "1px solid rgba(255,255,255,.2)",
-    background: "rgba(0,0,0,.4)",
-    color: "#eef2ff",
-    fontWeight: 800,
+    color: "#fff",
   },
 
   button: {
-    marginTop: 6,
     padding: "12px",
-    borderRadius: 999,
+    background: "linear-gradient(135deg,rgba(255,140,40,.4),rgba(80,120,255,.4))",
+    borderRadius: 12,
     border: "none",
-    fontWeight: 900,
-    background:
-      "linear-gradient(135deg, rgba(255,140,40,.4), rgba(80,120,255,.4))",
     color: "#fff",
+    fontWeight: 900,
     cursor: "pointer",
+    marginTop: 8,
   },
 
   alert: {
-    padding: 12,
-    background: "rgba(255,80,80,.15)",
-    borderRadius: 14,
-    fontSize: 13,
-    fontWeight: 900,
+    background: "rgba(255,80,80,.2)",
+    padding: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(255,80,80,.4)",
+    fontWeight: 700,
   },
 
   footer: {
-    marginTop: 18,
+    marginTop: 16,
+    opacity: 0.6,
     textAlign: "center",
     fontSize: 12,
-    opacity: 0.6,
-    fontWeight: 800,
   },
 };
