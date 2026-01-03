@@ -32,7 +32,8 @@ export default function Login() {
       return;
     }
 
-    window.location.href = "/chat";
+window.location.href = "/agents";
+
   }
 
   return (
