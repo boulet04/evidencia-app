@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { supabase } from "../lib/supabaseClient";
 import agentPrompts from "../lib/agentPrompts";
 
@@ -8,42 +8,53 @@ export default function Chat() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const bottomRef = useRef(null);
+
+  // Auto-scroll
+  useEffect(() => {
+    if (bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages]);
 
   useEffect(() => {
     async function init() {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
+      // Auth
+      const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         window.location.href = "/login";
         return;
       }
-
       setEmail(session.user.email);
 
-      // récupération du slug
+      // Lire slug URL
       const url = new URL(window.location.href);
-      const slug = url.searchParams.get("agent");
+      const slugRaw = url.searchParams.get("agent");
 
-      if (!slug) {
-        window.location.href = "/agents";
-        return;
-      }
+      // Normalisation anti-accents / anti-majuscules
+      const slug = slugRaw
+        ?.trim()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/\p{Diacritic}/gu, "");
 
-      if (!agentPrompts[slug]) {
+      if (!slug || !agentPrompts[slug]) {
         alert("Agent introuvable.");
         window.location.href = "/agents";
         return;
       }
 
-      setAgent({ slug, ...agentPrompts[slug] });
+      // Charger agent
+      setAgent({
+        slug,
+        ...agentPrompts[slug],
+      });
 
-      // message d'accueil
+      // Message d'accueil
       setMessages([
         {
           role: "assistant",
-          content: `Bonjour, je suis ${slug}. Que puis-je faire pour vous ?`,
+          content: `Bonjour, je suis ${agentPrompts[slug].systemPrompt.replace("Tu es ", "")}. Comment puis-je vous aider ?`,
         },
       ]);
     }
@@ -51,13 +62,15 @@ export default function Chat() {
     init();
   }, []);
 
+  // Logout
   async function logout() {
     await supabase.auth.signOut();
     window.location.href = "/login";
   }
 
+  // Envoi message utilisateur
   async function sendMessage() {
-    if (!input.trim()) return;
+    if (!input.trim() || !agent) return;
 
     const userText = input.trim();
     setInput("");
@@ -79,15 +92,12 @@ export default function Chat() {
 
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: data.reply || "Erreur réponse." },
+        { role: "assistant", content: data.reply || "Erreur de réponse." },
       ]);
-    } catch (e) {
+    } catch (err) {
       setMessages((prev) => [
         ...prev,
-        {
-          role: "assistant",
-          content: "Je rencontre une erreur, veuillez réessayer.",
-        },
+        { role: "assistant", content: "Erreur interne. Réessayez plus tard." },
       ]);
     }
 
@@ -101,19 +111,17 @@ export default function Chat() {
     }
   }
 
-  if (!agent) {
-    return null;
-  }
+  if (!agent) return null;
 
   return (
     <main style={styles.page}>
-      {/* ARRIÈRE-PLAN */}
+      {/* Background */}
       <div style={styles.bg} aria-hidden="true">
         <div style={styles.bgLogo} />
         <div style={styles.bgVeils} />
       </div>
 
-      {/* BARRE DU HAUT */}
+      {/* Topbar */}
       <header style={styles.topbar}>
         <button
           style={styles.back}
@@ -123,12 +131,10 @@ export default function Chat() {
         </button>
 
         <div style={styles.topCenter}>
-          <img
-            src="/images/logolong.png"
-            style={styles.brandLogo}
-            alt="EvidencIA"
-          />
-          <span style={styles.agentName}>{agent.slug}</span>
+          <img src="/images/logolong.png" style={styles.brandLogo} alt="EvidencIA" />
+          <span style={styles.agentName}>
+            {agentPrompts[agent.slug].systemPrompt.replace("Tu es ", "")}
+          </span>
         </div>
 
         <button style={styles.logout} onClick={logout}>
@@ -136,7 +142,7 @@ export default function Chat() {
         </button>
       </header>
 
-      {/* ZONE DE CHAT */}
+      {/* Chat zone */}
       <section style={styles.chat}>
         <div style={styles.thread}>
           {messages.map((m, i) => (
@@ -150,6 +156,7 @@ export default function Chat() {
               {m.content}
             </div>
           ))}
+          <div ref={bottomRef} />
         </div>
 
         <div style={styles.inputRow}>
@@ -173,6 +180,9 @@ export default function Chat() {
   );
 }
 
+//
+// STYLES
+//
 const styles = {
   page: {
     minHeight: "100vh",
@@ -180,7 +190,9 @@ const styles = {
     color: "#fff",
     fontFamily: "Segoe UI, Arial",
   },
+
   bg: { position: "absolute", inset: 0, zIndex: 0 },
+
   bgLogo: {
     position: "absolute",
     inset: 0,
@@ -188,13 +200,14 @@ const styles = {
     backgroundSize: "contain",
     backgroundPosition: "center",
     backgroundRepeat: "no-repeat",
-    opacity: 0.08,
+    opacity: 0.07,
   },
+
   bgVeils: {
     position: "absolute",
     inset: 0,
     background:
-      "linear-gradient(to bottom, rgba(0,0,0,.6), rgba(0,0,0,.3), rgba(0,0,0,.7))",
+      "linear-gradient(to bottom, rgba(0,0,0,.7), rgba(0,0,0,.3), rgba(0,0,0,.75))",
   },
 
   topbar: {
@@ -224,17 +237,16 @@ const styles = {
   },
 
   brandLogo: { height: 26 },
-
   agentName: { fontWeight: 900, fontSize: 14 },
 
   logout: {
     color: "#fff",
-    fontWeight: 800,
     background: "transparent",
     border: "1px solid rgba(255,255,255,.3)",
     padding: "6px 12px",
     borderRadius: 999,
     cursor: "pointer",
+    fontWeight: 800,
   },
 
   chat: {
@@ -258,8 +270,8 @@ const styles = {
     padding: "10px 14px",
     borderRadius: 14,
     maxWidth: "70%",
-    fontWeight: 600,
     whiteSpace: "pre-wrap",
+    fontWeight: 600,
   },
 
   user: {
