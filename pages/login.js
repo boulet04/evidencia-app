@@ -7,7 +7,6 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
 
-  // Optionnel : préremplir l’email via ?email=
   useEffect(() => {
     try {
       const url = new URL(window.location.href);
@@ -38,13 +37,13 @@ export default function Login() {
 
   return (
     <main style={styles.page}>
-      {/* Fond “charte” : logo translucide + voiles */}
+      {/* Background */}
       <div style={styles.bg} aria-hidden="true">
         <div style={styles.bgLogo} />
         <div style={styles.bgVeils} />
       </div>
 
-      {/* Bouton retour site vitrine */}
+      {/* Retour site */}
       <a href="https://evidencia.me" style={styles.backLink}>
         ← Retour au site
       </a>
@@ -52,19 +51,14 @@ export default function Login() {
       <section style={styles.shell}>
         <div style={styles.card}>
           <header style={styles.header}>
-            <div style={styles.brandLine}>
-              {/* Remplace le texte par ton logo long */}
-              <img
-                src="/images/logolong.png" // si ton fichier s'appelle logolong.PNG, mets "/images/logolong.PNG"
-                alt="Evidenc’IA"
-                style={styles.brandLogo}
-              />
-              <span style={styles.brandSub}>Accès client</span>
-            </div>
-
+            <img
+              src="/images/logolong.png"
+              alt="Evidenc’IA"
+              style={styles.logo}
+            />
             <h1 style={styles.title}>Connexion</h1>
             <p style={styles.subtitle}>
-              Connectez-vous pour accéder à vos agents Evidenc’IA.
+              Accédez à vos agents Evidenc’IA.
             </p>
           </header>
 
@@ -73,12 +67,10 @@ export default function Login() {
               <label style={styles.label}>Email</label>
               <input
                 type="email"
-                required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                required
                 style={styles.input}
-                placeholder="login@email.com"
-                autoComplete="username"
               />
             </div>
 
@@ -86,12 +78,10 @@ export default function Login() {
               <label style={styles.label}>Mot de passe</label>
               <input
                 type="password"
-                required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                required
                 style={styles.input}
-                placeholder="••••••••••"
-                autoComplete="current-password"
               />
             </div>
 
@@ -99,15 +89,11 @@ export default function Login() {
               {loading ? "Connexion..." : "Connexion"}
             </button>
 
-            {msg ? <div style={styles.alert}>{msg}</div> : null}
-
-            <div style={styles.note}>
-              Si vous n’avez pas encore de compte, contactez Evidenc’IA.
-            </div>
+            {msg && <div style={styles.alert}>{msg}</div>}
           </form>
 
           <footer style={styles.footer}>
-            © {new Date().getFullYear()} Evidenc’IA — Tous droits réservés
+            © {new Date().getFullYear()} Evidenc’IA
           </footer>
         </div>
       </section>
@@ -115,47 +101,40 @@ export default function Login() {
   );
 }
 
+/* ================== STYLES ================== */
+
 const styles = {
   page: {
     minHeight: "100vh",
     position: "relative",
     overflow: "hidden",
+    background: "#05060a",
+    color: "#fff",
     fontFamily: "Segoe UI, Arial, sans-serif",
-    color: "#eef2ff",
-    background: "linear-gradient(135deg,#05060a,#0a0d16)",
   },
 
-  // --- Background layer ---
   bg: {
     position: "absolute",
     inset: 0,
-    zIndex: 0,
   },
 
-  // Logo en fond (ENTIER, translucide)
-  // Si tu veux encore + visible : monte opacity à 0.18 / 0.22
   bgLogo: {
     position: "absolute",
     inset: 0,
     backgroundImage: "url('/images/logopc.png')",
     backgroundRepeat: "no-repeat",
-    backgroundSize: "contain",
     backgroundPosition: "center",
-    opacity: 0.12,
-    filter: "contrast(1.08) saturate(1.08)",
+    backgroundSize: "contain",
+    opacity: 0.08,
   },
 
-  // Voiles + halos (j’ai légèrement allégé pour laisser voir le logo)
   bgVeils: {
     position: "absolute",
     inset: 0,
     background:
-      "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.22), rgba(0,0,0,0) 62%)," +
-      "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), rgba(0,0,0,0) 62%)," +
-      "linear-gradient(to bottom, rgba(0,0,0,.58), rgba(0,0,0,.18) 30%, rgba(0,0,0,.18) 70%, rgba(0,0,0,.62))",
+      "linear-gradient(to bottom, rgba(0,0,0,.7), rgba(0,0,0,.4), rgba(0,0,0,.7))",
   },
 
-  // --- Layout ---
   shell: {
     position: "relative",
     zIndex: 1,
@@ -170,133 +149,90 @@ const styles = {
     top: 16,
     left: 16,
     zIndex: 2,
-    display: "inline-flex",
-    alignItems: "center",
-    padding: "10px 14px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(0,0,0,.45)",
-    color: "#eef2ff",
+    color: "#fff",
     textDecoration: "none",
-    fontWeight: 900,
+    fontWeight: 700,
     fontSize: 13,
-    backdropFilter: "blur(10px)",
-    boxShadow: "0 14px 40px rgba(0,0,0,.45)",
   },
 
-  // --- Card ---
   card: {
     width: "100%",
-    maxWidth: 560,
-    borderRadius: 26,
+    maxWidth: 420,
     padding: 24,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "linear-gradient(135deg, rgba(0,0,0,.55), rgba(0,0,0,.35))",
-    boxShadow: "0 24px 70px rgba(0,0,0,.60)",
+    borderRadius: 20,
+    background: "rgba(0,0,0,.55)",
     backdropFilter: "blur(14px)",
+    border: "1px solid rgba(255,255,255,.12)",
   },
 
-  header: { marginBottom: 16 },
+  header: {
+    textAlign: "center",
+    marginBottom: 20,
+  },
 
-  brandLine: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
+  logo: {
+    width: 180,
     marginBottom: 12,
   },
 
-  // Logo long (remplace le texte)
-  brandLogo: {
-    height: 26,
-    width: "auto",
-    display: "block",
-    objectFit: "contain",
-    filter: "drop-shadow(0 10px 26px rgba(0,0,0,.55))",
-  },
-
-  brandSub: {
-    fontWeight: 900,
-    fontSize: 12,
-    color: "rgba(238,242,255,.72)",
-  },
-
   title: {
+    fontSize: 28,
+    fontWeight: 800,
     margin: 0,
-    fontSize: 34,
-    fontWeight: 900,
-    textShadow: "0 10px 30px rgba(0,0,0,.55)",
-    letterSpacing: 0.2,
   },
 
   subtitle: {
-    margin: "8px 0 0",
     fontSize: 14,
-    fontWeight: 800,
-    color: "rgba(238,242,255,.75)",
-    lineHeight: 1.45,
+    opacity: 0.8,
   },
 
-  // --- Form ---
-  form: { display: "grid", gap: 12, marginTop: 18 },
-  field: { display: "grid", gap: 8 },
+  form: {
+    display: "grid",
+    gap: 14,
+  },
+
+  field: {
+    display: "grid",
+    gap: 6,
+  },
 
   label: {
     fontSize: 13,
-    fontWeight: 900,
-    color: "rgba(238,242,255,.85)",
+    fontWeight: 600,
   },
 
   input: {
-    width: "100%",
     padding: "12px 14px",
     borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(0,0,0,.40)",
-    color: "#eef2ff",
-    outline: "none",
-    fontWeight: 800,
-    fontSize: 14,
-    boxShadow: "inset 0 1px 0 rgba(255,255,255,.06)",
+    border: "1px solid rgba(255,255,255,.2)",
+    background: "rgba(0,0,0,.4)",
+    color: "#fff",
   },
 
   button: {
-    marginTop: 6,
-    padding: "12px 14px",
+    marginTop: 8,
+    padding: "12px",
     borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.14)",
+    border: "none",
+    fontWeight: 800,
     background:
-      "linear-gradient(135deg, rgba(255,140,40,.22), rgba(80,120,255,.14))",
-    color: "#eef2ff",
-    fontWeight: 900,
-    fontSize: 14,
+      "linear-gradient(135deg, rgba(255,140,40,.4), rgba(80,120,255,.4))",
+    color: "#fff",
     cursor: "pointer",
-    boxShadow: "0 18px 45px rgba(0,0,0,.55)",
   },
 
   alert: {
-    padding: 12,
-    borderRadius: 16,
-    border: "1px solid rgba(255,140,40,.25)",
-    background: "rgba(255,140,40,.10)",
-    fontWeight: 900,
+    padding: 10,
+    background: "rgba(255,80,80,.15)",
+    borderRadius: 12,
     fontSize: 13,
-  },
-
-  note: {
-    marginTop: 2,
-    fontSize: 12,
-    fontWeight: 800,
-    color: "rgba(238,242,255,.72)",
+    fontWeight: 700,
   },
 
   footer: {
     marginTop: 18,
-    paddingTop: 14,
-    borderTop: "1px solid rgba(255,255,255,.10)",
     textAlign: "center",
     fontSize: 12,
-    fontWeight: 800,
-    color: "rgba(238,242,255,.60)",
+    opacity: 0.6,
   },
 };
