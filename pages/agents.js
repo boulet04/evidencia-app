@@ -16,6 +16,7 @@ export default function Agents() {
         return;
       }
       if (!mounted) return;
+
       setEmail(session.user.email || "");
 
       const { data, error } = await supabase
@@ -24,7 +25,7 @@ export default function Agents() {
         .order("name", { ascending: true });
 
       if (!mounted) return;
-      setAgents(error ? [] : (data || []));
+      setAgents(error ? [] : data || []);
       setLoading(false);
     }
 
@@ -47,15 +48,25 @@ export default function Agents() {
 
   return (
     <main style={styles.page}>
+      {/* BACKGROUND */}
       <div style={styles.bg} aria-hidden="true">
         <div style={styles.bgLogo} />
         <div style={styles.bgVeils} />
       </div>
 
+      {/* BOUTON RETOUR */}
+      <button
+        style={styles.backBtn}
+        onClick={() => window.location.href = "/chat"}
+      >
+        ← Retour
+      </button>
+
+      {/* TOP BAR */}
       <header style={styles.topbar}>
         <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
         <div style={styles.topRight}>
-          <span style={styles.userChip}>{email || "Connecté"}</span>
+          <span style={styles.userChip}>{email}</span>
           <button onClick={logout} style={styles.btnGhost}>Déconnexion</button>
         </div>
       </header>
@@ -70,18 +81,15 @@ export default function Agents() {
               key={a.id}
               style={styles.card}
               onClick={() =>
-                (window.location.href = `/chat?agent=${encodeURIComponent(a.slug)}`)
+                window.location.href = `/chat?agent=${encodeURIComponent(a.slug)}`
               }
             >
-              <div style={styles.avatarWrap}>
-                {a.avatar_url ? (
-                  <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
-                ) : (
-                  <div style={styles.avatarFallback}>
-                    {a.name?.[0] || "A"}
-                  </div>
-                )}
-              </div>
+              {/* AVATAR BIEN VISIBLE */}
+              <img
+                src={a.avatar_url}
+                alt={a.name}
+                style={styles.avatar}
+              />
 
               <div style={styles.meta}>
                 <div style={styles.name}>{a.name}</div>
@@ -103,7 +111,7 @@ const styles = {
     position: "relative",
     overflow: "hidden",
     fontFamily: "Segoe UI, Arial, sans-serif",
-    color: "#eef2ff",
+    color: "#fff",
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
   },
 
@@ -125,7 +133,23 @@ const styles = {
     background:
       "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.22), rgba(0,0,0,0) 62%)," +
       "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), rgba(0,0,0,0) 62%)," +
-      "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22) 30%, rgba(0,0,0,.22) 70%, rgba(0,0,0,.66))",
+      "linear-gradient(to bottom, rgba(0,0,0,.65), rgba(0,0,0,.25) 30%, rgba(0,0,0,.25) 70%, rgba(0,0,0,.70))",
+  },
+
+  /* RETOUR */
+  backBtn: {
+    position: "fixed",
+    top: 16,
+    left: 16,
+    zIndex: 3,
+    padding: "10px 14px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.2)",
+    background: "rgba(0,0,0,.45)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    backdropFilter: "blur(10px)",
   },
 
   topbar: {
@@ -135,7 +159,7 @@ const styles = {
     display: "flex",
     justifyContent: "space-between",
     borderBottom: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(0,0,0,.28)",
+    background: "rgba(0,0,0,.25)",
     backdropFilter: "blur(10px)",
   },
 
@@ -148,8 +172,8 @@ const styles = {
     fontWeight: 900,
     padding: "8px 12px",
     borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.12)",
     background: "rgba(0,0,0,.35)",
+    border: "1px solid rgba(255,255,255,.12)",
   },
 
   btnGhost: {
@@ -165,67 +189,55 @@ const styles = {
   shell: {
     position: "relative",
     zIndex: 1,
-    padding: 18,
+    padding: 24,
     maxWidth: 1100,
     margin: "0 auto",
   },
 
-  h1: { fontSize: 30, fontWeight: 900 },
-  p: { marginBottom: 16, fontSize: 14, fontWeight: 800, opacity: 0.8 },
+  h1: { fontSize: 32, fontWeight: 900 },
+  p: { marginBottom: 20, fontSize: 14, fontWeight: 800, opacity: 0.8 },
 
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))",
-    gap: 14,
+    gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))",
+    gap: 16,
   },
 
   card: {
     display: "flex",
-    gap: 14,
-    padding: 16,
-    borderRadius: 22,
+    alignItems: "center",
+    gap: 16,
+    padding: 18,
+    borderRadius: 24,
     border: "1px solid rgba(255,255,255,.18)",
     background: "rgba(0,0,0,.55)",
-    backdropFilter: "blur(12px)",
+    backdropFilter: "blur(14px)",
     cursor: "pointer",
   },
 
-  avatarWrap: { width: 56, height: 56 },
-
+  /* AVATAR CORRIGÉ */
   avatar: {
-    width: 56,
-    height: 56,
+    width: 72,
+    height: 72,
     borderRadius: "50%",
     objectFit: "cover",
-  },
-
-  avatarFallback: {
-    width: 56,
-    height: 56,
-    borderRadius: "50%",
-    display: "grid",
-    placeItems: "center",
-    fontWeight: 900,
-    color: "#fff",
-    background: "rgba(255,255,255,.15)",
+    border: "2px solid rgba(255,255,255,.35)",
+    flexShrink: 0,
   },
 
   meta: { display: "grid", gap: 6 },
 
-  // ✅ PRÉNOM BIEN VISIBLE
   name: {
     fontSize: 18,
     fontWeight: 900,
-    color: "#ffffff",
-    letterSpacing: 0.3,
-    textShadow: "0 2px 12px rgba(0,0,0,.65)",
+    color: "#fff",
+    textShadow: "0 2px 12px rgba(0,0,0,.6)",
   },
 
   desc: {
     fontSize: 13,
     fontWeight: 800,
     color: "rgba(238,242,255,.75)",
-    lineHeight: 1.35,
   },
 
   center: {
