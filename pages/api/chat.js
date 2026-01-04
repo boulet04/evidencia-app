@@ -1,8 +1,9 @@
-import { Mistral } from "@mistralai/mistralai";
+// pages/api/chat.js
+import Mistral from "@mistralai/mistralai";
 import agentPrompts from "../../lib/agentPrompts";
 
-const mistral = new Mistral({
-  apiKey: process.env.MISTRAL_API_KEY ?? "",
+const client = new Mistral({
+  apiKey: process.env.MISTRAL_API_KEY,
 });
 
 export default async function handler(req, res) {
@@ -11,12 +12,7 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Méthode non autorisée." });
     }
 
-    // Sécurité : clé manquante
-    if (!process.env.MISTRAL_API_KEY) {
-      return res.status(500).json({ error: "MISTRAL_API_KEY manquante (Vercel > Settings > Env Vars)." });
-    }
-
-    const { message, agentSlug } = req.body || {};
+    const { agentSlug, messages } = req.body || {};
 
     if (!agentSlug) {
       return res.status(400).json({ error: "Aucun agent sélectionné." });
@@ -27,21 +23,30 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "Agent introuvable." });
     }
 
-    if (!message || message.trim().length === 0) {
-      return res.status(400).json({ error: "Message vide." });
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: "Historique manquant." });
     }
 
-    const result = await mistral.chat.complete({
+    // Sécurité : on nettoie les rôles
+    const cleanedMessages = messages
+      .filter((m) => m && m.role && m.content)
+      .map((m) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: String(m.content),
+      }));
+
+    const completion = await client.chat.complete({
       model: "mistral-small-latest",
+      temperature: 0.6,
       messages: [
         { role: "system", content: agent.systemPrompt },
-        { role: "user", content: message },
+        ...cleanedMessages,
       ],
-      temperature: 0.7,
     });
 
     const reply =
-      result?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
+      completion?.choices?.[0]?.message?.content?.trim() ||
+      "Je n’ai pas de réponse pour le moment.";
 
     return res.status(200).json({ reply });
   } catch (err) {
