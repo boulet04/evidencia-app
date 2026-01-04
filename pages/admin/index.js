@@ -3,31 +3,100 @@ import { supabase } from "../../lib/supabaseClient";
 
 export default function Admin() {
   const [loading, setLoading] = useState(true);
-  const [me, setMe] = useState(null); // { user_id, role, email }
-  const [users, setUsers] = useState([]); // profiles list
-  const [agents, setAgents] = useState([]); // agents list
-  const [userAgents, setUserAgents] = useState([]); // mapping rows
+
+  const [me, setMe] = useState(null);
+
+  // Clients + users
+  const [clients, setClients] = useState([]); // [{id, name, ...}]
+  const [clientUsers, setClientUsers] = useState([]); // [{client_id, user_id}]
+  const [profiles, setProfiles] = useState([]); // [{user_id, email, role, ...}]
+
+  const [selectedClientId, setSelectedClientId] = useState("");
   const [selectedUserId, setSelectedUserId] = useState("");
+
+  // Agents + mapping
+  const [agents, setAgents] = useState([]);
+  const [userAgents, setUserAgents] = useState([]);
+
   const [q, setQ] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
 
   const isAdmin = useMemo(() => me?.role === "admin", [me]);
 
-  const usersFiltered = useMemo(() => {
-    const s = q.trim().toLowerCase();
-    if (!s) return users;
-    return users.filter((u) => {
-      const email = (u.email || "").toLowerCase();
-      const uid = (u.user_id || "").toLowerCase();
-      return email.includes(s) || uid.includes(s);
-    });
-  }, [users, q]);
+  function normalizeImgSrc(src) {
+    const s = (src || "").trim();
+    if (!s) return "";
+    if (s.startsWith("http://") || s.startsWith("https://")) return s;
+    if (s.startsWith("/")) return s;
+    return "/" + s;
+  }
 
-  const selectedUser = useMemo(
-    () => users.find((u) => u.user_id === selectedUserId) || null,
-    [users, selectedUserId]
+  function clientLabel(c) {
+    return (c?.name || c?.customer_name || c?.title || "").trim() || "Client";
+  }
+
+  const clientTree = useMemo(() => {
+    // Structure : client -> users (profiles)
+    const profByUserId = new Map();
+    for (const p of profiles) profByUserId.set(p.user_id, p);
+
+    const usersByClient = new Map();
+    for (const cu of clientUsers) {
+      if (!usersByClient.has(cu.client_id)) usersByClient.set(cu.client_id, []);
+      const prof = profByUserId.get(cu.user_id);
+      usersByClient.get(cu.client_id).push({
+        user_id: cu.user_id,
+        email: prof?.email || "",
+        role: prof?.role || "user",
+      });
+    }
+
+    // Tri users : admin en bas, sinon par email
+    for (const [cid, arr] of usersByClient.entries()) {
+      arr.sort((a, b) => {
+        if (a.role === "admin" && b.role !== "admin") return 1;
+        if (a.role !== "admin" && b.role === "admin") return -1;
+        return (a.email || "").localeCompare(b.email || "");
+      });
+      usersByClient.set(cid, arr);
+    }
+
+    const result = (clients || []).map((c) => ({
+      ...c,
+      label: clientLabel(c),
+      users: usersByClient.get(c.id) || [],
+    }));
+
+    // filtre recherche (sur client + email + user_id)
+    const s = q.trim().toLowerCase();
+    if (!s) return result;
+
+    return result
+      .map((c) => {
+        const users = (c.users || []).filter((u) => {
+          const email = (u.email || "").toLowerCase();
+          const uid = (u.user_id || "").toLowerCase();
+          return email.includes(s) || uid.includes(s);
+        });
+        const clientMatch = (c.label || "").toLowerCase().includes(s);
+        if (!clientMatch && users.length === 0) return null;
+        return { ...c, users: clientMatch ? c.users : users };
+      })
+      .filter(Boolean);
+  }, [clients, clientUsers, profiles, q]);
+
+  const selectedClient = useMemo(
+    () => clients.find((c) => c.id === selectedClientId) || null,
+    [clients, selectedClientId]
   );
+
+  const selectedUser = useMemo(() => {
+    const p = profiles.find((x) => x.user_id === selectedUserId) || null;
+    const email = p?.email || "";
+    const role = p?.role || "user";
+    return selectedUserId ? { user_id: selectedUserId, email, role } : null;
+  }, [profiles, selectedUserId]);
 
   const assignedSet = useMemo(() => {
     const set = new Set();
@@ -42,6 +111,7 @@ export default function Admin() {
 
     async function boot() {
       setMsg("");
+
       const {
         data: { session },
       } = await supabase.auth.getSession();
@@ -54,13 +124,13 @@ export default function Admin() {
       // Profil du user connecté
       const { data: myProfile1, error: myErr1 } = await supabase
         .from("profiles")
-        .select("user_id, role, email")
+        .select("*")
         .eq("user_id", session.user.id)
         .maybeSingle();
 
-      // ✅ CORRECTIF : si profil absent, on tente de le créer (avec id généré) puis on le relit
       let myProfile = myProfile1;
 
+      // si profil absent, tente de le créer
       if (!myErr1 && !myProfile) {
         const newRow = {
           user_id: session.user.id,
@@ -86,7 +156,7 @@ export default function Admin() {
 
         const { data: myProfile2, error: myErr2 } = await supabase
           .from("profiles")
-          .select("user_id, role, email")
+          .select("*")
           .eq("user_id", session.user.id)
           .maybeSingle();
 
@@ -112,7 +182,6 @@ export default function Admin() {
         return;
       }
 
-      // (petit fallback pour l’admin connecté si profiles.email est vide)
       const myProfileSafe = {
         ...myProfile,
         email: myProfile.email || session.user.email || null,
@@ -126,8 +195,19 @@ export default function Admin() {
         return;
       }
 
-      // Charger users
-      const { data: u, error: uErr } = await supabase
+      // Charger clients
+      const { data: c, error: cErr } = await supabase
+        .from("clients")
+        .select("*")
+        .order("name", { ascending: true });
+
+      // Charger client_users
+      const { data: cu, error: cuErr } = await supabase
+        .from("client_users")
+        .select("client_id, user_id");
+
+      // Charger profiles (pour email/role)
+      const { data: p, error: pErr } = await supabase
         .from("profiles")
         .select("user_id, email, role")
         .order("email", { ascending: true });
@@ -146,13 +226,24 @@ export default function Admin() {
 
       if (!mounted) return;
 
-      setUsers(uErr ? [] : u || []);
+      const clientsSafe = cErr ? [] : c || [];
+      const clientUsersSafe = cuErr ? [] : cu || [];
+      const profilesSafe = pErr ? [] : p || [];
+
+      setClients(clientsSafe);
+      setClientUsers(clientUsersSafe);
+      setProfiles(profilesSafe);
+
       setAgents(aErr ? [] : a || []);
       setUserAgents(uaErr ? [] : ua || []);
 
-      // Sélection auto du premier user non-admin si possible
-      const firstUser = (u || []).find((x) => x.role !== "admin") || (u || [])[0];
-      setSelectedUserId(firstUser?.user_id || "");
+      // Sélection auto : 1er client, puis 1er user du client
+      const firstClientId = clientsSafe[0]?.id || "";
+      setSelectedClientId(firstClientId);
+
+      const firstUserForClient =
+        clientUsersSafe.find((x) => x.client_id === firstClientId)?.user_id || "";
+      setSelectedUserId(firstUserForClient);
 
       setLoading(false);
     }
@@ -162,6 +253,14 @@ export default function Admin() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    // quand on change de client : sélectionner automatiquement le premier user du client
+    if (!selectedClientId) return;
+    const firstUserForClient =
+      clientUsers.find((x) => x.client_id === selectedClientId)?.user_id || "";
+    setSelectedUserId(firstUserForClient);
+  }, [selectedClientId]); // volontaire : pas clientUsers ici (sinon reselect trop souvent)
 
   async function logout() {
     await supabase.auth.signOut();
@@ -179,7 +278,6 @@ export default function Admin() {
 
     try {
       if (already) {
-        // Désassigner
         const { error } = await supabase
           .from("user_agents")
           .delete()
@@ -189,10 +287,11 @@ export default function Admin() {
         if (error) throw error;
 
         setUserAgents((prev) =>
-          prev.filter((r) => !(r.user_id === selectedUserId && r.agent_id === agentId))
+          prev.filter(
+            (r) => !(r.user_id === selectedUserId && r.agent_id === agentId)
+          )
         );
       } else {
-        // Assigner
         const { data, error } = await supabase
           .from("user_agents")
           .insert({ user_id: selectedUserId, agent_id: agentId })
@@ -251,35 +350,65 @@ export default function Admin() {
       </header>
 
       <section style={styles.layout}>
-        {/* USERS */}
+        {/* CLIENTS + USERS */}
         <aside style={styles.panel}>
           <div style={styles.panelHeader}>
-            <div style={styles.panelTitle}>Utilisateurs</div>
+            <div style={styles.panelTitle}>Clients</div>
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Rechercher email / id…"
+              placeholder="Rechercher client / email / id…"
               style={styles.search}
             />
           </div>
 
           <div style={styles.list}>
-            {usersFiltered.map((u) => {
-              const active = u.user_id === selectedUserId;
+            {clientTree.map((c) => {
+              const activeClient = c.id === selectedClientId;
               return (
-                <button
-                  key={u.user_id}
-                  onClick={() => setSelectedUserId(u.user_id)}
-                  style={{ ...styles.item, ...(active ? styles.itemActive : null) }}
+                <div
+                  key={c.id}
+                  style={{
+                    ...styles.clientBlock,
+                    ...(activeClient ? styles.clientBlockActive : null),
+                  }}
                 >
-                  <div style={styles.itemTop}>
-                    <div style={styles.itemEmail}>
-                      {u.email || "(email non renseigné)"}
+                  <button
+                    onClick={() => setSelectedClientId(c.id)}
+                    style={styles.clientHeaderBtn}
+                    title={c.label}
+                  >
+                    <div style={styles.clientName}>{c.label}</div>
+                    <div style={styles.clientCount}>
+                      {c.users?.length || 0} user(s)
                     </div>
-                    <div style={styles.badge}>{u.role}</div>
+                  </button>
+
+                  <div style={styles.clientUsers}>
+                    {(c.users || []).map((u) => {
+                      const activeUser = u.user_id === selectedUserId;
+                      return (
+                        <button
+                          key={u.user_id}
+                          onClick={() => {
+                            setSelectedClientId(c.id);
+                            setSelectedUserId(u.user_id);
+                          }}
+                          style={{
+                            ...styles.userRow,
+                            ...(activeUser ? styles.userRowActive : null),
+                          }}
+                          title={u.email || u.user_id}
+                        >
+                          <div style={styles.userEmail}>
+                            {u.email || "(email non renseigné)"}
+                          </div>
+                          <div style={styles.userBadge}>{u.role}</div>
+                        </button>
+                      );
+                    })}
                   </div>
-                  <div style={styles.itemId}>{u.user_id}</div>
-                </button>
+                </div>
               );
             })}
           </div>
@@ -291,18 +420,19 @@ export default function Admin() {
             <div>
               <div style={styles.panelTitle}>Assignation agents</div>
               <div style={styles.sub}>
-                {selectedUser ? (
-                  <>
-                    <div>
-                      <b>Utilisateur :</b> {selectedUser.email || selectedUser.user_id}
-                    </div>
-                    <div>
-                      <b>user_id :</b> {selectedUser.user_id}
-                    </div>
-                  </>
-                ) : (
-                  "Sélectionne un utilisateur."
-                )}
+                <div>
+                  <b>Client :</b>{" "}
+                  {selectedClient ? clientLabel(selectedClient) : "-"}
+                </div>
+                <div>
+                  <b>Utilisateur :</b>{" "}
+                  {selectedUser
+                    ? selectedUser.email || selectedUser.user_id
+                    : "-"}
+                </div>
+                <div>
+                  <b>user_id :</b> {selectedUser ? selectedUser.user_id : "-"}
+                </div>
               </div>
             </div>
 
@@ -314,6 +444,8 @@ export default function Admin() {
           <div style={styles.grid}>
             {agents.map((a) => {
               const checked = assignedSet.has(a.id);
+              const src = normalizeImgSrc(a.avatar_url) || "/images/logopc.png";
+
               return (
                 <button
                   key={a.id}
@@ -325,12 +457,16 @@ export default function Admin() {
                   disabled={!selectedUserId}
                   title={a.slug}
                 >
-                  {/* ✅ MODIF demandée : dans l’admin, on affiche uniquement la tête */}
-                  <div style={{ ...styles.agentTop, justifyContent: "center" }}>
+                  <div style={styles.agentTopCenter}>
                     <img
-                      src={a.avatar_url || "/images/logopc.png"}
+                      src={src}
                       alt={a.name}
                       style={styles.avatar}
+                      loading="lazy"
+                      onError={(e) => {
+                        e.currentTarget.onerror = null;
+                        e.currentTarget.src = "/images/logopc.png";
+                      }}
                     />
                   </div>
 
@@ -388,7 +524,7 @@ const styles = {
   },
   layout: {
     display: "grid",
-    gridTemplateColumns: "360px 1fr",
+    gridTemplateColumns: "420px 1fr",
     gap: 14,
     padding: 14,
   },
@@ -412,15 +548,9 @@ const styles = {
     alignItems: "flex-start",
   },
   panelTitle: { fontWeight: 900, fontSize: 13 },
-  sub: {
-    marginTop: 6,
-    opacity: 0.8,
-    fontWeight: 700,
-    fontSize: 12,
-    lineHeight: 1.4,
-  },
+  sub: { marginTop: 6, opacity: 0.8, fontWeight: 700, fontSize: 12, lineHeight: 1.4 },
   search: {
-    width: 190,
+    width: 210,
     padding: "10px 12px",
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,.12)",
@@ -431,38 +561,87 @@ const styles = {
     fontSize: 12,
   },
   list: { padding: 10, overflowY: "auto", display: "grid", gap: 10 },
-  item: {
-    textAlign: "left",
-    width: "100%",
-    padding: 12,
+
+  clientBlock: {
     borderRadius: 18,
     border: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(0,0,0,.28)",
-    color: "#eef2ff",
-    cursor: "pointer",
-    display: "grid",
-    gap: 6,
+    background: "rgba(0,0,0,.22)",
+    overflow: "hidden",
   },
-  itemActive: {
-    background: "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
+  clientBlockActive: {
     border: "1px solid rgba(255,140,40,.18)",
+    background: "linear-gradient(135deg, rgba(255,140,40,.10), rgba(80,120,255,.08))",
   },
-  itemTop: {
+  clientHeaderBtn: {
+    width: "100%",
+    textAlign: "left",
+    padding: 12,
+    border: "none",
+    cursor: "pointer",
+    background: "rgba(0,0,0,.20)",
+    color: "#eef2ff",
     display: "flex",
     justifyContent: "space-between",
     gap: 10,
     alignItems: "center",
   },
-  itemEmail: { fontWeight: 900, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis" },
-  badge: {
+  clientName: {
+    fontWeight: 900,
+    fontSize: 13,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    minWidth: 0,
+  },
+  clientCount: {
+    fontWeight: 900,
+    fontSize: 11,
+    opacity: 0.7,
+    whiteSpace: "nowrap",
+  },
+
+  clientUsers: {
+    padding: 10,
+    display: "grid",
+    gap: 8,
+    background: "rgba(0,0,0,.12)",
+  },
+  userRow: {
+    width: "100%",
+    textAlign: "left",
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.22)",
+    color: "#eef2ff",
+    cursor: "pointer",
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 10,
+    alignItems: "center",
+  },
+  userRowActive: {
+    border: "1px solid rgba(255,140,40,.20)",
+    background: "rgba(255,140,40,.08)",
+  },
+  userEmail: {
+    fontWeight: 900,
+    fontSize: 12,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    minWidth: 0,
+  },
+  userBadge: {
     fontSize: 11,
     fontWeight: 900,
     padding: "6px 10px",
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,.12)",
     background: "rgba(255,255,255,.06)",
+    whiteSpace: "nowrap",
   },
-  itemId: { fontSize: 11, opacity: 0.7, fontWeight: 700 },
+
   grid: {
     padding: 14,
     overflowY: "auto",
@@ -486,8 +665,8 @@ const styles = {
     border: "1px solid rgba(255,140,40,.25)",
     background: "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
   },
-  agentTop: { display: "flex", gap: 12, alignItems: "center" },
-  avatar: { width: 56, height: 56, borderRadius: "50%", objectFit: "cover" },
+  agentTopCenter: { display: "flex", justifyContent: "center", alignItems: "center", paddingTop: 4 },
+  avatar: { width: 74, height: 74, borderRadius: "50%", objectFit: "cover" },
   checkRow: { display: "flex", justifyContent: "flex-end" },
   check: {
     fontWeight: 900,
