@@ -357,17 +357,26 @@ export default function Chat() {
     });
 
     // Si c'est le premier message user, on met un title
-    const isFirstUser =
-      messages.filter((m) => m.role === "user").length === 0;
+    const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
     const titleMaybe = isFirstUser
       ? formatTitleFromFirstUserMessage(userText)
       : null;
+
+    // ✅ MODIF UNIQUEMENT ICI : récupérer le token Supabase pour /api/chat
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const token = session?.access_token;
 
     // Appel IA
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // ✅ MODIF UNIQUEMENT ICI : passer le token
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
           message: userText,
           agentSlug: agent.slug,
@@ -417,7 +426,11 @@ export default function Chat() {
         content: "Erreur interne. Réessayez plus tard.",
       });
 
-      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
+      await touchConversation({
+        uid: userId,
+        convId: conversationId,
+        titleMaybe,
+      });
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
 
