@@ -4,7 +4,6 @@ import { supabase } from "../lib/supabaseClient";
 
 export default function Chat() {
   const [loading, setLoading] = useState(true);
-
   const [email, setEmail] = useState("");
   const [userId, setUserId] = useState("");
 
@@ -24,144 +23,105 @@ export default function Chat() {
     [input, sending]
   );
 
-  /* ================= HELPERS ================= */
-
-  function safeDecode(v) {
-    try {
-      return decodeURIComponent(v || "");
-    } catch {
-      return v || "";
-    }
-  }
-
-  function formatTitleFromFirstUserMessage(text) {
-    const t = (text || "").trim().replace(/\s+/g, " ");
-    if (!t) return "Nouvelle conversation";
-    return t.length > 42 ? t.slice(0, 42) + "…" : t;
-  }
-
   function scrollToBottom() {
     requestAnimationFrame(() => {
-      if (threadRef.current) {
-        threadRef.current.scrollTop = threadRef.current.scrollHeight;
-      }
-    });
-  }
-
-  /* ================= SUPABASE ================= */
-
-  async function fetchAgent(slug) {
-    const { data, error } = await supabase
-      .from("agents")
-      .select("slug, name, description, avatar_url")
-      .eq("slug", slug)
-      .maybeSingle();
-
-    return error ? null : data;
-  }
-
-  async function fetchHistory({ uid, agentSlug }) {
-    const { data, error } = await supabase
-      .from("conversations")
-      .select("id, title, updated_at")
-      .eq("user_id", uid)
-      .eq("agent_slug", agentSlug)
-      .order("updated_at", { ascending: false })
-      .limit(10);
-
-    return error ? [] : data;
-  }
-
-  async function fetchMessages({ convId }) {
-    const { data, error } = await supabase
-      .from("messages")
-      .select("id, role, content, created_at")
-      .eq("conversation_id", convId)
-      .order("created_at", { ascending: true });
-
-    return error ? [] : data;
-  }
-
-  async function createConversation({ uid, agentSlug, title }) {
-    const { data, error } = await supabase
-      .from("conversations")
-      .insert({
-        user_id: uid,
-        agent_slug: agentSlug,
-        title: title || "Nouvelle conversation",
-      })
-      .select("id")
-      .single();
-
-    return error ? null : data.id;
-  }
-
-  async function touchConversation({ uid, convId, titleMaybe }) {
-    const patch = { updated_at: new Date().toISOString() };
-    if (titleMaybe) patch.title = titleMaybe;
-
-    await supabase
-      .from("conversations")
-      .update(patch)
-      .eq("id", convId)
-      .eq("user_id", uid);
-  }
-
-  async function insertMessage({ convId, role, content }) {
-    await supabase.from("messages").insert({
-      conversation_id: convId,
-      role,
-      content,
+      threadRef.current?.scrollTo(0, threadRef.current.scrollHeight);
     });
   }
 
   /* ================= BOOT ================= */
-
   useEffect(() => {
     let mounted = true;
 
     async function boot() {
-      const { data } = await supabase.auth.getSession();
-      if (!data.session) {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session) {
         window.location.href = "/login";
         return;
       }
 
-      const uid = data.session.user.id;
+      const uid = session.user.id;
       setUserId(uid);
-      setEmail(data.session.user.email || "");
+      setEmail(session.user.email || "");
 
       const url = new URL(window.location.href);
-      const slug = safeDecode(url.searchParams.get("agent")).toLowerCase();
-      if (!slug) return (window.location.href = "/agents");
+      const slug = url.searchParams.get("agent");
 
-      const a = await fetchAgent(slug);
-      if (!a) return (window.location.href = "/agents");
-      setAgent(a);
+      if (!slug) {
+        window.location.href = "/agents";
+        return;
+      }
 
-      const historyData = await fetchHistory({ uid, agentSlug: a.slug });
-      setHistory(historyData);
+      const { data: agentData } = await supabase
+        .from("agents")
+        .select("*")
+        .eq("slug", slug)
+        .single();
 
-      let convId =
-        url.searchParams.get("c") ||
-        (historyData[0] ? historyData[0].id : null);
+      if (!agentData) {
+        window.location.href = "/agents";
+        return;
+      }
+
+      setAgent(agentData);
+
+      // Historique
+      const { data: hist } = await supabase
+        .from("conversations")
+        .select("id, title, updated_at")
+        .eq("user_id", uid)
+        .eq("agent_slug", slug)
+        .order("updated_at", { ascending: false })
+        .limit(10);
+
+      setHistory(hist || []);
+
+      let convId = url.searchParams.get("c");
+
+      if (convId) {
+        const exists = hist?.some((c) => c.id === convId);
+        if (!exists) convId = null;
+      }
+
+      if (!convId && hist?.length > 0) {
+        convId = hist[0].id;
+      }
 
       if (!convId) {
-        convId = await createConversation({
-          uid,
-          agentSlug: a.slug,
-          title: "Nouvelle conversation",
-        });
+        const { data: newConv } = await supabase
+          .from("conversations")
+          .insert({
+            user_id: uid,
+            agent_slug: slug,
+            title: "Nouvelle conversation",
+          })
+          .select("id")
+          .single();
+
+        convId = newConv.id;
       }
 
       setConversationId(convId);
 
-      const msgs = await fetchMessages({ convId });
-      setMessages(
-        msgs.length
-          ? msgs
-          : [{ role: "assistant", content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?` }]
-      );
+      const { data: msgs } = await supabase
+        .from("messages")
+        .select("role, content")
+        .eq("conversation_id", convId)
+        .order("created_at", { ascending: true });
+
+      if (msgs?.length > 0) {
+        setMessages(msgs);
+      } else {
+        setMessages([
+          {
+            role: "assistant",
+            content: `Bonjour, je suis ${agentData.name}. Comment puis-je vous aider ?`,
+          },
+        ]);
+      }
 
       setLoading(false);
       scrollToBottom();
@@ -169,28 +129,26 @@ export default function Chat() {
 
     boot();
 
-    const { data } = supabase.auth.onAuthStateChange((_e, s) => {
-      if (!s) window.location.href = "/login";
-    });
-
     return () => {
       mounted = false;
-      data?.subscription?.unsubscribe();
     };
   }, []);
 
-  /* ================= ACTIONS ================= */
-
+  /* ================= SEND MESSAGE ================= */
   async function sendMessage() {
-    if (!conversationId || !canSend) return;
+    if (!canSend || !conversationId) return;
 
     const userText = input.trim();
     setInput("");
-    setMessages((m) => [...m, { role: "user", content: userText }]);
     setSending(true);
 
-    await insertMessage({
-      convId: conversationId,
+    const newMessages = [...messages, { role: "user", content: userText }];
+    setMessages(newMessages);
+    scrollToBottom();
+
+    await supabase.from("messages").insert({
+      conversation_id: conversationId,
+      user_id: userId,
       role: "user",
       content: userText,
     });
@@ -199,44 +157,61 @@ export default function Chat() {
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userText, agentSlug: agent.slug }),
+        body: JSON.stringify({
+          agentSlug: agent.slug,
+          messages: newMessages,
+        }),
       });
 
       const data = await resp.json();
-      const reply = data.reply || "Réponse vide.";
+      if (!resp.ok) throw new Error();
 
-      setMessages((m) => [...m, { role: "assistant", content: reply }]);
-      await insertMessage({
-        convId: conversationId,
+      const reply = data.reply;
+
+      setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+
+      await supabase.from("messages").insert({
+        conversation_id: conversationId,
+        user_id: userId,
         role: "assistant",
         content: reply,
       });
 
-      await touchConversation({
-        uid: userId,
-        convId: conversationId,
-        titleMaybe:
-          messages.filter((m) => m.role === "user").length === 0
-            ? formatTitleFromFirstUserMessage(userText)
-            : null,
-      });
+      await supabase
+        .from("conversations")
+        .update({ updated_at: new Date().toISOString() })
+        .eq("id", conversationId);
 
-      setHistory(await fetchHistory({ uid: userId, agentSlug: agent.slug }));
       scrollToBottom();
     } catch {
-      setErrorMsg("Erreur interne.");
+      setErrorMsg("Erreur IA.");
     } finally {
       setSending(false);
     }
   }
 
-  /* ================= UI ================= */
-
-  if (loading) return null;
+  if (loading || !agent) return null;
 
   return (
-    <main>
-      {/* UI inchangée — ton design est conservé */}
-    </main>
+    <div style={{ padding: 20, color: "#fff" }}>
+      <h2>{agent.name}</h2>
+
+      <div ref={threadRef} style={{ height: "70vh", overflowY: "auto" }}>
+        {messages.map((m, i) => (
+          <div key={i} style={{ marginBottom: 12 }}>
+            <strong>{m.role === "user" ? "Vous" : agent.name}</strong>
+            <div>{m.content}</div>
+          </div>
+        ))}
+      </div>
+
+      <textarea
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
+        placeholder="Votre message…"
+        style={{ width: "100%", marginTop: 10 }}
+      />
+    </div>
   );
 }
