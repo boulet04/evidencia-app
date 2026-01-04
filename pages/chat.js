@@ -4,19 +4,26 @@ import { supabase } from "../lib/supabaseClient";
 
 export default function Chat() {
   const [loading, setLoading] = useState(true);
+
   const [email, setEmail] = useState("");
   const [userId, setUserId] = useState("");
+
   const [agent, setAgent] = useState(null);
   const [conversationId, setConversationId] = useState(null);
+
   const [history, setHistory] = useState([]);
   const [messages, setMessages] = useState([]);
+
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
   const threadRef = useRef(null);
-  const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
-  const [mobileView, setMobileView] = useState("history");
+
+  const isMobile =
+    typeof window !== "undefined" && window.innerWidth <= 768;
+
+  const [mobileView, setMobileView] = useState("chat"); // "list" | "chat"
 
   const canSend = useMemo(
     () => input.trim().length > 0 && !sending,
@@ -31,79 +38,135 @@ export default function Chat() {
     });
   }
 
+  async function fetchAgent(slug) {
+    const { data } = await supabase
+      .from("agents")
+      .select("slug, name, description")
+      .eq("slug", slug)
+      .maybeSingle();
+
+    return data || null;
+  }
+
+  async function fetchHistory(uid, slug) {
+    const { data } = await supabase
+      .from("conversations")
+      .select("id, title, updated_at")
+      .eq("user_id", uid)
+      .eq("agent_slug", slug)
+      .order("updated_at", { ascending: false });
+
+    return data || [];
+  }
+
+  async function fetchMessages(uid, convId) {
+    const { data } = await supabase
+      .from("conversation_messages")
+      .select("role, content")
+      .eq("user_id", uid)
+      .eq("conversation_id", convId)
+      .order("created_at");
+
+    return data || [];
+  }
+
+  async function createConversation(uid, slug) {
+    const { data } = await supabase
+      .from("conversations")
+      .insert({
+        user_id: uid,
+        agent_slug: slug,
+        title: "Nouvelle conversation",
+      })
+      .select("id")
+      .single();
+
+    return data?.id || null;
+  }
+
   useEffect(() => {
     let mounted = true;
 
     async function boot() {
-      const { data: { session } } = await supabase.auth.getSession();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
       if (!session) {
         window.location.href = "/login";
         return;
       }
 
-      const uid = session.user.id;
-      setUserId(uid);
+      if (!mounted) return;
+
       setEmail(session.user.email || "");
+      setUserId(session.user.id);
 
       const url = new URL(window.location.href);
       const slug = (url.searchParams.get("agent") || "").toLowerCase();
 
-      const { data: a } = await supabase
-        .from("agents")
-        .select("slug, name, description, avatar_url")
-        .eq("slug", slug)
-        .maybeSingle();
+      if (!slug) {
+        window.location.href = "/agents";
+        return;
+      }
 
+      const a = await fetchAgent(slug);
       if (!a) {
+        alert("Agent introuvable");
         window.location.href = "/agents";
         return;
       }
 
       setAgent(a);
 
-      const { data: h } = await supabase
-        .from("conversations")
-        .select("id, title, updated_at")
-        .eq("user_id", uid)
-        .eq("agent_slug", a.slug)
-        .order("updated_at", { ascending: false });
+      const hist = await fetchHistory(session.user.id, slug);
+      setHistory(hist);
 
-      setHistory(h || []);
+      let convId = hist[0]?.id;
 
-      if (h && h.length > 0) {
-        const convId = h[0].id;
-        setConversationId(convId);
-
-        const { data: msgs } = await supabase
-          .from("conversation_messages")
-          .select("role, content")
-          .eq("conversation_id", convId)
-          .order("created_at", { ascending: true });
-
-        setMessages(msgs || []);
-      } else {
-        setMessages([
-          {
-            role: "assistant",
-            content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
-          },
-        ]);
+      if (!convId) {
+        convId = await createConversation(session.user.id, slug);
       }
+
+      setConversationId(convId);
+
+      const msgs = await fetchMessages(session.user.id, convId);
+
+      setMessages(
+        msgs.length
+          ? msgs
+          : [
+              {
+                role: "assistant",
+                content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
+              },
+            ]
+      );
 
       setLoading(false);
       scrollToBottom();
+
+      if (isMobile) {
+        setMobileView("list");
+      }
     }
 
     boot();
-    return () => { mounted = false; };
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   async function sendMessage() {
-    if (!canSend) return;
+    if (!canSend || !conversationId) return;
+
     const text = input.trim();
     setInput("");
-    setMessages((m) => [...m, { role: "user", content: text }]);
     setSending(true);
+
+    setMessages((m) => [...m, { role: "user", content: text }]);
+    scrollToBottom();
 
     try {
       const res = await fetch("/api/chat", {
@@ -116,16 +179,20 @@ export default function Chat() {
       });
 
       const data = await res.json();
-      setMessages((m) => [...m, { role: "assistant", content: data.reply }]);
+
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: data.reply || "Erreur." },
+      ]);
     } catch {
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: "Erreur interne. Réessayez plus tard." },
+        { role: "assistant", content: "Erreur interne." },
       ]);
-    } finally {
-      setSending(false);
-      scrollToBottom();
     }
+
+    setSending(false);
+    scrollToBottom();
   }
 
   if (loading || !agent) return null;
@@ -134,23 +201,29 @@ export default function Chat() {
     <main style={styles.page}>
       <header style={styles.topbar}>
         <button
-          style={styles.backBtn}
+          style={styles.back}
           onClick={() =>
-            isMobile
-              ? setMobileView("history")
-              : (window.location.href = "/agents")
+            isMobile ? setMobileView("list") : (window.location.href = "/agents")
           }
         >
           ← Retour
         </button>
 
-        <img src="/images/logolong.png" style={styles.brandLogo} />
+        <div style={styles.center}>
+          <strong>{agent.name}</strong>
+        </div>
+
+        <button
+          style={styles.logout}
+          onClick={() => supabase.auth.signOut().then(() => (window.location.href = "/login"))}
+        >
+          Déconnexion
+        </button>
       </header>
 
       <section style={styles.layout}>
-        {(!isMobile || mobileView === "history") && (
+        {(!isMobile || mobileView === "list") && (
           <aside style={styles.sidebar}>
-            <h3 style={{ color: "#fff" }}>Historique</h3>
             {history.map((c) => (
               <button
                 key={c.id}
@@ -158,48 +231,37 @@ export default function Chat() {
                 onClick={() => {
                   setConversationId(c.id);
                   if (isMobile) setMobileView("chat");
-();
                 }}
               >
-                {c.title}
+                {c.title || "Conversation"}
               </button>
             ))}
           </aside>
         )}
 
         {(!isMobile || mobileView === "chat") && (
-          <div style={styles.chatCard}>
-            {isMobile && (
-              <button
-                style={styles.mobileSwitch}
-                onClick={() => setMobileView("history")}
-              >
-                ← Historique
-              </button>
-            )}
-
-            <div style={styles.thread} ref={threadRef}>
+          <div style={styles.chat}>
+            <div ref={threadRef} style={styles.thread}>
               {messages.map((m, i) => (
-                <div
-                  key={i}
-                  style={{
-                    ...styles.bubble,
-                    alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                  }}
-                >
-                  {m.content}
+                <div key={i} style={styles.bubble}>
+                  <strong>{m.role === "user" ? "Vous" : agent.name}</strong>
+                  <div>{m.content}</div>
                 </div>
               ))}
             </div>
 
             <div style={styles.composer}>
               <textarea
-                style={styles.textarea}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Votre message…"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                  }
+                }}
               />
-              <button style={styles.btn} onClick={sendMessage}>
+              <button disabled={!canSend} onClick={sendMessage}>
                 Envoyer
               </button>
             </div>
@@ -211,24 +273,15 @@ export default function Chat() {
 }
 
 const styles = {
-  page: { minHeight: "100vh", background: "#000", color: "#fff" },
-  topbar: { padding: 12, display: "flex", gap: 12 },
-  backBtn: { background: "none", color: "#fff", border: "none" },
-  brandLogo: { height: 24 },
-  layout: { display: "grid", gridTemplateColumns: "1fr 3fr", height: "calc(100vh - 60px)" },
-  sidebar: { padding: 12, borderRight: "1px solid #333" },
-  histItem: { display: "block", width: "100%", marginBottom: 8 },
-  chatCard: { display: "flex", flexDirection: "column", height: "100%" },
+  page: { minHeight: "100vh", background: "#05060a", color: "#fff" },
+  topbar: { display: "flex", justifyContent: "space-between", padding: 12 },
+  back: { background: "none", color: "#fff", border: "none" },
+  logout: { background: "none", color: "#fff", border: "none" },
+  layout: { display: "flex", height: "calc(100vh - 60px)" },
+  sidebar: { width: 260, padding: 12 },
+  histItem: { width: "100%", marginBottom: 8 },
+  chat: { flex: 1, display: "flex", flexDirection: "column" },
   thread: { flex: 1, overflowY: "auto", padding: 12 },
-  bubble: { padding: 12, background: "#222", borderRadius: 12, marginBottom: 8 },
-  composer: { display: "flex", gap: 8, padding: 12 },
-  textarea: { flex: 1 },
-  btn: { padding: "0 16px" },
-  mobileSwitch: {
-    padding: 10,
-    background: "#111",
-    color: "#fff",
-    border: "1px solid #333",
-    marginBottom: 8,
-  },
+  bubble: { marginBottom: 10 },
+  composer: { display: "flex", padding: 12, gap: 8 },
 };
