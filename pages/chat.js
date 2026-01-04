@@ -8,86 +8,139 @@ export default function Chat() {
   const [email, setEmail] = useState("");
   const [userId, setUserId] = useState("");
 
-  const [agent, setAgent] = useState(null);
+  const [agent, setAgent] = useState(null); // { slug, name, description, avatar_url }
   const [conversationId, setConversationId] = useState(null);
 
-  const [history, setHistory] = useState([]);
+  const [history, setHistory] = useState([]); // 10 dernières conversations (par user + agent)
   const [messages, setMessages] = useState([]);
 
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
+  // ✅ AJOUT (mobile) : uniquement pour rendre le layout responsive
+  const [isMobile, setIsMobile] = useState(false);
+
   const threadRef = useRef(null);
-
-  const isMobile =
-    typeof window !== "undefined" && window.innerWidth <= 768;
-
-  const [mobileView, setMobileView] = useState("chat"); // "list" | "chat"
-
   const canSend = useMemo(
     () => input.trim().length > 0 && !sending,
     [input, sending]
   );
 
+  // ---------- Helpers ----------
+  function safeDecode(v) {
+    try {
+      return decodeURIComponent(v || "");
+    } catch {
+      return v || "";
+    }
+  }
+
+  function formatTitleFromFirstUserMessage(text) {
+    const t = (text || "").trim().replace(/\s+/g, " ");
+    if (!t) return "Nouvelle conversation";
+    return t.length > 42 ? t.slice(0, 42) + "…" : t;
+  }
+
   function scrollToBottom() {
     requestAnimationFrame(() => {
-      if (threadRef.current) {
-        threadRef.current.scrollTop = threadRef.current.scrollHeight;
-      }
+      const el = threadRef.current;
+      if (!el) return;
+      el.scrollTop = el.scrollHeight;
     });
   }
 
   async function fetchAgent(slug) {
-    const { data } = await supabase
+    const { data: a, error } = await supabase
       .from("agents")
-      .select("slug, name, description")
+      .select("slug, name, description, avatar_url")
       .eq("slug", slug)
       .maybeSingle();
 
-    return data || null;
+    if (error || !a) return null;
+    return a;
   }
 
-  async function fetchHistory(uid, slug) {
-    const { data } = await supabase
+  async function fetchHistory({ uid, agentSlug }) {
+    // 10 dernières conversations par USER + AGENT
+    const { data, error } = await supabase
       .from("conversations")
       .select("id, title, updated_at")
       .eq("user_id", uid)
-      .eq("agent_slug", slug)
-      .order("updated_at", { ascending: false });
+      .eq("agent_slug", agentSlug)
+      .order("updated_at", { ascending: false })
+      .limit(10);
 
+    if (error) return [];
     return data || [];
   }
 
-  async function fetchMessages(uid, convId) {
-    const { data } = await supabase
+  async function fetchMessages({ uid, convId }) {
+    const { data, error } = await supabase
       .from("conversation_messages")
-      .select("role, content")
+      .select("id, role, content, created_at")
       .eq("user_id", uid)
       .eq("conversation_id", convId)
-      .order("created_at");
+      .order("created_at", { ascending: true });
 
+    if (error) return [];
     return data || [];
   }
 
-  async function createConversation(uid, slug) {
-    const { data } = await supabase
+  async function createConversation({ uid, agentSlug, title }) {
+    const { data, error } = await supabase
       .from("conversations")
       .insert({
         user_id: uid,
-        agent_slug: slug,
-        title: "Nouvelle conversation",
+        agent_slug: agentSlug,
+        title: title || "Nouvelle conversation",
       })
       .select("id")
       .single();
 
+    if (error) return null;
     return data?.id || null;
   }
 
+  async function touchConversation({ uid, convId, titleMaybe }) {
+    // met à jour updated_at + éventuellement title
+    const patch = { updated_at: new Date().toISOString() };
+    if (titleMaybe) patch.title = titleMaybe;
+
+    await supabase
+      .from("conversations")
+      .update(patch)
+      .eq("user_id", uid)
+      .eq("id", convId);
+  }
+
+  async function insertMessage({ uid, convId, role, content }) {
+    await supabase.from("conversation_messages").insert({
+      user_id: uid,
+      conversation_id: convId,
+      role,
+      content,
+    });
+  }
+
+  // ✅ AJOUT (mobile) : détection responsive (ne touche pas au style desktop)
+  useEffect(() => {
+    const onResize = () => {
+      // seuil simple, ajustable si tu veux
+      setIsMobile(window.innerWidth <= 900);
+    };
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // ---------- Boot ----------
   useEffect(() => {
     let mounted = true;
 
     async function boot() {
+      setErrorMsg("");
+
       const {
         data: { session },
       } = await supabase.auth.getSession();
@@ -96,14 +149,16 @@ export default function Chat() {
         window.location.href = "/login";
         return;
       }
-
       if (!mounted) return;
 
+      const uid = session.user.id;
+      setUserId(uid);
       setEmail(session.user.email || "");
-      setUserId(session.user.id);
 
+      // slug agent depuis URL
       const url = new URL(window.location.href);
-      const slug = (url.searchParams.get("agent") || "").toLowerCase();
+      const raw = url.searchParams.get("agent");
+      const slug = safeDecode(raw).trim().toLowerCase();
 
       if (!slug) {
         window.location.href = "/agents";
@@ -112,176 +167,820 @@ export default function Chat() {
 
       const a = await fetchAgent(slug);
       if (!a) {
-        alert("Agent introuvable");
+        alert("Agent introuvable.");
         window.location.href = "/agents";
         return;
       }
+      if (!mounted) return;
 
       setAgent(a);
 
-      const hist = await fetchHistory(session.user.id, slug);
-      setHistory(hist);
+      // conversation_id optionnel dans URL (si on ouvre une ancienne conv)
+      const convParam = url.searchParams.get("c");
+      const convIdFromUrl = convParam ? safeDecode(convParam).trim() : "";
 
-      let convId = hist[0]?.id;
+      // Charge historique
+      const h = await fetchHistory({ uid, agentSlug: a.slug });
+      if (!mounted) return;
+      setHistory(h);
 
-      if (!convId) {
-        convId = await createConversation(session.user.id, slug);
+      // Choix conversation à ouvrir
+      let chosenConvId = null;
+
+      // 1) si convId dans url et appartient à l'user => on l'ouvre
+      if (convIdFromUrl) {
+        const msgs = await fetchMessages({ uid, convId: convIdFromUrl });
+        if (msgs.length > 0) {
+          chosenConvId = convIdFromUrl;
+          setConversationId(chosenConvId);
+          setMessages(msgs);
+          setLoading(false);
+          scrollToBottom();
+          return;
+        }
       }
 
-      setConversationId(convId);
+      // 2) sinon, si historique existant, ouvre la dernière
+      if (h && h.length > 0) {
+        chosenConvId = h[0].id;
+        setConversationId(chosenConvId);
 
-      const msgs = await fetchMessages(session.user.id, convId);
+        const msgs = await fetchMessages({ uid, convId: chosenConvId });
+        if (!mounted) return;
 
-      setMessages(
-        msgs.length
-          ? msgs
-          : [
-              {
-                role: "assistant",
-                content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
-              },
-            ]
-      );
+        if (msgs.length > 0) {
+          setMessages(msgs);
+        } else {
+          // fallback message d'accueil
+          setMessages([
+            {
+              role: "assistant",
+              content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
+            },
+          ]);
+        }
+
+        setLoading(false);
+        scrollToBottom();
+        return;
+      }
+
+      // 3) sinon crée nouvelle conversation + accueil
+      const newConvId = await createConversation({
+        uid,
+        agentSlug: a.slug,
+        title: "Nouvelle conversation",
+      });
+
+      if (!mounted) return;
+
+      setConversationId(newConvId);
+      setMessages([
+        {
+          role: "assistant",
+          content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
+        },
+      ]);
+
+      // refresh historique
+      const h2 = await fetchHistory({ uid, agentSlug: a.slug });
+      if (!mounted) return;
+      setHistory(h2);
 
       setLoading(false);
       scrollToBottom();
-
-      if (isMobile) {
-        setMobileView("list");
-      }
     }
 
     boot();
 
+    // écoute auth
+    const { data } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      if (!newSession) window.location.href = "/login";
+    });
+
     return () => {
       mounted = false;
+      data?.subscription?.unsubscribe?.();
     };
   }, []);
 
+  // ---------- Actions ----------
+  async function logout() {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
+  }
+
+  async function openConversation(convId) {
+    if (!userId || !agent || !convId) return;
+    setErrorMsg("");
+
+    setConversationId(convId);
+
+    // Met à jour l’URL (sans recharger)
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("agent", agent.slug);
+      url.searchParams.set("c", convId);
+      window.history.replaceState({}, "", url.toString());
+    } catch (_) {}
+
+    const msgs = await fetchMessages({ uid: userId, convId });
+    setMessages(
+      msgs.length > 0
+        ? msgs
+        : [
+            {
+              role: "assistant",
+              content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?`,
+            },
+          ]
+    );
+
+    scrollToBottom();
+  }
+
+  async function newConversation() {
+    if (!userId || !agent) return;
+    setErrorMsg("");
+
+    const convId = await createConversation({
+      uid: userId,
+      agentSlug: agent.slug,
+      title: "Nouvelle conversation",
+    });
+
+    if (!convId) {
+      setErrorMsg("Impossible de créer une conversation (policies Supabase ?).");
+      return;
+    }
+
+    setConversationId(convId);
+    setMessages([
+      {
+        role: "assistant",
+        content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?`,
+      },
+    ]);
+
+    // URL
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("agent", agent.slug);
+      url.searchParams.set("c", convId);
+      window.history.replaceState({}, "", url.toString());
+    } catch (_) {}
+
+    const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
+    setHistory(h);
+
+    scrollToBottom();
+  }
+
   async function sendMessage() {
-    if (!canSend || !conversationId) return;
+    if (!agent || !conversationId || !canSend) return;
 
-    const text = input.trim();
+    const userText = input.trim();
     setInput("");
-    setSending(true);
+    setErrorMsg("");
 
-    setMessages((m) => [...m, { role: "user", content: text }]);
+    // UI immédiat
+    setMessages((prev) => [...prev, { role: "user", content: userText }]);
+    setSending(true);
     scrollToBottom();
 
+    // Persist user message
+    await insertMessage({
+      uid: userId,
+      convId: conversationId,
+      role: "user",
+      content: userText,
+    });
+
+    // Si c'est le premier message user, on met un title
+    const isFirstUser =
+      messages.filter((m) => m.role === "user").length === 0;
+    const titleMaybe = isFirstUser
+      ? formatTitleFromFirstUserMessage(userText)
+      : null;
+
+    // Appel IA
     try {
-      const res = await fetch("/api/chat", {
+      const resp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: text,
+          message: userText,
           agentSlug: agent.slug,
         }),
       });
 
-      const data = await res.json();
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || "Erreur API");
 
-      setMessages((m) => [
-        ...m,
-        { role: "assistant", content: data.reply || "Erreur." },
+      const reply = (data?.reply || "Réponse vide.").toString();
+
+      // UI + persist assistant
+      setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+      await insertMessage({
+        uid: userId,
+        convId: conversationId,
+        role: "assistant",
+        content: reply,
+      });
+
+      // touch conversation (updated_at + title si besoin)
+      await touchConversation({
+        uid: userId,
+        convId: conversationId,
+        titleMaybe,
+      });
+
+      // refresh sidebar
+      const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
+      setHistory(h);
+
+      scrollToBottom();
+    } catch (e) {
+      setErrorMsg("Erreur interne. Réessayez plus tard.");
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Erreur interne. Réessayez plus tard.",
+        },
       ]);
-    } catch {
-      setMessages((m) => [
-        ...m,
-        { role: "assistant", content: "Erreur interne." },
-      ]);
+
+      await insertMessage({
+        uid: userId,
+        convId: conversationId,
+        role: "assistant",
+        content: "Erreur interne. Réessayez plus tard.",
+      });
+
+      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
+      const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
+      setHistory(h);
+
+      scrollToBottom();
+    } finally {
+      setSending(false);
     }
-
-    setSending(false);
-    scrollToBottom();
   }
 
-  if (loading || !agent) return null;
+  function onKeyDown(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  // ---------- UI ----------
+  if (loading || !agent) {
+    return (
+      <main style={styles.page}>
+        <div style={styles.bg} aria-hidden="true">
+          <div style={styles.bgLogo} />
+          <div style={styles.bgVeils} />
+        </div>
+        <section style={styles.center}>
+          <div style={styles.loadingCard}>
+            <div style={{ fontWeight: 900, color: "#fff" }}>Chargement…</div>
+            <div style={styles.loadingSub}>Initialisation de l’agent…</div>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  // ✅ AJOUT (mobile) : uniquement des styles conditionnels (desktop inchangé)
+  const layoutStyle = isMobile
+    ? { ...styles.layout, ...styles.layoutMobile }
+    : styles.layout;
+
+  const sidebarStyle = isMobile
+    ? { ...styles.sidebar, ...styles.sidebarMobile }
+    : styles.sidebar;
+
+  const chatCardStyle = isMobile
+    ? { ...styles.chatCard, ...styles.chatCardMobile }
+    : styles.chatCard;
 
   return (
     <main style={styles.page}>
-      <header style={styles.topbar}>
-        <button
-          style={styles.back}
-          onClick={() =>
-            isMobile ? setMobileView("list") : (window.location.href = "/agents")
-          }
-        >
-          ← Retour
-        </button>
+      <div style={styles.bg} aria-hidden="true">
+        <div style={styles.bgLogo} />
+        <div style={styles.bgVeils} />
+      </div>
 
-        <div style={styles.center}>
-          <strong>{agent.name}</strong>
+      <header style={styles.topbar}>
+        <div style={styles.topLeft}>
+          <button
+            style={styles.backBtn}
+            onClick={() => (window.location.href = "/agents")}
+          >
+            ← Retour
+          </button>
+
+          <img
+            src="/images/logolong.png"
+            alt="Evidenc’IA"
+            style={styles.brandLogo}
+          />
+
+          <div style={styles.agentInfo}>
+            <div style={styles.agentName}>{agent.name}</div>
+            <div style={styles.agentDesc}>{agent.description}</div>
+          </div>
         </div>
 
-        <button
-          style={styles.logout}
-          onClick={() => supabase.auth.signOut().then(() => (window.location.href = "/login"))}
-        >
-          Déconnexion
-        </button>
+        <div style={styles.topRight}>
+          <span style={styles.userChip}>{email || "Connecté"}</span>
+          <button onClick={logout} style={styles.btnGhost}>
+            Déconnexion
+          </button>
+        </div>
       </header>
 
-      <section style={styles.layout}>
-        {(!isMobile || mobileView === "list") && (
-          <aside style={styles.sidebar}>
-            {history.map((c) => (
-              <button
-                key={c.id}
-                style={styles.histItem}
-                onClick={() => {
-                  setConversationId(c.id);
-                  if (isMobile) setMobileView("chat");
+      <section style={layoutStyle}>
+        {/* Sidebar */}
+        <aside style={sidebarStyle}>
+          <div style={styles.sidebarTop}>
+            <div style={styles.sidebarTitle}>Historique</div>
+            <button onClick={newConversation} style={styles.newBtn}>
+              + Nouvelle
+            </button>
+          </div>
+
+          <div style={styles.sidebarList}>
+            {history.length === 0 ? (
+              <div style={styles.sidebarEmpty}>
+                Aucune conversation pour cet agent.
+              </div>
+            ) : (
+              history.map((c) => {
+                const active = c.id === conversationId;
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => openConversation(c.id)}
+                    style={{
+                      ...styles.histItem,
+                      ...(active ? styles.histItemActive : null),
+                    }}
+                    title={c.title || "Conversation"}
+                  >
+                    <div style={styles.histTitle}>
+                      {c.title || "Conversation"}
+                    </div>
+                    <div style={styles.histDate}>
+                      {c.updated_at
+                        ? new Date(c.updated_at).toLocaleString("fr-FR", {
+                            day: "2-digit",
+                            month: "2-digit",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })
+                        : ""}
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </aside>
+
+        {/* Chat */}
+        <div style={chatCardStyle}>
+          {errorMsg ? <div style={styles.alert}>{errorMsg}</div> : null}
+
+          <div style={styles.thread} ref={threadRef}>
+            {messages.map((m, idx) => (
+              <div
+                key={idx}
+                style={{
+                  ...styles.bubbleRow,
+                  justifyContent: m.role === "user" ? "flex-end" : "flex-start",
                 }}
               >
-                {c.title || "Conversation"}
-              </button>
-            ))}
-          </aside>
-        )}
-
-        {(!isMobile || mobileView === "chat") && (
-          <div style={styles.chat}>
-            <div ref={threadRef} style={styles.thread}>
-              {messages.map((m, i) => (
-                <div key={i} style={styles.bubble}>
-                  <strong>{m.role === "user" ? "Vous" : agent.name}</strong>
-                  <div>{m.content}</div>
+                <div
+                  style={{
+                    ...styles.bubble,
+                    ...(m.role === "user"
+                      ? styles.bubbleUser
+                      : styles.bubbleBot),
+                  }}
+                >
+                  <div style={styles.role}>
+                    {m.role === "user" ? "Vous" : agent.name}
+                  </div>
+                  <div style={styles.text}>{m.content}</div>
                 </div>
-              ))}
-            </div>
-
-            <div style={styles.composer}>
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    sendMessage();
-                  }
-                }}
-              />
-              <button disabled={!canSend} onClick={sendMessage}>
-                Envoyer
-              </button>
-            </div>
+              </div>
+            ))}
           </div>
-        )}
+
+          <div style={styles.composer}>
+            <textarea
+              style={styles.textarea}
+              placeholder="Écrivez votre message… (Entrée = envoyer, Maj+Entrée = saut de ligne)"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={onKeyDown}
+              rows={2}
+              autoComplete="off"
+            />
+            <button
+              style={canSend ? styles.btn : styles.btnDisabled}
+              onClick={sendMessage}
+              disabled={!canSend}
+            >
+              {sending ? "Envoi…" : "Envoyer"}
+            </button>
+          </div>
+        </div>
       </section>
     </main>
   );
 }
 
+/* ================== STYLES (charte Evidencia / sans bord blanc) ================== */
 const styles = {
-  page: { minHeight: "100vh", background: "#05060a", color: "#fff" },
-  topbar: { display: "flex", justifyContent: "space-between", padding: 12 },
-  back: { background: "none", color: "#fff", border: "none" },
-  logout: { background: "none", color: "#fff", border: "none" },
-  layout: { display: "flex", height: "calc(100vh - 60px)" },
-  sidebar: { width: 260, padding: 12 },
-  histItem: { width: "100%", marginBottom: 8 },
-  chat: { flex: 1, display: "flex", flexDirection: "column" },
-  thread: { flex: 1, overflowY: "auto", padding: 12 },
-  bubble: { marginBottom: 10 },
-  composer: { display: "flex", padding: 12, gap: 8 },
+  page: {
+    minHeight: "100vh",
+    position: "relative",
+    overflow: "hidden",
+    fontFamily: "Segoe UI, Arial, sans-serif",
+    color: "#eef2ff",
+    background: "linear-gradient(135deg,#05060a,#0a0d16)",
+  },
+
+  bg: { position: "absolute", inset: 0, zIndex: 0 },
+
+  bgLogo: {
+    position: "absolute",
+    inset: 0,
+    backgroundImage: "url('/images/logopc.png')",
+    backgroundRepeat: "no-repeat",
+    backgroundSize: "contain",
+    backgroundPosition: "center",
+    opacity: 0.08,
+    filter: "contrast(1.05) saturate(1.05) brightness(.80)",
+    transform: "scale(1.02)",
+  },
+
+  bgVeils: {
+    position: "absolute",
+    inset: 0,
+    background:
+      "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.22), rgba(0,0,0,0) 62%)," +
+      "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), rgba(0,0,0,0) 62%)," +
+      "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22) 30%, rgba(0,0,0,.22) 70%, rgba(0,0,0,.66))",
+  },
+
+  topbar: {
+    position: "relative",
+    zIndex: 2,
+    padding: "14px 16px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    background: "rgba(0,0,0,.28)",
+    backdropFilter: "blur(10px)",
+    borderBottom: "1px solid rgba(255,255,255,.10)",
+  },
+
+  topLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    minWidth: 0,
+  },
+
+  topRight: { display: "flex", alignItems: "center", gap: 10 },
+
+  backBtn: {
+    padding: "10px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.35)",
+    color: "#eef2ff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+
+  brandLogo: {
+    height: 24,
+    width: "auto",
+    display: "block",
+    filter: "drop-shadow(0 10px 26px rgba(0,0,0,.55))",
+  },
+
+  agentInfo: {
+    display: "grid",
+    gap: 2,
+    minWidth: 0,
+  },
+
+  agentName: {
+    fontWeight: 900,
+    fontSize: 13,
+    color: "#eef2ff",
+    lineHeight: 1.1,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
+
+  agentDesc: {
+    fontWeight: 800,
+    fontSize: 12,
+    color: "rgba(238,242,255,.72)",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
+
+  userChip: {
+    fontSize: 12,
+    fontWeight: 900,
+    color: "rgba(238,242,255,.85)",
+    padding: "8px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.35)",
+    maxWidth: 260,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+
+  btnGhost: {
+    padding: "10px 14px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.35)",
+    color: "#eef2ff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+
+  layout: {
+    position: "relative",
+    zIndex: 1,
+    display: "grid",
+    gridTemplateColumns: "320px 1fr",
+    gap: 14,
+    padding: 14,
+    height: "calc(100vh - 64px)",
+    boxSizing: "border-box",
+  },
+
+  // ✅ AJOUT (mobile) : uniquement layout responsive
+  layoutMobile: {
+    gridTemplateColumns: "1fr",
+    gridTemplateRows: "auto 1fr",
+  },
+
+  /* Sidebar */
+  sidebar: {
+    borderRadius: 22,
+    background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
+    boxShadow: "0 24px 70px rgba(0,0,0,.45)",
+    backdropFilter: "blur(14px)",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+    minHeight: 0,
+  },
+
+  // ✅ AJOUT (mobile) : limite la hauteur de l’historique pour laisser le chat visible
+  sidebarMobile: {
+    maxHeight: "34vh",
+  },
+
+  sidebarTop: {
+    padding: 14,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    borderBottom: "1px solid rgba(255,255,255,.08)",
+    background: "rgba(0,0,0,.18)",
+  },
+
+  sidebarTitle: {
+    fontWeight: 900,
+    color: "#eef2ff",
+    fontSize: 13,
+    letterSpacing: 0.2,
+  },
+
+  newBtn: {
+    padding: "10px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.08)",
+    color: "#eef2ff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+
+  sidebarList: {
+    padding: 10,
+    overflowY: "auto",
+    display: "grid",
+    gap: 10,
+    minHeight: 0,
+  },
+
+  sidebarEmpty: {
+    padding: 12,
+    borderRadius: 16,
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.75)",
+    fontWeight: 800,
+    fontSize: 12,
+    lineHeight: 1.35,
+  },
+
+  histItem: {
+    textAlign: "left",
+    width: "100%",
+    padding: 12,
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.28)",
+    color: "#eef2ff",
+    cursor: "pointer",
+    display: "grid",
+    gap: 6,
+  },
+
+  histItemActive: {
+    background:
+      "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
+    border: "1px solid rgba(255,140,40,.18)",
+  },
+
+  histTitle: {
+    fontWeight: 900,
+    fontSize: 13,
+    color: "#eef2ff",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
+
+  histDate: {
+    fontWeight: 800,
+    fontSize: 11,
+    color: "rgba(238,242,255,.65)",
+  },
+
+  /* Chat card */
+  chatCard: {
+    borderRadius: 22,
+    background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
+    boxShadow: "0 24px 70px rgba(0,0,0,.55)",
+    backdropFilter: "blur(14px)",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+    minHeight: 0,
+  },
+
+  // ✅ AJOUT (mobile) : garde le chat visible sous l’historique
+  chatCardMobile: {
+    minHeight: 0,
+  },
+
+  alert: {
+    margin: 12,
+    padding: 12,
+    borderRadius: 16,
+    background: "rgba(255,140,40,.10)",
+    border: "1px solid rgba(255,140,40,.18)",
+    color: "#eef2ff",
+    fontWeight: 900,
+    fontSize: 13,
+  },
+
+  thread: {
+    flex: 1,
+    overflowY: "auto",
+    padding: 14,
+    display: "grid",
+    gap: 12,
+    minHeight: 0,
+  },
+
+  bubbleRow: { display: "flex" },
+
+  bubble: {
+    maxWidth: 760,
+    borderRadius: 18,
+    padding: "12px 14px",
+    boxShadow: "0 14px 40px rgba(0,0,0,.35)",
+    whiteSpace: "pre-wrap",
+    lineHeight: 1.45,
+    border: "1px solid rgba(255,255,255,.10)",
+  },
+
+  bubbleUser: {
+    background: "rgba(255,255,255,.10)",
+  },
+
+  bubbleBot: {
+    background: "rgba(0,0,0,.35)",
+  },
+
+  role: {
+    fontSize: 11,
+    fontWeight: 900,
+    color: "rgba(238,242,255,.72)",
+    marginBottom: 6,
+  },
+
+  text: {
+    fontSize: 14,
+    fontWeight: 700,
+    color: "rgba(238,242,255,.92)",
+  },
+
+  composer: {
+    display: "flex",
+    gap: 10,
+    padding: 12,
+    borderTop: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.22)",
+    backdropFilter: "blur(10px)",
+  },
+
+  textarea: {
+    flex: 1,
+    resize: "none",
+    padding: "12px 14px",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.40)",
+    color: "#eef2ff",
+    outline: "none",
+    fontWeight: 800,
+    fontSize: 14,
+    lineHeight: 1.4,
+  },
+
+  btn: {
+    padding: "12px 16px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.12)",
+    background:
+      "linear-gradient(135deg, rgba(255,140,40,.18), rgba(80,120,255,.12))",
+    color: "#eef2ff",
+    fontWeight: 900,
+    cursor: "pointer",
+    minWidth: 110,
+    boxShadow: "0 18px 45px rgba(0,0,0,.45)",
+  },
+
+  btnDisabled: {
+    padding: "12px 16px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.55)",
+    fontWeight: 900,
+    cursor: "not-allowed",
+    minWidth: 110,
+  },
+
+  /* Loading */
+  center: {
+    position: "relative",
+    zIndex: 1,
+    minHeight: "100vh",
+    display: "grid",
+    placeItems: "center",
+    padding: 24,
+  },
+
+  loadingCard: {
+    width: "100%",
+    maxWidth: 520,
+    borderRadius: 26,
+    padding: 24,
+    background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
+    boxShadow: "0 24px 70px rgba(0,0,0,.60)",
+    backdropFilter: "blur(14px)",
+  },
+
+  loadingSub: {
+    marginTop: 6,
+    color: "rgba(255,255,255,.78)",
+    fontWeight: 800,
+    fontSize: 12,
+  },
 };
