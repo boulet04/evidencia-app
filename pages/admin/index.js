@@ -51,35 +51,59 @@ export default function Admin() {
       }
 
       // Profil du user connecté
-      const { data: myProfile1, error: myErr } = await supabase
+      const { data: myProfile1, error: myErr1 } = await supabase
         .from("profiles")
         .select("user_id, role, email")
         .eq("user_id", session.user.id)
         .maybeSingle();
 
-      // ✅ AJOUT : si profil absent, on le crée puis on le relit
+      // ✅ CORRECTIF : si profil absent, on tente de le créer (avec id généré) puis on le relit
       let myProfile = myProfile1;
-      if (!myErr && !myProfile) {
-        await supabase.from("profiles").insert({
+
+      if (!myErr1 && !myProfile) {
+        const newRow = {
           user_id: session.user.id,
           email: session.user.email,
           role: "user",
-        });
+        };
 
-        const { data: myProfile2 } = await supabase
+        const newId =
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : null;
+
+        if (newId) newRow.id = newId;
+
+        const { error: insErr } = await supabase.from("profiles").insert(newRow);
+
+        if (insErr) {
+          if (!mounted) return;
+          setLoading(false);
+          setMsg(`Création du profil impossible : ${insErr.message}`);
+          return;
+        }
+
+        const { data: myProfile2, error: myErr2 } = await supabase
           .from("profiles")
           .select("user_id, role, email")
           .eq("user_id", session.user.id)
           .maybeSingle();
+
+        if (myErr2) {
+          if (!mounted) return;
+          setLoading(false);
+          setMsg(`Lecture du profil impossible : ${myErr2.message}`);
+          return;
+        }
 
         myProfile = myProfile2 || null;
       }
 
       if (!mounted) return;
 
-      if (myErr || !myProfile) {
+      if (myErr1 || !myProfile) {
         setLoading(false);
-        setMsg("Profil introuvable (table profiles).");
+        setMsg(myErr1 ? `Lecture du profil impossible : ${myErr1.message}` : "Profil introuvable (table profiles).");
         return;
       }
 
@@ -111,9 +135,9 @@ export default function Admin() {
 
       if (!mounted) return;
 
-      setUsers(uErr ? [] : u || []);
-      setAgents(aErr ? [] : a || []);
-      setUserAgents(uaErr ? [] : ua || []);
+      setUsers(uErr ? [] : (u || []));
+      setAgents(aErr ? [] : (a || []));
+      setUserAgents(uaErr ? [] : (ua || []));
 
       // Sélection auto du premier user non-admin si possible
       const firstUser =
@@ -155,9 +179,7 @@ export default function Admin() {
         if (error) throw error;
 
         setUserAgents((prev) =>
-          prev.filter(
-            (r) => !(r.user_id === selectedUserId && r.agent_id === agentId)
-          )
+          prev.filter((r) => !(r.user_id === selectedUserId && r.agent_id === agentId))
         );
       } else {
         // Assigner
@@ -195,10 +217,7 @@ export default function Admin() {
         <div style={styles.card}>
           <div style={styles.h1}>Backoffice</div>
           <div style={styles.alert}>{msg || "Accès refusé."}</div>
-          <button
-            style={styles.btnGhost}
-            onClick={() => (window.location.href = "/agents")}
-          >
+          <button style={styles.btnGhost} onClick={() => (window.location.href = "/agents")}>
             Retour aux agents
           </button>
         </div>
@@ -212,9 +231,7 @@ export default function Admin() {
         <div style={styles.brand}>Backoffice Evidenc’IA</div>
         <div style={styles.topRight}>
           <span style={styles.chip}>{me?.email || "admin"}</span>
-          <button style={styles.btnGhost} onClick={logout}>
-            Déconnexion
-          </button>
+          <button style={styles.btnGhost} onClick={logout}>Déconnexion</button>
         </div>
       </header>
 
@@ -241,9 +258,7 @@ export default function Admin() {
                   style={{ ...styles.item, ...(active ? styles.itemActive : null) }}
                 >
                   <div style={styles.itemTop}>
-                    <div style={styles.itemEmail}>
-                      {u.email || "(email non renseigné)"}
-                    </div>
+                    <div style={styles.itemEmail}>{u.email || "(email non renseigné)"}</div>
                     <div style={styles.badge}>{u.role}</div>
                   </div>
                   <div style={styles.itemId}>{u.user_id}</div>
@@ -261,12 +276,8 @@ export default function Admin() {
               <div style={styles.sub}>
                 {selectedUser ? (
                   <>
-                    <div>
-                      <b>Utilisateur :</b> {selectedUser.email || selectedUser.user_id}
-                    </div>
-                    <div>
-                      <b>user_id :</b> {selectedUser.user_id}
-                    </div>
+                    <div><b>Utilisateur :</b> {selectedUser.email || selectedUser.user_id}</div>
+                    <div><b>user_id :</b> {selectedUser.user_id}</div>
                   </>
                 ) : (
                   "Sélectionne un utilisateur."
@@ -294,11 +305,7 @@ export default function Admin() {
                   title={a.slug}
                 >
                   <div style={styles.agentTop}>
-                    <img
-                      src={a.avatar_url || "/images/logopc.png"}
-                      alt={a.name}
-                      style={styles.avatar}
-                    />
+                    <img src={a.avatar_url || "/images/logopc.png"} alt={a.name} style={styles.avatar} />
                     <div style={styles.agentMeta}>
                       <div style={styles.agentName}>{a.name}</div>
                       <div style={styles.agentDesc}>{a.description}</div>
@@ -484,5 +491,3 @@ const styles = {
   h1: { fontSize: 22, fontWeight: 900 },
   p: { marginTop: 10, opacity: 0.8, fontWeight: 800 },
 };
-
-
