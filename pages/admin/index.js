@@ -3,100 +3,121 @@ import { supabase } from "../../lib/supabaseClient";
 
 export default function Admin() {
   const [loading, setLoading] = useState(true);
-
   const [me, setMe] = useState(null);
 
-  // Clients + users
-  const [clients, setClients] = useState([]); // [{id, name, ...}]
-  const [clientUsers, setClientUsers] = useState([]); // [{client_id, user_id}]
-  const [profiles, setProfiles] = useState([]); // [{user_id, email, role, ...}]
+  // Data
+  const [clients, setClients] = useState([]); // public.clients
+  const [clientUsers, setClientUsers] = useState([]); // public.client_users
+  const [profiles, setProfiles] = useState([]); // public.profiles
+  const [agents, setAgents] = useState([]); // public.agents
+  const [userAgents, setUserAgents] = useState([]); // public.user_agents
 
+  // UI state
   const [selectedClientId, setSelectedClientId] = useState("");
   const [selectedUserId, setSelectedUserId] = useState("");
-
-  // Agents + mapping
-  const [agents, setAgents] = useState([]);
-  const [userAgents, setUserAgents] = useState([]);
-
   const [q, setQ] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
 
   const isAdmin = useMemo(() => me?.role === "admin", [me]);
 
+  function clientLabel(c) {
+    // On supporte plusieurs noms de colonnes possibles sans casser
+    const v =
+      (c?.name || c?.customer_name || c?.company_name || c?.title || "").trim();
+    return v || "Client";
+  }
+
+  function safeStr(v) {
+    return (v || "").toString();
+  }
+
   function normalizeImgSrc(src) {
-    const s = (src || "").trim();
+    const s = safeStr(src).trim();
     if (!s) return "";
     if (s.startsWith("http://") || s.startsWith("https://")) return s;
     if (s.startsWith("/")) return s;
     return "/" + s;
   }
 
-  function clientLabel(c) {
-    return (c?.name || c?.customer_name || c?.title || "").trim() || "Client";
-  }
+  // Indexes for fast lookups
+  const profileByUserId = useMemo(() => {
+    const m = new Map();
+    for (const p of profiles) m.set(p.user_id, p);
+    return m;
+  }, [profiles]);
 
+  const clientById = useMemo(() => {
+    const m = new Map();
+    for (const c of clients) m.set(c.id, c);
+    return m;
+  }, [clients]);
+
+  // Build: Client -> Users (profiles)
   const clientTree = useMemo(() => {
-    // Structure : client -> users (profiles)
-    const profByUserId = new Map();
-    for (const p of profiles) profByUserId.set(p.user_id, p);
-
     const usersByClient = new Map();
+
     for (const cu of clientUsers) {
       if (!usersByClient.has(cu.client_id)) usersByClient.set(cu.client_id, []);
-      const prof = profByUserId.get(cu.user_id);
+      const p = profileByUserId.get(cu.user_id);
       usersByClient.get(cu.client_id).push({
         user_id: cu.user_id,
-        email: prof?.email || "",
-        role: prof?.role || "user",
+        email: safeStr(p?.email),
+        role: safeStr(p?.role) || "user",
       });
     }
 
-    // Tri users : admin en bas, sinon par email
-    for (const [cid, arr] of usersByClient.entries()) {
-      arr.sort((a, b) => {
-        if (a.role === "admin" && b.role !== "admin") return 1;
-        if (a.role !== "admin" && b.role === "admin") return -1;
-        return (a.email || "").localeCompare(b.email || "");
-      });
-      usersByClient.set(cid, arr);
-    }
-
-    const result = (clients || []).map((c) => ({
-      ...c,
+    // Build list from clients table
+    let list = (clients || []).map((c) => ({
+      id: c.id,
+      raw: c,
       label: clientLabel(c),
       users: usersByClient.get(c.id) || [],
     }));
 
-    // filtre recherche (sur client + email + user_id)
-    const s = q.trim().toLowerCase();
-    if (!s) return result;
+    // Tri : par label client
+    list.sort((a, b) => a.label.localeCompare(b.label, "fr"));
 
-    return result
+    // Tri users dans chaque client : par email, admin en dernier
+    for (const item of list) {
+      item.users.sort((a, b) => {
+        if (a.role === "admin" && b.role !== "admin") return 1;
+        if (a.role !== "admin" && b.role === "admin") return -1;
+        return safeStr(a.email).localeCompare(safeStr(b.email), "fr");
+      });
+    }
+
+    // Filtre recherche (client label + email + user_id)
+    const s = q.trim().toLowerCase();
+    if (!s) return list;
+
+    return list
       .map((c) => {
-        const users = (c.users || []).filter((u) => {
-          const email = (u.email || "").toLowerCase();
-          const uid = (u.user_id || "").toLowerCase();
+        const labelMatch = safeStr(c.label).toLowerCase().includes(s);
+        const usersFiltered = (c.users || []).filter((u) => {
+          const email = safeStr(u.email).toLowerCase();
+          const uid = safeStr(u.user_id).toLowerCase();
           return email.includes(s) || uid.includes(s);
         });
-        const clientMatch = (c.label || "").toLowerCase().includes(s);
-        if (!clientMatch && users.length === 0) return null;
-        return { ...c, users: clientMatch ? c.users : users };
+        if (!labelMatch && usersFiltered.length === 0) return null;
+        return { ...c, users: labelMatch ? c.users : usersFiltered };
       })
       .filter(Boolean);
-  }, [clients, clientUsers, profiles, q]);
+  }, [clients, clientUsers, profileByUserId, q]);
 
-  const selectedClient = useMemo(
-    () => clients.find((c) => c.id === selectedClientId) || null,
-    [clients, selectedClientId]
-  );
+  const selectedClient = useMemo(() => {
+    return selectedClientId ? clientById.get(selectedClientId) || null : null;
+  }, [clientById, selectedClientId]);
 
   const selectedUser = useMemo(() => {
-    const p = profiles.find((x) => x.user_id === selectedUserId) || null;
-    const email = p?.email || "";
-    const role = p?.role || "user";
-    return selectedUserId ? { user_id: selectedUserId, email, role } : null;
-  }, [profiles, selectedUserId]);
+    if (!selectedUserId) return null;
+    const p = profileByUserId.get(selectedUserId);
+    return {
+      user_id: selectedUserId,
+      email: safeStr(p?.email),
+      role: safeStr(p?.role) || "user",
+    };
+  }, [profileByUserId, selectedUserId]);
 
   const assignedSet = useMemo(() => {
     const set = new Set();
@@ -111,6 +132,7 @@ export default function Admin() {
 
     async function boot() {
       setMsg("");
+      setLoading(true);
 
       const {
         data: { session },
@@ -121,17 +143,17 @@ export default function Admin() {
         return;
       }
 
-      // Profil du user connecté
-      const { data: myProfile1, error: myErr1 } = await supabase
+      // 1) Lire profil connecté
+      const { data: myP1, error: myE1 } = await supabase
         .from("profiles")
         .select("*")
         .eq("user_id", session.user.id)
         .maybeSingle();
 
-      let myProfile = myProfile1;
+      let myProfile = myP1;
 
-      // si profil absent, tente de le créer
-      if (!myErr1 && !myProfile) {
+      // 1bis) si absent, créer profil (comme avant)
+      if (!myE1 && !myProfile) {
         const newRow = {
           user_id: session.user.id,
           email: session.user.email,
@@ -146,7 +168,6 @@ export default function Admin() {
         if (newId) newRow.id = newId;
 
         const { error: insErr } = await supabase.from("profiles").insert(newRow);
-
         if (insErr) {
           if (!mounted) return;
           setLoading(false);
@@ -154,31 +175,27 @@ export default function Admin() {
           return;
         }
 
-        const { data: myProfile2, error: myErr2 } = await supabase
+        const { data: myP2, error: myE2 } = await supabase
           .from("profiles")
           .select("*")
           .eq("user_id", session.user.id)
           .maybeSingle();
 
-        if (myErr2) {
+        if (myE2) {
           if (!mounted) return;
           setLoading(false);
-          setMsg(`Lecture du profil impossible : ${myErr2.message}`);
+          setMsg(`Lecture du profil impossible : ${myE2.message}`);
           return;
         }
 
-        myProfile = myProfile2 || null;
+        myProfile = myP2 || null;
       }
 
       if (!mounted) return;
 
-      if (myErr1 || !myProfile) {
+      if (myE1 || !myProfile) {
         setLoading(false);
-        setMsg(
-          myErr1
-            ? `Lecture du profil impossible : ${myErr1.message}`
-            : "Profil introuvable (table profiles)."
-        );
+        setMsg(myE1 ? `Lecture du profil impossible : ${myE1.message}` : "Profil introuvable (table profiles).");
         return;
       }
 
@@ -186,7 +203,6 @@ export default function Admin() {
         ...myProfile,
         email: myProfile.email || session.user.email || null,
       };
-
       setMe(myProfileSafe);
 
       if (myProfileSafe.role !== "admin") {
@@ -195,55 +211,68 @@ export default function Admin() {
         return;
       }
 
-      // Charger clients
-      const { data: c, error: cErr } = await supabase
-        .from("clients")
-        .select("*")
-        .order("name", { ascending: true });
-
-      // Charger client_users
-      const { data: cu, error: cuErr } = await supabase
-        .from("client_users")
-        .select("client_id, user_id");
-
-      // Charger profiles (pour email/role)
-      const { data: p, error: pErr } = await supabase
-        .from("profiles")
-        .select("user_id, email, role")
-        .order("email", { ascending: true });
-
-      // Charger agents
-      const { data: a, error: aErr } = await supabase
-        .from("agents")
-        .select("id, slug, name, description, avatar_url")
-        .order("name", { ascending: true });
-
-      // Charger assignations (user_agents)
-      const { data: ua, error: uaErr } = await supabase
-        .from("user_agents")
-        .select("user_id, agent_id, created_at")
-        .order("created_at", { ascending: false });
+      // 2) Charger données (SANS order('name') sur clients pour éviter l'erreur de colonne)
+      const [cRes, cuRes, pRes, aRes, uaRes] = await Promise.all([
+        supabase.from("clients").select("*"),
+        supabase.from("client_users").select("client_id, user_id"),
+        supabase.from("profiles").select("user_id, email, role"),
+        supabase
+          .from("agents")
+          .select("id, slug, name, description, avatar_url"),
+        supabase
+          .from("user_agents")
+          .select("user_id, agent_id, created_at")
+          .order("created_at", { ascending: false }),
+      ]);
 
       if (!mounted) return;
 
-      const clientsSafe = cErr ? [] : c || [];
-      const clientUsersSafe = cuErr ? [] : cu || [];
-      const profilesSafe = pErr ? [] : p || [];
+      const cErr = cRes.error;
+      const cuErr = cuRes.error;
+      const pErr = pRes.error;
+      const aErr = aRes.error;
+      const uaErr = uaRes.error;
+
+      if (cErr || cuErr || pErr || aErr || uaErr) {
+        // On affiche une erreur claire, mais on garde ce qu'on a
+        const parts = [];
+        if (cErr) parts.push(`clients: ${cErr.message}`);
+        if (cuErr) parts.push(`client_users: ${cuErr.message}`);
+        if (pErr) parts.push(`profiles: ${pErr.message}`);
+        if (aErr) parts.push(`agents: ${aErr.message}`);
+        if (uaErr) parts.push(`user_agents: ${uaErr.message}`);
+        setMsg("Chargement partiel : " + parts.join(" | "));
+      }
+
+      const clientsSafe = cRes.data || [];
+      const clientUsersSafe = cuRes.data || [];
+      const profilesSafe = pRes.data || [];
+      const agentsSafe = aRes.data || [];
+      const userAgentsSafe = uaRes.data || [];
 
       setClients(clientsSafe);
       setClientUsers(clientUsersSafe);
       setProfiles(profilesSafe);
+      setAgents(agentsSafe);
+      setUserAgents(userAgentsSafe);
 
-      setAgents(aErr ? [] : a || []);
-      setUserAgents(uaErr ? [] : ua || []);
+      // 3) Sélections par défaut : 1er client qui a au moins 1 user, sinon 1er client, sinon rien
+      let defaultClientId = "";
+      let defaultUserId = "";
 
-      // Sélection auto : 1er client, puis 1er user du client
-      const firstClientId = clientsSafe[0]?.id || "";
-      setSelectedClientId(firstClientId);
+      const firstWithUser = clientsSafe.find((c) =>
+        clientUsersSafe.some((x) => x.client_id === c.id)
+      );
+      defaultClientId = firstWithUser?.id || clientsSafe[0]?.id || "";
 
-      const firstUserForClient =
-        clientUsersSafe.find((x) => x.client_id === firstClientId)?.user_id || "";
-      setSelectedUserId(firstUserForClient);
+      if (defaultClientId) {
+        defaultUserId =
+          clientUsersSafe.find((x) => x.client_id === defaultClientId)?.user_id ||
+          "";
+      }
+
+      setSelectedClientId(defaultClientId);
+      setSelectedUserId(defaultUserId);
 
       setLoading(false);
     }
@@ -254,13 +283,13 @@ export default function Admin() {
     };
   }, []);
 
+  // Quand on change de client => sélectionner le premier user du client
   useEffect(() => {
-    // quand on change de client : sélectionner automatiquement le premier user du client
     if (!selectedClientId) return;
-    const firstUserForClient =
+    const firstUserId =
       clientUsers.find((x) => x.client_id === selectedClientId)?.user_id || "";
-    setSelectedUserId(firstUserForClient);
-  }, [selectedClientId]); // volontaire : pas clientUsers ici (sinon reselect trop souvent)
+    setSelectedUserId(firstUserId);
+  }, [selectedClientId, clientUsers]);
 
   async function logout() {
     await supabase.auth.signOut();
@@ -363,54 +392,68 @@ export default function Admin() {
           </div>
 
           <div style={styles.list}>
-            {clientTree.map((c) => {
-              const activeClient = c.id === selectedClientId;
-              return (
-                <div
-                  key={c.id}
-                  style={{
-                    ...styles.clientBlock,
-                    ...(activeClient ? styles.clientBlockActive : null),
-                  }}
-                >
-                  <button
-                    onClick={() => setSelectedClientId(c.id)}
-                    style={styles.clientHeaderBtn}
-                    title={c.label}
-                  >
-                    <div style={styles.clientName}>{c.label}</div>
-                    <div style={styles.clientCount}>
-                      {c.users?.length || 0} user(s)
-                    </div>
-                  </button>
-
-                  <div style={styles.clientUsers}>
-                    {(c.users || []).map((u) => {
-                      const activeUser = u.user_id === selectedUserId;
-                      return (
-                        <button
-                          key={u.user_id}
-                          onClick={() => {
-                            setSelectedClientId(c.id);
-                            setSelectedUserId(u.user_id);
-                          }}
-                          style={{
-                            ...styles.userRow,
-                            ...(activeUser ? styles.userRowActive : null),
-                          }}
-                          title={u.email || u.user_id}
-                        >
-                          <div style={styles.userEmail}>
-                            {u.email || "(email non renseigné)"}
-                          </div>
-                          <div style={styles.userBadge}>{u.role}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
+            {clientTree.length === 0 ? (
+              <div style={styles.emptyBox}>
+                Aucun client / utilisateur à afficher.
+                <div style={{ marginTop: 8, opacity: 0.8 }}>
+                  Vérifie que les tables <b>clients</b> et <b>client_users</b> ont
+                  des données.
                 </div>
-              );
-            })}
+              </div>
+            ) : (
+              clientTree.map((c) => {
+                const activeClient = c.id === selectedClientId;
+                return (
+                  <div
+                    key={c.id}
+                    style={{
+                      ...styles.clientBlock,
+                      ...(activeClient ? styles.clientBlockActive : null),
+                    }}
+                  >
+                    <button
+                      onClick={() => setSelectedClientId(c.id)}
+                      style={styles.clientHeaderBtn}
+                      title={c.label}
+                    >
+                      <div style={styles.clientName}>{c.label}</div>
+                      <div style={styles.clientCount}>
+                        {(c.users || []).length} user(s)
+                      </div>
+                    </button>
+
+                    <div style={styles.clientUsers}>
+                      {(c.users || []).length === 0 ? (
+                        <div style={styles.miniEmpty}>Aucun utilisateur rattaché.</div>
+                      ) : (
+                        c.users.map((u) => {
+                          const activeUser = u.user_id === selectedUserId;
+                          return (
+                            <button
+                              key={u.user_id}
+                              onClick={() => {
+                                setSelectedClientId(c.id);
+                                setSelectedUserId(u.user_id);
+                              }}
+                              style={{
+                                ...styles.userRow,
+                                ...(activeUser ? styles.userRowActive : null),
+                              }}
+                              title={u.email || u.user_id}
+                            >
+                              <div style={styles.userEmail}>
+                                {u.email || "(email non renseigné)"}
+                              </div>
+                              <div style={styles.userBadge}>{u.role}</div>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         </aside>
 
@@ -444,7 +487,10 @@ export default function Admin() {
           <div style={styles.grid}>
             {agents.map((a) => {
               const checked = assignedSet.has(a.id);
-              const src = normalizeImgSrc(a.avatar_url) || "/images/logopc.png";
+
+              // IMPORTANT: on garde la logique qui marche (normalisation + fallback)
+              const src =
+                normalizeImgSrc(a.avatar_url) || `/images/${a.slug}.png`;
 
               return (
                 <button
@@ -457,7 +503,7 @@ export default function Admin() {
                   disabled={!selectedUserId}
                   title={a.slug}
                 >
-                  <div style={styles.agentTopCenter}>
+                  <div style={styles.agentTop}>
                     <img
                       src={src}
                       alt={a.name}
@@ -471,7 +517,9 @@ export default function Admin() {
                   </div>
 
                   <div style={styles.checkRow}>
-                    <div style={styles.check}>{checked ? "Assigné" : "Non assigné"}</div>
+                    <div style={styles.check}>
+                      {checked ? "Assigné" : "Non assigné"}
+                    </div>
                   </div>
                 </button>
               );
@@ -548,9 +596,15 @@ const styles = {
     alignItems: "flex-start",
   },
   panelTitle: { fontWeight: 900, fontSize: 13 },
-  sub: { marginTop: 6, opacity: 0.8, fontWeight: 700, fontSize: 12, lineHeight: 1.4 },
+  sub: {
+    marginTop: 6,
+    opacity: 0.8,
+    fontWeight: 700,
+    fontSize: 12,
+    lineHeight: 1.4,
+  },
   search: {
-    width: 210,
+    width: 230,
     padding: "10px 12px",
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,.12)",
@@ -561,7 +615,16 @@ const styles = {
     fontSize: 12,
   },
   list: { padding: 10, overflowY: "auto", display: "grid", gap: 10 },
-
+  emptyBox: {
+    padding: 14,
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.22)",
+    fontWeight: 800,
+    fontSize: 12,
+    opacity: 0.85,
+    lineHeight: 1.45,
+  },
   clientBlock: {
     borderRadius: 18,
     border: "1px solid rgba(255,255,255,.10)",
@@ -570,7 +633,8 @@ const styles = {
   },
   clientBlockActive: {
     border: "1px solid rgba(255,140,40,.18)",
-    background: "linear-gradient(135deg, rgba(255,140,40,.10), rgba(80,120,255,.08))",
+    background:
+      "linear-gradient(135deg, rgba(255,140,40,.10), rgba(80,120,255,.08))",
   },
   clientHeaderBtn: {
     width: "100%",
@@ -599,12 +663,20 @@ const styles = {
     opacity: 0.7,
     whiteSpace: "nowrap",
   },
-
   clientUsers: {
     padding: 10,
     display: "grid",
     gap: 8,
     background: "rgba(0,0,0,.12)",
+  },
+  miniEmpty: {
+    padding: 10,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.18)",
+    fontWeight: 800,
+    fontSize: 12,
+    opacity: 0.8,
   },
   userRow: {
     width: "100%",
@@ -641,7 +713,6 @@ const styles = {
     background: "rgba(255,255,255,.06)",
     whiteSpace: "nowrap",
   },
-
   grid: {
     padding: 14,
     overflowY: "auto",
@@ -663,10 +734,22 @@ const styles = {
   },
   agentCardOn: {
     border: "1px solid rgba(255,140,40,.25)",
-    background: "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
+    background:
+      "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
   },
-  agentTopCenter: { display: "flex", justifyContent: "center", alignItems: "center", paddingTop: 4 },
-  avatar: { width: 74, height: 74, borderRadius: "50%", objectFit: "cover" },
+  agentTop: {
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingTop: 6,
+  },
+  avatar: {
+    width: 74,
+    height: 74,
+    borderRadius: "50%",
+    objectFit: "cover",
+    display: "block",
+  },
   checkRow: { display: "flex", justifyContent: "flex-end" },
   check: {
     fontWeight: 900,
