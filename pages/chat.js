@@ -4,101 +4,59 @@ import { supabase } from "../lib/supabaseClient";
 
 export default function Chat() {
   const [loading, setLoading] = useState(true);
-  const [email, setEmail] = useState("");
-  const [userId, setUserId] = useState("");
-
+  const [user, setUser] = useState(null);
   const [agent, setAgent] = useState(null);
   const [conversationId, setConversationId] = useState(null);
-
-  const [history, setHistory] = useState([]);
   const [messages, setMessages] = useState([]);
-
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [errorMsg, setErrorMsg] = useState("");
 
   const threadRef = useRef(null);
-  const canSend = useMemo(
-    () => input.trim().length > 0 && !sending,
-    [input, sending]
-  );
+  const canSend = useMemo(() => input.trim() && !sending, [input, sending]);
 
-  function scrollToBottom() {
+  const scrollBottom = () =>
     requestAnimationFrame(() => {
-      threadRef.current?.scrollTo(0, threadRef.current.scrollHeight);
+      if (threadRef.current)
+        threadRef.current.scrollTop = threadRef.current.scrollHeight;
     });
-  }
 
-  /* ================= BOOT ================= */
   useEffect(() => {
-    let mounted = true;
+    const boot = async () => {
+      const { data } = await supabase.auth.getSession();
+      if (!data.session) return (window.location.href = "/login");
 
-    async function boot() {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+      setUser(data.session.user);
 
-      if (!session) {
-        window.location.href = "/login";
-        return;
-      }
-
-      const uid = session.user.id;
-      setUserId(uid);
-      setEmail(session.user.email || "");
-
-      const url = new URL(window.location.href);
-      const slug = url.searchParams.get("agent");
-
-      if (!slug) {
-        window.location.href = "/agents";
-        return;
-      }
+      const agentSlug = new URL(window.location.href).searchParams.get("agent");
+      if (!agentSlug) return (window.location.href = "/agents");
 
       const { data: agentData } = await supabase
         .from("agents")
         .select("*")
-        .eq("slug", slug)
+        .eq("slug", agentSlug)
         .single();
-
-      if (!agentData) {
-        window.location.href = "/agents";
-        return;
-      }
 
       setAgent(agentData);
 
-      // Historique
-      const { data: hist } = await supabase
+      const { data: conv } = await supabase
         .from("conversations")
-        .select("id, title, updated_at")
-        .eq("user_id", uid)
-        .eq("agent_slug", slug)
-        .order("updated_at", { ascending: false })
-        .limit(10);
+        .select("*")
+        .eq("user_id", data.session.user.id)
+        .eq("agent_slug", agentSlug)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
 
-      setHistory(hist || []);
-
-      let convId = url.searchParams.get("c");
-
-      if (convId) {
-        const exists = hist?.some((c) => c.id === convId);
-        if (!exists) convId = null;
-      }
-
-      if (!convId && hist?.length > 0) {
-        convId = hist[0].id;
-      }
+      let convId = conv?.id;
 
       if (!convId) {
         const { data: newConv } = await supabase
           .from("conversations")
           .insert({
-            user_id: uid,
-            agent_slug: slug,
-            title: "Nouvelle conversation",
+            user_id: data.session.user.id,
+            agent_slug: agentSlug,
           })
-          .select("id")
+          .select()
           .single();
 
         convId = newConv.id;
@@ -108,110 +66,86 @@ export default function Chat() {
 
       const { data: msgs } = await supabase
         .from("messages")
-        .select("role, content")
+        .select("*")
         .eq("conversation_id", convId)
         .order("created_at", { ascending: true });
 
-      if (msgs?.length > 0) {
-        setMessages(msgs);
-      } else {
+      if (!msgs.length) {
         setMessages([
           {
             role: "assistant",
             content: `Bonjour, je suis ${agentData.name}. Comment puis-je vous aider ?`,
           },
         ]);
+      } else {
+        setMessages(msgs);
       }
 
       setLoading(false);
-      scrollToBottom();
-    }
+      scrollBottom();
+    };
 
     boot();
-
-    return () => {
-      mounted = false;
-    };
   }, []);
 
-  /* ================= SEND MESSAGE ================= */
   async function sendMessage() {
-    if (!canSend || !conversationId) return;
+    if (!canSend) return;
 
-    const userText = input.trim();
+    const text = input.trim();
     setInput("");
     setSending(true);
 
-    const newMessages = [...messages, { role: "user", content: userText }];
-    setMessages(newMessages);
-    scrollToBottom();
+    setMessages((m) => [...m, { role: "user", content: text }]);
+    scrollBottom();
 
     await supabase.from("messages").insert({
       conversation_id: conversationId,
-      user_id: userId,
+      user_id: user.id,
       role: "user",
-      content: userText,
+      content: text,
     });
 
-    try {
-      const resp = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agentSlug: agent.slug,
-          messages: newMessages,
-        }),
-      });
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: text,
+        agentSlug: agent.slug,
+        conversationId,
+        userId: user.id,
+      }),
+    });
 
-      const data = await resp.json();
-      if (!resp.ok) throw new Error();
-
-      const reply = data.reply;
-
-      setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
-
-      await supabase.from("messages").insert({
-        conversation_id: conversationId,
-        user_id: userId,
-        role: "assistant",
-        content: reply,
-      });
-
-      await supabase
-        .from("conversations")
-        .update({ updated_at: new Date().toISOString() })
-        .eq("id", conversationId);
-
-      scrollToBottom();
-    } catch {
-      setErrorMsg("Erreur IA.");
-    } finally {
-      setSending(false);
-    }
+    const data = await res.json();
+    setMessages((m) => [...m, { role: "assistant", content: data.reply }]);
+    setSending(false);
+    scrollBottom();
   }
 
-  if (loading || !agent) return null;
+  if (loading) return null;
 
   return (
-    <div style={{ padding: 20, color: "#fff" }}>
-      <h2>{agent.name}</h2>
-
-      <div ref={threadRef} style={{ height: "70vh", overflowY: "auto" }}>
+    <div className="chat-container">
+      <div className="chat-thread" ref={threadRef}>
         {messages.map((m, i) => (
-          <div key={i} style={{ marginBottom: 12 }}>
+          <div key={i} className={`bubble ${m.role}`}>
             <strong>{m.role === "user" ? "Vous" : agent.name}</strong>
             <div>{m.content}</div>
           </div>
         ))}
       </div>
 
-      <textarea
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
-        placeholder="Votre message…"
-        style={{ width: "100%", marginTop: 10 }}
-      />
+      <div className="chat-input">
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
+          placeholder="Votre message..."
+        />
+        <button disabled={!canSend} onClick={sendMessage}>
+          Envoyer
+        </button>
+      </div>
     </div>
   );
 }
