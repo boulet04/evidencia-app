@@ -45,6 +45,7 @@ export default function Admin() {
       const {
         data: { session },
       } = await supabase.auth.getSession();
+
       if (!session) {
         window.location.href = "/login";
         return;
@@ -103,13 +104,23 @@ export default function Admin() {
 
       if (myErr1 || !myProfile) {
         setLoading(false);
-        setMsg(myErr1 ? `Lecture du profil impossible : ${myErr1.message}` : "Profil introuvable (table profiles).");
+        setMsg(
+          myErr1
+            ? `Lecture du profil impossible : ${myErr1.message}`
+            : "Profil introuvable (table profiles)."
+        );
         return;
       }
 
-      setMe(myProfile);
+      // (petit fallback pour l’admin connecté si profiles.email est vide)
+      const myProfileSafe = {
+        ...myProfile,
+        email: myProfile.email || session.user.email || null,
+      };
 
-      if (myProfile.role !== "admin") {
+      setMe(myProfileSafe);
+
+      if (myProfileSafe.role !== "admin") {
         setLoading(false);
         setMsg("Accès refusé : vous n’êtes pas admin.");
         return;
@@ -135,13 +146,12 @@ export default function Admin() {
 
       if (!mounted) return;
 
-      setUsers(uErr ? [] : (u || []));
-      setAgents(aErr ? [] : (a || []));
-      setUserAgents(uaErr ? [] : (ua || []));
+      setUsers(uErr ? [] : u || []);
+      setAgents(aErr ? [] : a || []);
+      setUserAgents(uaErr ? [] : ua || []);
 
       // Sélection auto du premier user non-admin si possible
-      const firstUser =
-        (u || []).find((x) => x.role !== "admin") || (u || [])[0];
+      const firstUser = (u || []).find((x) => x.role !== "admin") || (u || [])[0];
       setSelectedUserId(firstUser?.user_id || "");
 
       setLoading(false);
@@ -217,7 +227,10 @@ export default function Admin() {
         <div style={styles.card}>
           <div style={styles.h1}>Backoffice</div>
           <div style={styles.alert}>{msg || "Accès refusé."}</div>
-          <button style={styles.btnGhost} onClick={() => (window.location.href = "/agents")}>
+          <button
+            style={styles.btnGhost}
+            onClick={() => (window.location.href = "/agents")}
+          >
             Retour aux agents
           </button>
         </div>
@@ -231,7 +244,9 @@ export default function Admin() {
         <div style={styles.brand}>Backoffice Evidenc’IA</div>
         <div style={styles.topRight}>
           <span style={styles.chip}>{me?.email || "admin"}</span>
-          <button style={styles.btnGhost} onClick={logout}>Déconnexion</button>
+          <button style={styles.btnGhost} onClick={logout}>
+            Déconnexion
+          </button>
         </div>
       </header>
 
@@ -258,7 +273,9 @@ export default function Admin() {
                   style={{ ...styles.item, ...(active ? styles.itemActive : null) }}
                 >
                   <div style={styles.itemTop}>
-                    <div style={styles.itemEmail}>{u.email || "(email non renseigné)"}</div>
+                    <div style={styles.itemEmail}>
+                      {u.email || "(email non renseigné)"}
+                    </div>
                     <div style={styles.badge}>{u.role}</div>
                   </div>
                   <div style={styles.itemId}>{u.user_id}</div>
@@ -276,8 +293,12 @@ export default function Admin() {
               <div style={styles.sub}>
                 {selectedUser ? (
                   <>
-                    <div><b>Utilisateur :</b> {selectedUser.email || selectedUser.user_id}</div>
-                    <div><b>user_id :</b> {selectedUser.user_id}</div>
+                    <div>
+                      <b>Utilisateur :</b> {selectedUser.email || selectedUser.user_id}
+                    </div>
+                    <div>
+                      <b>user_id :</b> {selectedUser.user_id}
+                    </div>
                   </>
                 ) : (
                   "Sélectionne un utilisateur."
@@ -304,14 +325,15 @@ export default function Admin() {
                   disabled={!selectedUserId}
                   title={a.slug}
                 >
-                  <div style={styles.agentTop}>
-                    <img src={a.avatar_url || "/images/logopc.png"} alt={a.name} style={styles.avatar} />
-                    <div style={styles.agentMeta}>
-                      <div style={styles.agentName}>{a.name}</div>
-                      <div style={styles.agentDesc}>{a.description}</div>
-                      <div style={styles.agentSlug}>{a.slug}</div>
-                    </div>
+                  {/* ✅ MODIF demandée : dans l’admin, on affiche uniquement la tête */}
+                  <div style={{ ...styles.agentTop, justifyContent: "center" }}>
+                    <img
+                      src={a.avatar_url || "/images/logopc.png"}
+                      alt={a.name}
+                      style={styles.avatar}
+                    />
                   </div>
+
                   <div style={styles.checkRow}>
                     <div style={styles.check}>{checked ? "Assigné" : "Non assigné"}</div>
                   </div>
@@ -390,7 +412,13 @@ const styles = {
     alignItems: "flex-start",
   },
   panelTitle: { fontWeight: 900, fontSize: 13 },
-  sub: { marginTop: 6, opacity: 0.8, fontWeight: 700, fontSize: 12, lineHeight: 1.4 },
+  sub: {
+    marginTop: 6,
+    opacity: 0.8,
+    fontWeight: 700,
+    fontSize: 12,
+    lineHeight: 1.4,
+  },
   search: {
     width: 190,
     padding: "10px 12px",
@@ -419,7 +447,12 @@ const styles = {
     background: "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
     border: "1px solid rgba(255,140,40,.18)",
   },
-  itemTop: { display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" },
+  itemTop: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 10,
+    alignItems: "center",
+  },
   itemEmail: { fontWeight: 900, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis" },
   badge: {
     fontSize: 11,
@@ -455,10 +488,6 @@ const styles = {
   },
   agentTop: { display: "flex", gap: 12, alignItems: "center" },
   avatar: { width: 56, height: 56, borderRadius: "50%", objectFit: "cover" },
-  agentMeta: { display: "grid", gap: 3, minWidth: 0 },
-  agentName: { fontWeight: 900, fontSize: 15 },
-  agentDesc: { fontWeight: 800, fontSize: 12, opacity: 0.8 },
-  agentSlug: { fontWeight: 900, fontSize: 11, opacity: 0.7 },
   checkRow: { display: "flex", justifyContent: "flex-end" },
   check: {
     fontWeight: 900,
