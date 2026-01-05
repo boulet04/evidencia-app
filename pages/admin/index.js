@@ -195,7 +195,11 @@ export default function Admin() {
 
       if (myE1 || !myProfile) {
         setLoading(false);
-        setMsg(myE1 ? `Lecture du profil impossible : ${myE1.message}` : "Profil introuvable (table profiles).");
+        setMsg(
+          myE1
+            ? `Lecture du profil impossible : ${myE1.message}`
+            : "Profil introuvable (table profiles)."
+        );
         return;
       }
 
@@ -216,9 +220,7 @@ export default function Admin() {
         supabase.from("clients").select("*"),
         supabase.from("client_users").select("client_id, user_id"),
         supabase.from("profiles").select("user_id, email, role"),
-        supabase
-          .from("agents")
-          .select("id, slug, name, description, avatar_url"),
+        supabase.from("agents").select("id, slug, name, description, avatar_url"),
         supabase
           .from("user_agents")
           .select("user_id, agent_id, created_at")
@@ -369,7 +371,16 @@ export default function Admin() {
   return (
     <main style={styles.page}>
       <header style={styles.topbar}>
-        <div style={styles.brand}>Backoffice Evidenc’IA</div>
+        {/* MODIF #1 : logo + "Console administrateur" */}
+        <div style={styles.brandWrap}>
+          <img
+            src="/images/logolong.png"
+            alt="Evidenc’IA"
+            style={styles.brandLogo}
+          />
+          <div style={styles.brandText}>Console administrateur</div>
+        </div>
+
         <div style={styles.topRight}>
           <span style={styles.chip}>{me?.email || "admin"}</span>
           <button style={styles.btnGhost} onClick={logout}>
@@ -424,7 +435,9 @@ export default function Admin() {
 
                     <div style={styles.clientUsers}>
                       {(c.users || []).length === 0 ? (
-                        <div style={styles.miniEmpty}>Aucun utilisateur rattaché.</div>
+                        <div style={styles.miniEmpty}>
+                          Aucun utilisateur rattaché.
+                        </div>
                       ) : (
                         c.users.map((u) => {
                           const activeUser = u.user_id === selectedUserId;
@@ -547,7 +560,12 @@ const styles = {
     background: "rgba(0,0,0,.28)",
     backdropFilter: "blur(10px)",
   },
-  brand: { fontWeight: 900, letterSpacing: 0.2 },
+
+  /* MODIF #1 : styles brand */
+  brandWrap: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
+  brandLogo: { height: 22, width: "auto", display: "block" },
+  brandText: { fontWeight: 900, letterSpacing: 0.2, color: "#eef2ff" },
+
   topRight: { display: "flex", gap: 10, alignItems: "center" },
   chip: {
     padding: "8px 12px",
@@ -743,13 +761,17 @@ const styles = {
     alignItems: "center",
     paddingTop: 6,
   },
+
+  /* MODIF #2 : cadrage avatar (têtes visibles) */
   avatar: {
     width: 74,
     height: 74,
     borderRadius: "50%",
     objectFit: "cover",
+    objectPosition: "center 15%", // <-- IMPORTANT (remonte l'image)
     display: "block",
   },
+
   checkRow: { display: "flex", justifyContent: "flex-end" },
   check: {
     fontWeight: 900,
