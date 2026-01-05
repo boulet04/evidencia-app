@@ -737,18 +737,20 @@ const styles = {
     gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
     gap: 14,
   },
-  agentCard: {
-    textAlign: "left",
-    width: "100%",
-    padding: 14,
-    borderRadius: 20,
-    border: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(0,0,0,.28)",
-    color: "#eef2ff",
-    cursor: "pointer",
-    display: "grid",
-    gap: 12,
-  },
+agentCard: {
+  textAlign: "left",
+  width: "100%",
+  padding: 14,
+  borderRadius: 20,
+  border: "1px solid rgba(255,255,255,.10)",
+  background: "rgba(0,0,0,.28)",
+  color: "#eef2ff",
+  WebkitTextFillColor: "#eef2ff", // <-- AJOUT (force blanc)
+  cursor: "pointer",
+  display: "grid",
+  gap: 12,
+},
+
   agentCardOn: {
     border: "1px solid rgba(255,140,40,.25)",
     background:
