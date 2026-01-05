@@ -23,24 +23,55 @@ export default function Agents() {
 
       setEmail(session.user.email || "");
 
-      // Lire rôle dans profiles
+      // Lire rôle
       const { data: p, error: pErr } = await supabase
         .from("profiles")
         .select("role")
         .eq("user_id", session.user.id)
         .maybeSingle();
 
+      const admin = !pErr && p?.role === "admin";
       if (!mounted) return;
-      setIsAdmin(!pErr && p?.role === "admin");
+      setIsAdmin(admin);
 
-      const { data, error } = await supabase
+      // Admin => tous les agents
+      if (admin) {
+        const { data, error } = await supabase
+          .from("agents")
+          .select("*")
+          .order("name", { ascending: true });
+
+        if (!mounted) return;
+        setAgents(error ? [] : data || []);
+        setLoading(false);
+        return;
+      }
+
+      // User normal => uniquement agents assignés via user_agents
+      const { data: uaRows, error: uaErr } = await supabase
+        .from("user_agents")
+        .select("agent_id")
+        .eq("user_id", session.user.id);
+
+      if (!mounted) return;
+
+      const agentIds = (uaRows || []).map((r) => r.agent_id).filter(Boolean);
+
+      // Aucun agent assigné => liste vide (affichage message)
+      if (uaErr || agentIds.length === 0) {
+        setAgents([]);
+        setLoading(false);
+        return;
+      }
+
+      const { data: aData, error: aErr } = await supabase
         .from("agents")
         .select("*")
+        .in("id", agentIds)
         .order("name", { ascending: true });
 
       if (!mounted) return;
-
-      setAgents(error ? [] : data || []);
+      setAgents(aErr ? [] : aData || []);
       setLoading(false);
     }
 
@@ -64,26 +95,20 @@ export default function Agents() {
   }
 
   return (
-    // IMPORTANT: wrapper "globalFix" = correctif B appliqué
-    <main style={{ ...styles.page, ...styles.globalFix }}>
+    <main style={styles.page}>
       <div style={styles.bg} aria-hidden="true">
         <div style={styles.bgLogo} />
         <div style={styles.bgVeils} />
       </div>
 
       <header style={styles.topbar}>
-        <img
-          src="/images/logolong.png"
-          alt="Evidenc’IA"
-          style={styles.brandLogo}
-        />
+        <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
 
         <div style={styles.topRight}>
           <span style={styles.userChip}>{email}</span>
 
           {isAdmin ? (
             <button
-              type="button"
               onClick={() => (window.location.href = "/admin")}
               style={styles.btnGhost}
             >
@@ -91,7 +116,7 @@ export default function Agents() {
             </button>
           ) : null}
 
-          <button type="button" onClick={logout} style={styles.btnGhost}>
+          <button onClick={logout} style={styles.btnGhost}>
             Déconnexion
           </button>
         </div>
@@ -99,49 +124,46 @@ export default function Agents() {
 
       <section style={styles.shell}>
         <h1 style={styles.h1}>Choisissez votre agent</h1>
-        <p style={styles.p}>Cliquez sur un agent pour ouvrir son espace.</p>
 
-        <div style={styles.grid}>
-          {agents.map((a) => {
-            const src = (a?.avatar_url || "").trim() || `/images/${a.slug}.png`;
+        {agents.length === 0 ? (
+          <div style={styles.empty}>
+            Aucun agent n’est assigné à cet utilisateur.
+            <div style={{ marginTop: 8, opacity: 0.8 }}>
+              Demande à l’admin d’assigner au moins un agent dans la Console admin.
+            </div>
+          </div>
+        ) : (
+          <>
+            <p style={styles.p}>Cliquez sur un agent pour ouvrir son espace.</p>
 
-            return (
-              <button
-                key={a.id}
-                type="button"
-                style={styles.card}
-                onClick={() => (window.location.href = `/chat?agent=${a.slug}`)}
-              >
-                <div style={styles.avatarWrap}>
-                  <img
-                    src={src}
-                    alt={a.name}
-                    style={styles.avatar}
-                    loading="lazy"
-                    onError={(e) => {
-                      e.currentTarget.onerror = null;
-                      e.currentTarget.src = "/images/logopc.png";
-                    }}
-                  />
-                </div>
+            <div style={styles.grid}>
+              {agents.map((a) => (
+                <button
+                  key={a.id}
+                  style={styles.card}
+                  onClick={() => (window.location.href = `/chat?agent=${a.slug}`)}
+                >
+                  <div style={styles.avatarWrap}>
+                    <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
+                  </div>
 
-                <div style={styles.meta}>
-                  <div style={styles.name}>{a.name}</div>
-                  <div style={styles.desc}>{a.description}</div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
+                  <div style={styles.meta}>
+                    <div style={styles.name}>{a.name}</div>
+                    <div style={styles.desc}>{a.description}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
       </section>
     </main>
   );
 }
 
 /**
- * Correctif "B" renforcé :
- * - On force l'héritage de couleur sur les zones problématiques.
- * - On neutralise le style navigateur des <button> (WebKit mobile peut forcer du noir).
+ * CORRECTIF "B" (global) — on force les <button> et <a> à hériter la couleur
+ * afin d’éviter le texte noir par défaut sur mobile/selon navigateur.
  */
 const styles = {
   page: {
@@ -151,11 +173,6 @@ const styles = {
     fontFamily: "Segoe UI, Arial, sans-serif",
     color: "#eef2ff",
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
-  },
-
-  // Wrapper global pour forcer l'héritage
-  globalFix: {
-    color: "#eef2ff",
   },
 
   bg: { position: "absolute", inset: 0, zIndex: 0 },
@@ -201,23 +218,17 @@ const styles = {
     borderRadius: 999,
     fontWeight: 800,
     color: "inherit",
-    WebkitTextFillColor: "currentColor",
   },
 
   btnGhost: {
     padding: "10px 14px",
     borderRadius: 999,
     background: "rgba(255,255,255,.1)",
+    color: "inherit",
+    fontWeight: 900,
     border: "1px solid rgba(255,255,255,.2)",
     cursor: "pointer",
-    fontWeight: 900,
-
-    // HARDENING (anti-texte noir mobile)
-    color: "inherit",
     WebkitTextFillColor: "currentColor",
-    appearance: "none",
-    WebkitAppearance: "none",
-    outline: "none",
   },
 
   shell: {
@@ -228,8 +239,17 @@ const styles = {
     margin: "0 auto",
   },
 
-  h1: { fontSize: 32, fontWeight: 900, marginBottom: 6, color: "inherit" },
-  p: { opacity: 0.8, marginBottom: 20, color: "inherit" },
+  h1: { fontSize: 32, fontWeight: 900, marginBottom: 6 },
+  p: { opacity: 0.8, marginBottom: 20 },
+
+  empty: {
+    marginTop: 18,
+    padding: 16,
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.35)",
+    fontWeight: 800,
+  },
 
   grid: {
     display: "grid",
@@ -246,17 +266,11 @@ const styles = {
     backdropFilter: "blur(10px)",
     border: "1px solid rgba(255,255,255,.12)",
     cursor: "pointer",
-    textAlign: "left",
-
-    // HARDENING (anti-texte noir mobile)
     color: "inherit",
     WebkitTextFillColor: "currentColor",
-    appearance: "none",
-    WebkitAppearance: "none",
-    outline: "none",
   },
 
-  avatarWrap: { width: 64, height: 64, flex: "0 0 64px" },
+  avatarWrap: { width: 64, height: 64 },
 
   avatar: {
     width: "100%",
@@ -264,28 +278,16 @@ const styles = {
     borderRadius: "50%",
     objectFit: "cover",
     objectPosition: "top",
-    display: "block",
   },
 
   meta: { display: "grid", gap: 4, color: "inherit" },
-  name: {
-    fontSize: 18,
-    fontWeight: 900,
-    color: "inherit",
-    WebkitTextFillColor: "currentColor",
-  },
-  desc: {
-    opacity: 0.75,
-    fontWeight: 700,
-    color: "inherit",
-    WebkitTextFillColor: "currentColor",
-  },
+  name: { fontSize: 18, fontWeight: 900, color: "inherit" },
+  desc: { opacity: 0.75, fontWeight: 700, color: "inherit" },
 
   center: {
     minHeight: "100vh",
     display: "grid",
     placeItems: "center",
     fontSize: 20,
-    color: "#eef2ff",
   },
 };
