@@ -768,7 +768,7 @@ agentCard: {
     height: 74,
     borderRadius: "50%",
     objectFit: "cover",
-    objectPosition: "center 30%",
+    objectPosition: "center 5%",
     display: "block",
   },
 
