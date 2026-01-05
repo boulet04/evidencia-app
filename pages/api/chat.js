@@ -1,26 +1,29 @@
 // pages/api/chat.js
-import { createClient } from "@supabase/supabase-js";
-import { Mistral } from "@mistralai/mistralai";
+import Mistral from "@mistralai/mistralai";
 import agentPrompts from "../../lib/agentPrompts";
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+import { createClient } from "@supabase/supabase-js";
 
 const mistral = new Mistral({
   apiKey: process.env.MISTRAL_API_KEY,
 });
 
-function normalizeContent(content) {
-  // Mistral peut renvoyer string ou array (selon versions / formats)
-  if (typeof content === "string") return content.trim();
-  if (Array.isArray(content)) {
-    return content
-      .map((p) => (typeof p === "string" ? p : p?.text || ""))
-      .join("")
-      .trim();
+// Supabase Admin (service role) -> uniquement côté serveur
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    auth: { persistSession: false },
   }
-  return "";
+);
+
+function getBearerToken(req) {
+  const h = req.headers?.authorization || "";
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : "";
+}
+
+function safeStr(v) {
+  return (v || "").toString();
 }
 
 export default async function handler(req, res) {
@@ -29,46 +32,30 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Méthode non autorisée." });
     }
 
-    if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceKey) {
-      return res.status(500).json({
-        error:
-          "Env manquantes Supabase (NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY).",
-      });
-    }
-
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.startsWith("Bearer ")
-      ? authHeader.slice("Bearer ".length).trim()
-      : "";
-
+    // 1) Auth user via Bearer token (obligatoire pour savoir quel prompt charger)
+    const token = getBearerToken(req);
     if (!token) {
       return res.status(401).json({ error: "Non authentifié (token manquant)." });
     }
 
-    const { message, agentSlug } = req.body || {};
+    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
+    if (userErr || !userData?.user) {
+      return res.status(401).json({ error: "Session invalide. Reconnectez-vous." });
+    }
+    const userId = userData.user.id;
 
-    if (!agentSlug) {
+    // 2) Body
+    const { message, agentSlug } = req.body || {};
+    const slug = safeStr(agentSlug).trim().toLowerCase();
+
+    if (!slug) {
       return res.status(400).json({ error: "Aucun agent sélectionné." });
     }
-    if (!message || message.trim().length === 0) {
+    if (!message || safeStr(message).trim().length === 0) {
       return res.status(400).json({ error: "Message vide." });
     }
 
-    // 1) Vérifier l'utilisateur via Supabase Auth (avec l'anon key)
-    const supabaseAuth = createClient(supabaseUrl, supabaseAnonKey);
-    const { data: userRes, error: userErr } = await supabaseAuth.auth.getUser(token);
-
-    if (userErr || !userRes?.user) {
-      return res.status(401).json({ error: "Session invalide. Reconnectez-vous." });
-    }
-
-    const userId = userRes.user.id;
-    const slug = String(agentSlug).trim().toLowerCase();
-
-    // 2) Accès DB admin (service role) pour lire assignations + prompt
-    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
-
-    // 2a) Charger agent
+    // 3) Charger agent (source de vérité = table agents)
     const { data: agent, error: agentErr } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
@@ -79,22 +66,22 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "Agent introuvable." });
     }
 
-    // 2b) Vérifier assignation (si pas assigné => interdit)
-    const { data: ua, error: uaErr } = await supabaseAdmin
+    // 4) Vérifier assignation (si pas assigné => interdit)
+    const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
       .select("user_id, agent_id")
       .eq("user_id", userId)
       .eq("agent_id", agent.id)
       .maybeSingle();
 
-    if (uaErr) {
-      return res.status(500).json({ error: "Erreur lecture assignations." });
+    if (assignErr) {
+      return res.status(500).json({ error: "Erreur assignation (user_agents)." });
     }
-    if (!ua) {
+    if (!assignment) {
       return res.status(403).json({ error: "Accès interdit : agent non assigné." });
     }
 
-    // 2c) Charger prompt personnalisé (si existant)
+    // 5) Charger prompt personnalisé (client_agent_configs.context.prompt)
     const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
       .select("context")
@@ -102,36 +89,42 @@ export default async function handler(req, res) {
       .eq("agent_id", agent.id)
       .maybeSingle();
 
-    if (cfgErr) {
-      return res.status(500).json({ error: "Erreur lecture configuration agent." });
-    }
+    // On n’échoue pas si pas de config : on retombe sur le base prompt
+    const context = (!cfgErr && cfg?.context) ? cfg.context : null;
 
+    // IMPORTANT : on supporte plusieurs clés au cas où ton UI stocke différemment
     const customPrompt =
-      (cfg?.context && (cfg.context.prompt || cfg.context.systemPrompt)) || "";
+      safeStr(context?.prompt).trim() ||
+      safeStr(context?.systemPrompt).trim() ||
+      safeStr(context?.customPrompt).trim() ||
+      "";
 
-    const fallbackPrompt =
-      agentPrompts?.[slug]?.systemPrompt ||
-      `Tu es ${agent.name}, ${agent.description || "assistant"}.\nRéponds en français.`;
+    // Base prompt (fallback)
+    const basePrompt =
+      safeStr(agentPrompts?.[slug]?.systemPrompt).trim() ||
+      `Tu es ${agent.name}${agent.description ? `, ${agent.description}` : ""}.`;
 
-    const systemPrompt = (customPrompt || fallbackPrompt).toString();
+    // Prompt final réellement envoyé à Mistral
+    const finalSystemPrompt = customPrompt
+      ? `${basePrompt}\n\nINSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}`
+      : basePrompt;
 
-    // 3) Appel Mistral
+    // 6) Appel Mistral
     const completion = await mistral.chat.complete({
-      model: "mistral-small-latest",
+      model: process.env.MISTRAL_MODEL || "mistral-small-latest",
       messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: message.trim() },
+        { role: "system", content: finalSystemPrompt },
+        { role: "user", content: safeStr(message).trim() },
       ],
       temperature: 0.7,
     });
 
-    const reply = normalizeContent(completion?.choices?.[0]?.message?.content) || "Réponse vide.";
+    const reply =
+      completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
 
     return res.status(200).json({ reply });
   } catch (err) {
-    console.error("Erreur API /api/chat:", err);
-    return res.status(500).json({
-      error: err?.message ? `Erreur interne: ${err.message}` : "Erreur interne de l’agent.",
-    });
+    console.error("Erreur API /api/chat :", err);
+    return res.status(500).json({ error: "Erreur interne de l’agent." });
   }
 }
