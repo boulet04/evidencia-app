@@ -175,6 +175,7 @@ export default function Chat() {
 
       // 1) si convId dans url et appartient à l'user => on l'ouvre
       if (convIdFromUrl) {
+        // tente de charger les messages (si vide -> on repasse fallback)
         const msgs = await fetchMessages({ uid, convId: convIdFromUrl });
         if (msgs.length > 0) {
           chosenConvId = convIdFromUrl;
@@ -197,6 +198,7 @@ export default function Chat() {
         if (msgs.length > 0) {
           setMessages(msgs);
         } else {
+          // fallback message d'accueil
           setMessages([
             {
               role: "assistant",
@@ -342,15 +344,17 @@ export default function Chat() {
     });
 
     // Si c'est le premier message user, on met un title
-    const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
+    const isFirstUser =
+      messages.filter((m) => m.role === "user").length === 0;
     const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
 
-    // ====== MODIF UNIQUE: ajout Authorization Bearer ======
+    // --- CORRECTIF UNIQUE ICI : on envoie le Bearer token au backend ---
     const {
       data: { session },
     } = await supabase.auth.getSession();
     const token = session?.access_token;
 
+    // Appel IA
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
@@ -506,7 +510,9 @@ export default function Chat() {
                     }}
                     title={c.title || "Conversation"}
                   >
-                    <div style={styles.histTitle}>{c.title || "Conversation"}</div>
+                    <div style={styles.histTitle}>
+                      {c.title || "Conversation"}
+                    </div>
                     <div style={styles.histDate}>
                       {c.updated_at
                         ? new Date(c.updated_at).toLocaleString("fr-FR", {
@@ -540,10 +546,14 @@ export default function Chat() {
                 <div
                   style={{
                     ...styles.bubble,
-                    ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot),
+                    ...(m.role === "user"
+                      ? styles.bubbleUser
+                      : styles.bubbleBot),
                   }}
                 >
-                  <div style={styles.role}>{m.role === "user" ? "Vous" : agent.name}</div>
+                  <div style={styles.role}>
+                    {m.role === "user" ? "Vous" : agent.name}
+                  </div>
                   <div style={styles.text}>{m.content}</div>
                 </div>
               </div>
@@ -844,9 +854,13 @@ const styles = {
     border: "1px solid rgba(255,255,255,.10)",
   },
 
-  bubbleUser: { background: "rgba(255,255,255,.10)" },
+  bubbleUser: {
+    background: "rgba(255,255,255,.10)",
+  },
 
-  bubbleBot: { background: "rgba(0,0,0,.35)" },
+  bubbleBot: {
+    background: "rgba(0,0,0,.35)",
+  },
 
   role: {
     fontSize: 11,
