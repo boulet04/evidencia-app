@@ -47,6 +47,13 @@ export default function Chat() {
     });
   }
 
+  function helloMsg(a) {
+    return {
+      role: "assistant",
+      content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
+    };
+  }
+
   async function fetchAgent(slug) {
     const { data: a, error } = await supabase
       .from("agents")
@@ -59,7 +66,6 @@ export default function Chat() {
   }
 
   async function fetchHistory({ uid, agentSlug }) {
-    // 10 dernières conversations par USER + AGENT
     const { data, error } = await supabase
       .from("conversations")
       .select("id, title, updated_at")
@@ -72,11 +78,22 @@ export default function Chat() {
     return data || [];
   }
 
+  // ✅ IMPORTANT : on utilise public.messages (pas conversation_messages)
+  // Et on sécurise en vérifiant que la conversation appartient bien à l’utilisateur.
   async function fetchMessages({ uid, convId }) {
-    const { data, error } = await supabase
-      .from("conversation_messages")
-      .select("id, role, content, created_at")
+    // Vérifie que la conversation appartient à uid
+    const { data: conv, error: convErr } = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("id", convId)
       .eq("user_id", uid)
+      .maybeSingle();
+
+    if (convErr || !conv) return [];
+
+    const { data, error } = await supabase
+      .from("messages")
+      .select("id, role, content, created_at")
       .eq("conversation_id", convId)
       .order("created_at", { ascending: true });
 
@@ -100,7 +117,6 @@ export default function Chat() {
   }
 
   async function touchConversation({ uid, convId, titleMaybe }) {
-    // met à jour updated_at + éventuellement title
     const patch = { updated_at: new Date().toISOString() };
     if (titleMaybe) patch.title = titleMaybe;
 
@@ -111,9 +127,9 @@ export default function Chat() {
       .eq("id", convId);
   }
 
-  async function insertMessage({ uid, convId, role, content }) {
-    await supabase.from("conversation_messages").insert({
-      user_id: uid,
+  // ✅ IMPORTANT : on insert dans messages (sans user_id)
+  async function insertMessage({ convId, role, content }) {
+    await supabase.from("messages").insert({
       conversation_id: convId,
       role,
       content,
@@ -161,7 +177,7 @@ export default function Chat() {
 
       setAgent(a);
 
-      // conversation_id optionnel dans URL (si on ouvre une ancienne conv)
+      // conversation_id optionnel dans URL
       const convParam = url.searchParams.get("c");
       const convIdFromUrl = convParam ? safeDecode(convParam).trim() : "";
 
@@ -173,20 +189,18 @@ export default function Chat() {
       // Choix conversation à ouvrir
       let chosenConvId = null;
 
-      // 1) si convId dans url et appartient à l'user => on l'ouvre
+      // 1) Si convId URL et appartient à l'user => on l'ouvre même si vide
       if (convIdFromUrl) {
         const msgs = await fetchMessages({ uid, convId: convIdFromUrl });
-        if (msgs.length > 0) {
-          chosenConvId = convIdFromUrl;
-          setConversationId(chosenConvId);
-          setMessages(msgs);
-          setLoading(false);
-          scrollToBottom();
-          return;
-        }
+        chosenConvId = convIdFromUrl;
+        setConversationId(chosenConvId);
+        setMessages(msgs.length > 0 ? msgs : [helloMsg(a)]);
+        setLoading(false);
+        scrollToBottom();
+        return;
       }
 
-      // 2) sinon, si historique existant, ouvre la dernière
+      // 2) Sinon ouvre la dernière conversation
       if (h && h.length > 0) {
         chosenConvId = h[0].id;
         setConversationId(chosenConvId);
@@ -194,23 +208,13 @@ export default function Chat() {
         const msgs = await fetchMessages({ uid, convId: chosenConvId });
         if (!mounted) return;
 
-        if (msgs.length > 0) {
-          setMessages(msgs);
-        } else {
-          setMessages([
-            {
-              role: "assistant",
-              content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
-            },
-          ]);
-        }
-
+        setMessages(msgs.length > 0 ? msgs : [helloMsg(a)]);
         setLoading(false);
         scrollToBottom();
         return;
       }
 
-      // 3) sinon crée nouvelle conversation + accueil
+      // 3) Sinon crée nouvelle conversation + accueil
       const newConvId = await createConversation({
         uid,
         agentSlug: a.slug,
@@ -220,14 +224,8 @@ export default function Chat() {
       if (!mounted) return;
 
       setConversationId(newConvId);
-      setMessages([
-        {
-          role: "assistant",
-          content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
-        },
-      ]);
+      setMessages([helloMsg(a)]);
 
-      // refresh historique
       const h2 = await fetchHistory({ uid, agentSlug: a.slug });
       if (!mounted) return;
       setHistory(h2);
@@ -238,7 +236,6 @@ export default function Chat() {
 
     boot();
 
-    // écoute auth
     const { data } = supabase.auth.onAuthStateChange((_event, newSession) => {
       if (!newSession) window.location.href = "/login";
     });
@@ -261,7 +258,6 @@ export default function Chat() {
 
     setConversationId(convId);
 
-    // Met à jour l’URL (sans recharger)
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("agent", agent.slug);
@@ -270,17 +266,7 @@ export default function Chat() {
     } catch (_) {}
 
     const msgs = await fetchMessages({ uid: userId, convId });
-    setMessages(
-      msgs.length > 0
-        ? msgs
-        : [
-            {
-              role: "assistant",
-              content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?`,
-            },
-          ]
-    );
-
+    setMessages(msgs.length > 0 ? msgs : [helloMsg(agent)]);
     scrollToBottom();
   }
 
@@ -300,14 +286,8 @@ export default function Chat() {
     }
 
     setConversationId(convId);
-    setMessages([
-      {
-        role: "assistant",
-        content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?`,
-      },
-    ]);
+    setMessages([helloMsg(agent)]);
 
-    // URL
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("agent", agent.slug);
@@ -328,26 +308,20 @@ export default function Chat() {
     setInput("");
     setErrorMsg("");
 
-    // UI immédiat
     setMessages((prev) => [...prev, { role: "user", content: userText }]);
     setSending(true);
     scrollToBottom();
 
     // Persist user message
     await insertMessage({
-      uid: userId,
       convId: conversationId,
       role: "user",
       content: userText,
     });
 
-    // Si c'est le premier message user, on met un title
     const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
-    const titleMaybe = isFirstUser
-      ? formatTitleFromFirstUserMessage(userText)
-      : null;
+    const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
 
-    // --- AJOUT IMPORTANT : récupère le token pour /api/chat ---
     const {
       data: { session },
     } = await supabase.auth.getSession();
@@ -359,7 +333,6 @@ export default function Chat() {
       return;
     }
 
-    // Appel IA
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
@@ -370,6 +343,7 @@ export default function Chat() {
         body: JSON.stringify({
           message: userText,
           agentSlug: agent.slug,
+          conversationId, // ✅ utile côté API si tu veux charger le prompt/context par conversation
         }),
       });
 
@@ -378,39 +352,29 @@ export default function Chat() {
 
       const reply = (data?.reply || "Réponse vide.").toString();
 
-      // UI + persist assistant
       setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
       await insertMessage({
-        uid: userId,
         convId: conversationId,
         role: "assistant",
         content: reply,
       });
 
-      // touch conversation (updated_at + title si besoin)
-      await touchConversation({
-        uid: userId,
-        convId: conversationId,
-        titleMaybe,
-      });
+      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
 
-      // refresh sidebar
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
 
       scrollToBottom();
     } catch (e) {
-      setErrorMsg(e?.message || "Erreur interne. Réessayez plus tard.");
+      const msg = e?.message || "Erreur interne. Réessayez plus tard.";
+      setErrorMsg(msg);
+
       setMessages((prev) => [
         ...prev,
-        {
-          role: "assistant",
-          content: "Erreur interne. Réessayez plus tard.",
-        },
+        { role: "assistant", content: "Erreur interne. Réessayez plus tard." },
       ]);
 
       await insertMessage({
-        uid: userId,
         convId: conversationId,
         role: "assistant",
         content: "Erreur interne. Réessayez plus tard.",
@@ -585,7 +549,7 @@ export default function Chat() {
   );
 }
 
-/* ================== STYLES (charte Evidencia / sans bord blanc) ================== */
+/* ================== STYLES (inchangés) ================== */
 const styles = {
   page: {
     minHeight: "100vh",
@@ -632,13 +596,7 @@ const styles = {
     borderBottom: "1px solid rgba(255,255,255,.10)",
   },
 
-  topLeft: {
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-    minWidth: 0,
-  },
-
+  topLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
   topRight: { display: "flex", alignItems: "center", gap: 10 },
 
   backBtn: {
@@ -659,11 +617,7 @@ const styles = {
     filter: "drop-shadow(0 10px 26px rgba(0,0,0,.55))",
   },
 
-  agentInfo: {
-    display: "grid",
-    gap: 2,
-    minWidth: 0,
-  },
+  agentInfo: { display: "grid", gap: 2, minWidth: 0 },
 
   agentName: {
     fontWeight: 900,
@@ -719,7 +673,6 @@ const styles = {
     boxSizing: "border-box",
   },
 
-  /* Sidebar */
   sidebar: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -741,12 +694,7 @@ const styles = {
     background: "rgba(0,0,0,.18)",
   },
 
-  sidebarTitle: {
-    fontWeight: 900,
-    color: "#eef2ff",
-    fontSize: 13,
-    letterSpacing: 0.2,
-  },
+  sidebarTitle: { fontWeight: 900, color: "#eef2ff", fontSize: 13, letterSpacing: 0.2 },
 
   newBtn: {
     padding: "10px 12px",
@@ -759,13 +707,7 @@ const styles = {
     whiteSpace: "nowrap",
   },
 
-  sidebarList: {
-    padding: 10,
-    overflowY: "auto",
-    display: "grid",
-    gap: 10,
-    minHeight: 0,
-  },
+  sidebarList: { padding: 10, overflowY: "auto", display: "grid", gap: 10, minHeight: 0 },
 
   sidebarEmpty: {
     padding: 12,
@@ -791,8 +733,7 @@ const styles = {
   },
 
   histItemActive: {
-    background:
-      "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
+    background: "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
     border: "1px solid rgba(255,140,40,.18)",
   },
 
@@ -805,13 +746,8 @@ const styles = {
     textOverflow: "ellipsis",
   },
 
-  histDate: {
-    fontWeight: 800,
-    fontSize: 11,
-    color: "rgba(238,242,255,.65)",
-  },
+  histDate: { fontWeight: 800, fontSize: 11, color: "rgba(238,242,255,.65)" },
 
-  /* Chat card */
   chatCard: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -834,15 +770,7 @@ const styles = {
     fontSize: 13,
   },
 
-  thread: {
-    flex: 1,
-    overflowY: "auto",
-    padding: 14,
-    display: "grid",
-    gap: 12,
-    minHeight: 0,
-  },
-
+  thread: { flex: 1, overflowY: "auto", padding: 14, display: "grid", gap: 12, minHeight: 0 },
   bubbleRow: { display: "flex" },
 
   bubble: {
@@ -855,26 +783,11 @@ const styles = {
     border: "1px solid rgba(255,255,255,.10)",
   },
 
-  bubbleUser: {
-    background: "rgba(255,255,255,.10)",
-  },
+  bubbleUser: { background: "rgba(255,255,255,.10)" },
+  bubbleBot: { background: "rgba(0,0,0,.35)" },
 
-  bubbleBot: {
-    background: "rgba(0,0,0,.35)",
-  },
-
-  role: {
-    fontSize: 11,
-    fontWeight: 900,
-    color: "rgba(238,242,255,.72)",
-    marginBottom: 6,
-  },
-
-  text: {
-    fontSize: 14,
-    fontWeight: 700,
-    color: "rgba(238,242,255,.92)",
-  },
+  role: { fontSize: 11, fontWeight: 900, color: "rgba(238,242,255,.72)", marginBottom: 6 },
+  text: { fontSize: 14, fontWeight: 700, color: "rgba(238,242,255,.92)" },
 
   composer: {
     display: "flex",
@@ -903,8 +816,7 @@ const styles = {
     padding: "12px 16px",
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,.12)",
-    background:
-      "linear-gradient(135deg, rgba(255,140,40,.18), rgba(80,120,255,.12))",
+    background: "linear-gradient(135deg, rgba(255,140,40,.18), rgba(80,120,255,.12))",
     color: "#eef2ff",
     fontWeight: 900,
     cursor: "pointer",
@@ -923,15 +835,7 @@ const styles = {
     minWidth: 110,
   },
 
-  /* Loading */
-  center: {
-    position: "relative",
-    zIndex: 1,
-    minHeight: "100vh",
-    display: "grid",
-    placeItems: "center",
-    padding: 24,
-  },
+  center: { position: "relative", zIndex: 1, minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 },
 
   loadingCard: {
     width: "100%",
@@ -943,10 +847,5 @@ const styles = {
     backdropFilter: "blur(14px)",
   },
 
-  loadingSub: {
-    marginTop: 6,
-    color: "rgba(255,255,255,.78)",
-    fontWeight: 800,
-    fontSize: 12,
-  },
+  loadingSub: { marginTop: 6, color: "rgba(255,255,255,.78)", fontWeight: 800, fontSize: 12 },
 };
