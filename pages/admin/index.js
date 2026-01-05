@@ -371,7 +371,7 @@ export default function Admin() {
   return (
     <main style={styles.page}>
       <header style={styles.topbar}>
-        {/* MODIF #1 : logo + "Console administrateur" */}
+        {/* logo + "Console administrateur" */}
         <div style={styles.brandWrap}>
           <img
             src="/images/logolong.png"
@@ -561,7 +561,6 @@ const styles = {
     backdropFilter: "blur(10px)",
   },
 
-  /* MODIF #1 : styles brand */
   brandWrap: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
   brandLogo: { height: 22, width: "auto", display: "block" },
   brandText: { fontWeight: 900, letterSpacing: 0.2, color: "#eef2ff" },
@@ -762,13 +761,12 @@ const styles = {
     paddingTop: 6,
   },
 
-  /* MODIF #2 : cadrage avatar (têtes visibles) */
   avatar: {
     width: 74,
     height: 74,
     borderRadius: "50%",
     objectFit: "cover",
-    objectPosition: "center 5%", // <-- IMPORTANT (remonte l'image)
+    objectPosition: "center 30%",
     display: "block",
   },
 
@@ -780,6 +778,7 @@ const styles = {
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,.12)",
     background: "rgba(0,0,0,.35)",
+    color: "#eef2ff",
   },
   alert: {
     margin: 12,
