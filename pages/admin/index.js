@@ -773,15 +773,17 @@ agentCard: {
   },
 
   checkRow: { display: "flex", justifyContent: "flex-end" },
-  check: {
-    fontWeight: 900,
-    fontSize: 12,
-    padding: "8px 12px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(0,0,0,.35)",
-    color: "#eef2ff",
-  },
+check: {
+  fontWeight: 900,
+  fontSize: 12,
+  padding: "8px 12px",
+  borderRadius: 999,
+  border: "1px solid rgba(255,255,255,.12)",
+  background: "rgba(0,0,0,.35)",
+  color: "#eef2ff",                // <-- AJOUT (force blanc)
+  WebkitTextFillColor: "#eef2ff",  // <-- AJOUT (iOS)
+},
+
   alert: {
     margin: 12,
     padding: 12,
