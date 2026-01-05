@@ -5,7 +5,7 @@ export default function Agents() {
   const [loading, setLoading] = useState(true);
   const [agents, setAgents] = useState([]);
   const [email, setEmail] = useState("");
-  const [isAdmin, setIsAdmin] = useState(false); // <-- AJOUT
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -14,6 +14,7 @@ export default function Agents() {
       const {
         data: { session },
       } = await supabase.auth.getSession();
+
       if (!session) {
         window.location.href = "/login";
         return;
@@ -22,7 +23,7 @@ export default function Agents() {
 
       setEmail(session.user.email || "");
 
-      // <-- AJOUT : lecture rôle dans profiles
+      // Lire rôle dans profiles
       const { data: p, error: pErr } = await supabase
         .from("profiles")
         .select("role")
@@ -39,7 +40,7 @@ export default function Agents() {
 
       if (!mounted) return;
 
-      setAgents(error ? [] : data);
+      setAgents(error ? [] : data || []);
       setLoading(false);
     }
 
@@ -63,7 +64,8 @@ export default function Agents() {
   }
 
   return (
-    <main style={styles.page}>
+    // IMPORTANT: wrapper "globalFix" = correctif B appliqué
+    <main style={{ ...styles.page, ...styles.globalFix }}>
       <div style={styles.bg} aria-hidden="true">
         <div style={styles.bgLogo} />
         <div style={styles.bgVeils} />
@@ -79,9 +81,9 @@ export default function Agents() {
         <div style={styles.topRight}>
           <span style={styles.userChip}>{email}</span>
 
-          {/* <-- AJOUT : bouton admin */}
           {isAdmin ? (
             <button
+              type="button"
               onClick={() => (window.location.href = "/admin")}
               style={styles.btnGhost}
             >
@@ -89,7 +91,7 @@ export default function Agents() {
             </button>
           ) : null}
 
-          <button onClick={logout} style={styles.btnGhost}>
+          <button type="button" onClick={logout} style={styles.btnGhost}>
             Déconnexion
           </button>
         </div>
@@ -100,22 +102,36 @@ export default function Agents() {
         <p style={styles.p}>Cliquez sur un agent pour ouvrir son espace.</p>
 
         <div style={styles.grid}>
-          {agents.map((a) => (
-            <button
-              key={a.id}
-              style={styles.card}
-              onClick={() => (window.location.href = `/chat?agent=${a.slug}`)}
-            >
-              <div style={styles.avatarWrap}>
-                <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
-              </div>
+          {agents.map((a) => {
+            const src = (a?.avatar_url || "").trim() || `/images/${a.slug}.png`;
 
-              <div style={styles.meta}>
-                <div style={styles.name}>{a.name}</div>
-                <div style={styles.desc}>{a.description}</div>
-              </div>
-            </button>
-          ))}
+            return (
+              <button
+                key={a.id}
+                type="button"
+                style={styles.card}
+                onClick={() => (window.location.href = `/chat?agent=${a.slug}`)}
+              >
+                <div style={styles.avatarWrap}>
+                  <img
+                    src={src}
+                    alt={a.name}
+                    style={styles.avatar}
+                    loading="lazy"
+                    onError={(e) => {
+                      e.currentTarget.onerror = null;
+                      e.currentTarget.src = "/images/logopc.png";
+                    }}
+                  />
+                </div>
+
+                <div style={styles.meta}>
+                  <div style={styles.name}>{a.name}</div>
+                  <div style={styles.desc}>{a.description}</div>
+                </div>
+              </button>
+            );
+          })}
         </div>
       </section>
     </main>
@@ -123,8 +139,9 @@ export default function Agents() {
 }
 
 /**
- * CORRECTIF "B" (global) — on force les <button> et <a> à hériter la couleur
- * afin d’éviter le texte noir par défaut sur mobile/selon navigateur.
+ * Correctif "B" renforcé :
+ * - On force l'héritage de couleur sur les zones problématiques.
+ * - On neutralise le style navigateur des <button> (WebKit mobile peut forcer du noir).
  */
 const styles = {
   page: {
@@ -136,9 +153,9 @@ const styles = {
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
   },
 
-  // --- Correctif B (global, appliqué via wrapper) ---
+  // Wrapper global pour forcer l'héritage
   globalFix: {
-    color: "inherit",
+    color: "#eef2ff",
   },
 
   bg: { position: "absolute", inset: 0, zIndex: 0 },
@@ -184,16 +201,23 @@ const styles = {
     borderRadius: 999,
     fontWeight: 800,
     color: "inherit",
+    WebkitTextFillColor: "currentColor",
   },
 
   btnGhost: {
     padding: "10px 14px",
     borderRadius: 999,
     background: "rgba(255,255,255,.1)",
-    color: "inherit", // <-- IMPORTANT (hérite de page.color)
-    fontWeight: 900,
     border: "1px solid rgba(255,255,255,.2)",
     cursor: "pointer",
+    fontWeight: 900,
+
+    // HARDENING (anti-texte noir mobile)
+    color: "inherit",
+    WebkitTextFillColor: "currentColor",
+    appearance: "none",
+    WebkitAppearance: "none",
+    outline: "none",
   },
 
   shell: {
@@ -204,8 +228,8 @@ const styles = {
     margin: "0 auto",
   },
 
-  h1: { fontSize: 32, fontWeight: 900, marginBottom: 6 },
-  p: { opacity: 0.8, marginBottom: 20 },
+  h1: { fontSize: 32, fontWeight: 900, marginBottom: 6, color: "inherit" },
+  p: { opacity: 0.8, marginBottom: 20, color: "inherit" },
 
   grid: {
     display: "grid",
@@ -222,10 +246,17 @@ const styles = {
     backdropFilter: "blur(10px)",
     border: "1px solid rgba(255,255,255,.12)",
     cursor: "pointer",
-    color: "inherit", // <-- IMPORTANT: button peut default noir sinon
+    textAlign: "left",
+
+    // HARDENING (anti-texte noir mobile)
+    color: "inherit",
+    WebkitTextFillColor: "currentColor",
+    appearance: "none",
+    WebkitAppearance: "none",
+    outline: "none",
   },
 
-  avatarWrap: { width: 64, height: 64 },
+  avatarWrap: { width: 64, height: 64, flex: "0 0 64px" },
 
   avatar: {
     width: "100%",
@@ -233,16 +264,28 @@ const styles = {
     borderRadius: "50%",
     objectFit: "cover",
     objectPosition: "top",
+    display: "block",
   },
 
   meta: { display: "grid", gap: 4, color: "inherit" },
-  name: { fontSize: 18, fontWeight: 900, color: "inherit" },
-  desc: { opacity: 0.75, fontWeight: 700, color: "inherit" },
+  name: {
+    fontSize: 18,
+    fontWeight: 900,
+    color: "inherit",
+    WebkitTextFillColor: "currentColor",
+  },
+  desc: {
+    opacity: 0.75,
+    fontWeight: 700,
+    color: "inherit",
+    WebkitTextFillColor: "currentColor",
+  },
 
   center: {
     minHeight: "100vh",
     display: "grid",
     placeItems: "center",
     fontSize: 20,
+    color: "#eef2ff",
   },
 };
