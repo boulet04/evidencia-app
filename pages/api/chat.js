@@ -3,17 +3,12 @@ import Mistral from "@mistralai/mistralai";
 import agentPrompts from "../../lib/agentPrompts";
 import { createClient } from "@supabase/supabase-js";
 
-const mistral = new Mistral({
-  apiKey: process.env.MISTRAL_API_KEY,
-});
+const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
 
-// Supabase Admin (service role) -> uniquement côté serveur
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: { persistSession: false },
-  }
+  { auth: { persistSession: false } }
 );
 
 function getBearerToken(req) {
@@ -26,13 +21,37 @@ function safeStr(v) {
   return (v || "").toString();
 }
 
+function parseMaybeJson(v) {
+  if (!v) return null;
+  if (typeof v === "object") return v;
+  if (typeof v === "string") {
+    try {
+      return JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
       return res.status(405).json({ error: "Méthode non autorisée." });
     }
 
-    // 1) Auth user via Bearer token (obligatoire pour savoir quel prompt charger)
+    // IMPORTANT : erreurs env explicites
+    if (!process.env.MISTRAL_API_KEY) {
+      return res.status(500).json({ error: "MISTRAL_API_KEY manquant sur Vercel." });
+    }
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant sur Vercel." });
+    }
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant sur Vercel." });
+    }
+
+    // 1) Auth user via Bearer token
     const token = getBearerToken(req);
     if (!token) {
       return res.status(401).json({ error: "Non authentifié (token manquant)." });
@@ -48,14 +67,10 @@ export default async function handler(req, res) {
     const { message, agentSlug } = req.body || {};
     const slug = safeStr(agentSlug).trim().toLowerCase();
 
-    if (!slug) {
-      return res.status(400).json({ error: "Aucun agent sélectionné." });
-    }
-    if (!message || safeStr(message).trim().length === 0) {
-      return res.status(400).json({ error: "Message vide." });
-    }
+    if (!slug) return res.status(400).json({ error: "Aucun agent sélectionné." });
+    if (!safeStr(message).trim()) return res.status(400).json({ error: "Message vide." });
 
-    // 3) Charger agent (source de vérité = table agents)
+    // 3) Charger agent
     const { data: agent, error: agentErr } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
@@ -66,7 +81,7 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "Agent introuvable." });
     }
 
-    // 4) Vérifier assignation (si pas assigné => interdit)
+    // 4) Vérifier assignation
     const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
       .select("user_id, agent_id")
@@ -74,37 +89,29 @@ export default async function handler(req, res) {
       .eq("agent_id", agent.id)
       .maybeSingle();
 
-    if (assignErr) {
-      return res.status(500).json({ error: "Erreur assignation (user_agents)." });
-    }
-    if (!assignment) {
-      return res.status(403).json({ error: "Accès interdit : agent non assigné." });
-    }
+    if (assignErr) return res.status(500).json({ error: "Erreur assignation (user_agents)." });
+    if (!assignment) return res.status(403).json({ error: "Accès interdit : agent non assigné." });
 
-    // 5) Charger prompt personnalisé (client_agent_configs.context.prompt)
+    // 5) Charger prompt personnalisé (system_prompt PRIORITAIRE, puis context)
     const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
-      .select("context")
+      .select("system_prompt, context")
       .eq("user_id", userId)
       .eq("agent_id", agent.id)
       .maybeSingle();
 
-    // On n’échoue pas si pas de config : on retombe sur le base prompt
-    const context = (!cfgErr && cfg?.context) ? cfg.context : null;
-
-    // IMPORTANT : on supporte plusieurs clés au cas où ton UI stocke différemment
+    const ctxObj = parseMaybeJson(cfg?.context);
     const customPrompt =
-      safeStr(context?.prompt).trim() ||
-      safeStr(context?.systemPrompt).trim() ||
-      safeStr(context?.customPrompt).trim() ||
+      safeStr(cfg?.system_prompt).trim() ||
+      safeStr(ctxObj?.prompt).trim() ||
+      safeStr(ctxObj?.systemPrompt).trim() ||
+      safeStr(ctxObj?.customPrompt).trim() ||
       "";
 
-    // Base prompt (fallback)
     const basePrompt =
       safeStr(agentPrompts?.[slug]?.systemPrompt).trim() ||
       `Tu es ${agent.name}${agent.description ? `, ${agent.description}` : ""}.`;
 
-    // Prompt final réellement envoyé à Mistral
     const finalSystemPrompt = customPrompt
       ? `${basePrompt}\n\nINSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}`
       : basePrompt;
