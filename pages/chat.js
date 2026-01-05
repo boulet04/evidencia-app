@@ -384,12 +384,7 @@ export default function Chat() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${accessToken}`,
         },
-      body: JSON.stringify({
-  message: userText,
-  agentSlug: agent.slug,
-  conversationId: conversationId, // <-- AJOUT ICI
-}),
-
+        body: JSON.stringify({
           message: userText,
           agentSlug: agent.slug,
         }),
