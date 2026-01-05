@@ -175,7 +175,6 @@ export default function Chat() {
 
       // 1) si convId dans url et appartient à l'user => on l'ouvre
       if (convIdFromUrl) {
-        // tente de charger les messages (si vide -> on repasse fallback)
         const msgs = await fetchMessages({ uid, convId: convIdFromUrl });
         if (msgs.length > 0) {
           chosenConvId = convIdFromUrl;
@@ -198,7 +197,6 @@ export default function Chat() {
         if (msgs.length > 0) {
           setMessages(msgs);
         } else {
-          // fallback message d'accueil
           setMessages([
             {
               role: "assistant",
@@ -344,15 +342,22 @@ export default function Chat() {
     });
 
     // Si c'est le premier message user, on met un title
-    const isFirstUser =
-      messages.filter((m) => m.role === "user").length === 0;
-    const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
+    const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
+    const titleMaybe = isFirstUser
+      ? formatTitleFromFirstUserMessage(userText)
+      : null;
 
-    // --- CORRECTIF UNIQUE ICI : on envoie le Bearer token au backend ---
+    // --- AJOUT IMPORTANT : récupère le token pour /api/chat ---
     const {
       data: { session },
     } = await supabase.auth.getSession();
-    const token = session?.access_token;
+    const accessToken = session?.access_token || "";
+
+    if (!accessToken) {
+      setErrorMsg("Session expirée. Reconnectez-vous.");
+      setSending(false);
+      return;
+    }
 
     // Appel IA
     try {
@@ -360,7 +365,7 @@ export default function Chat() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify({
           message: userText,
@@ -395,7 +400,7 @@ export default function Chat() {
 
       scrollToBottom();
     } catch (e) {
-      setErrorMsg("Erreur interne. Réessayez plus tard.");
+      setErrorMsg(e?.message || "Erreur interne. Réessayez plus tard.");
       setMessages((prev) => [
         ...prev,
         {
@@ -510,9 +515,7 @@ export default function Chat() {
                     }}
                     title={c.title || "Conversation"}
                   >
-                    <div style={styles.histTitle}>
-                      {c.title || "Conversation"}
-                    </div>
+                    <div style={styles.histTitle}>{c.title || "Conversation"}</div>
                     <div style={styles.histDate}>
                       {c.updated_at
                         ? new Date(c.updated_at).toLocaleString("fr-FR", {
@@ -546,9 +549,7 @@ export default function Chat() {
                 <div
                   style={{
                     ...styles.bubble,
-                    ...(m.role === "user"
-                      ? styles.bubbleUser
-                      : styles.bubbleBot),
+                    ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot),
                   }}
                 >
                   <div style={styles.role}>
