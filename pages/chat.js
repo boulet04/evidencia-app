@@ -18,9 +18,6 @@ export default function Chat() {
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  // ✅ AJOUT (mobile) : uniquement pour rendre le layout responsive
-  const [isMobile, setIsMobile] = useState(false);
-
   const threadRef = useRef(null);
   const canSend = useMemo(
     () => input.trim().length > 0 && !sending,
@@ -123,17 +120,6 @@ export default function Chat() {
     });
   }
 
-  // ✅ AJOUT (mobile) : détection responsive (ne touche pas au style desktop)
-  useEffect(() => {
-    const onResize = () => {
-      // seuil simple, ajustable si tu veux
-      setIsMobile(window.innerWidth <= 900);
-    };
-    onResize();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-
   // ---------- Boot ----------
   useEffect(() => {
     let mounted = true;
@@ -211,7 +197,6 @@ export default function Chat() {
         if (msgs.length > 0) {
           setMessages(msgs);
         } else {
-          // fallback message d'accueil
           setMessages([
             {
               role: "assistant",
@@ -358,24 +343,20 @@ export default function Chat() {
 
     // Si c'est le premier message user, on met un title
     const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
-    const titleMaybe = isFirstUser
-      ? formatTitleFromFirstUserMessage(userText)
-      : null;
+    const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
 
-    // ✅ MODIF UNIQUEMENT ICI : récupérer le token Supabase pour /api/chat
+    // ====== MODIF UNIQUE: ajout Authorization Bearer ======
     const {
       data: { session },
     } = await supabase.auth.getSession();
     const token = session?.access_token;
 
-    // Appel IA
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          // ✅ MODIF UNIQUEMENT ICI : passer le token
-          Authorization: `Bearer ${token}`,
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
           message: userText,
@@ -426,11 +407,7 @@ export default function Chat() {
         content: "Erreur interne. Réessayez plus tard.",
       });
 
-      await touchConversation({
-        uid: userId,
-        convId: conversationId,
-        titleMaybe,
-      });
+      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
 
@@ -464,19 +441,6 @@ export default function Chat() {
       </main>
     );
   }
-
-  // ✅ AJOUT (mobile) : uniquement des styles conditionnels (desktop inchangé)
-  const layoutStyle = isMobile
-    ? { ...styles.layout, ...styles.layoutMobile }
-    : styles.layout;
-
-  const sidebarStyle = isMobile
-    ? { ...styles.sidebar, ...styles.sidebarMobile }
-    : styles.sidebar;
-
-  const chatCardStyle = isMobile
-    ? { ...styles.chatCard, ...styles.chatCardMobile }
-    : styles.chatCard;
 
   return (
     <main style={styles.page}>
@@ -514,9 +478,9 @@ export default function Chat() {
         </div>
       </header>
 
-      <section style={layoutStyle}>
+      <section style={styles.layout}>
         {/* Sidebar */}
-        <aside style={sidebarStyle}>
+        <aside style={styles.sidebar}>
           <div style={styles.sidebarTop}>
             <div style={styles.sidebarTitle}>Historique</div>
             <button onClick={newConversation} style={styles.newBtn}>
@@ -542,9 +506,7 @@ export default function Chat() {
                     }}
                     title={c.title || "Conversation"}
                   >
-                    <div style={styles.histTitle}>
-                      {c.title || "Conversation"}
-                    </div>
+                    <div style={styles.histTitle}>{c.title || "Conversation"}</div>
                     <div style={styles.histDate}>
                       {c.updated_at
                         ? new Date(c.updated_at).toLocaleString("fr-FR", {
@@ -563,7 +525,7 @@ export default function Chat() {
         </aside>
 
         {/* Chat */}
-        <div style={chatCardStyle}>
+        <div style={styles.chatCard}>
           {errorMsg ? <div style={styles.alert}>{errorMsg}</div> : null}
 
           <div style={styles.thread} ref={threadRef}>
@@ -578,14 +540,10 @@ export default function Chat() {
                 <div
                   style={{
                     ...styles.bubble,
-                    ...(m.role === "user"
-                      ? styles.bubbleUser
-                      : styles.bubbleBot),
+                    ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot),
                   }}
                 >
-                  <div style={styles.role}>
-                    {m.role === "user" ? "Vous" : agent.name}
-                  </div>
+                  <div style={styles.role}>{m.role === "user" ? "Vous" : agent.name}</div>
                   <div style={styles.text}>{m.content}</div>
                 </div>
               </div>
@@ -750,12 +708,6 @@ const styles = {
     boxSizing: "border-box",
   },
 
-  // ✅ AJOUT (mobile) : uniquement layout responsive
-  layoutMobile: {
-    gridTemplateColumns: "1fr",
-    gridTemplateRows: "auto 1fr",
-  },
-
   /* Sidebar */
   sidebar: {
     borderRadius: 22,
@@ -766,11 +718,6 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     minHeight: 0,
-  },
-
-  // ✅ AJOUT (mobile) : limite la hauteur de l’historique pour laisser le chat visible
-  sidebarMobile: {
-    maxHeight: "34vh",
   },
 
   sidebarTop: {
@@ -788,7 +735,7 @@ const styles = {
     color: "#eef2ff",
     fontSize: 13,
     letterSpacing: 0.2,
-  },chatjs pages
+  },
 
   newBtn: {
     padding: "10px 12px",
@@ -865,11 +812,6 @@ const styles = {
     minHeight: 0,
   },
 
-  // ✅ AJOUT (mobile) : garde le chat visible sous l’historique
-  chatCardMobile: {
-    minHeight: 0,
-  },
-
   alert: {
     margin: 12,
     padding: 12,
@@ -902,13 +844,9 @@ const styles = {
     border: "1px solid rgba(255,255,255,.10)",
   },
 
-  bubbleUser: {
-    background: "rgba(255,255,255,.10)",
-  },
+  bubbleUser: { background: "rgba(255,255,255,.10)" },
 
-  bubbleBot: {
-    background: "rgba(0,0,0,.35)",
-  },
+  bubbleBot: { background: "rgba(0,0,0,.35)" },
 
   role: {
     fontSize: 11,
