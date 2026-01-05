@@ -18,8 +18,11 @@ export default function Chat() {
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  // ✅ AJOUT (mobile) : uniquement pour rendre le layout responsive
-  const [isMobile, setIsMobile] = useState(false);
+  // --- Dictée vocale (Web Speech API) ---
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [isDictating, setIsDictating] = useState(false);
+  const recognitionRef = useRef(null);
+  const finalTranscriptRef = useRef("");
 
   const threadRef = useRef(null);
   const canSend = useMemo(
@@ -62,7 +65,6 @@ export default function Chat() {
   }
 
   async function fetchHistory({ uid, agentSlug }) {
-    // 10 dernières conversations par USER + AGENT
     const { data, error } = await supabase
       .from("conversations")
       .select("id, title, updated_at")
@@ -103,7 +105,6 @@ export default function Chat() {
   }
 
   async function touchConversation({ uid, convId, titleMaybe }) {
-    // met à jour updated_at + éventuellement title
     const patch = { updated_at: new Date().toISOString() };
     if (titleMaybe) patch.title = titleMaybe;
 
@@ -123,16 +124,85 @@ export default function Chat() {
     });
   }
 
-  // ✅ AJOUT (mobile) : détection responsive (ne touche pas au style desktop)
+  // ---------- Dictée vocale : init ----------
   useEffect(() => {
-    const onResize = () => {
-      // seuil simple, ajustable si tu veux
-      setIsMobile(window.innerWidth <= 900);
+    // SSR guard
+    if (typeof window === "undefined") return;
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setSpeechSupported(false);
+      return;
+    }
+
+    setSpeechSupported(true);
+
+    const rec = new SR();
+    rec.lang = "fr-FR";
+    rec.interimResults = true;
+    rec.continuous = true;
+
+    rec.onstart = () => {
+      finalTranscriptRef.current = "";
+      setIsDictating(true);
     };
-    onResize();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+
+    rec.onresult = (event) => {
+      let finalText = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const r = event.results[i];
+        const txt = (r[0]?.transcript || "").trim();
+        if (!txt) continue;
+        if (r.isFinal) finalText += (finalText ? " " : "") + txt;
+      }
+      if (finalText) finalTranscriptRef.current += (finalTranscriptRef.current ? " " : "") + finalText;
+    };
+
+    rec.onerror = () => {
+      setIsDictating(false);
+    };
+
+    rec.onend = () => {
+      setIsDictating(false);
+      const t = (finalTranscriptRef.current || "").trim();
+      if (t) {
+        setInput((prev) => {
+          const p = (prev || "").trim();
+          return p ? `${p} ${t}` : t;
+        });
+      }
+      finalTranscriptRef.current = "";
+    };
+
+    recognitionRef.current = rec;
+
+    return () => {
+      try {
+        rec.onresult = null;
+        rec.onend = null;
+        rec.onerror = null;
+        rec.onstart = null;
+        rec.stop();
+      } catch (_) {}
+      recognitionRef.current = null;
+    };
   }, []);
+
+  function toggleDictation() {
+    if (!speechSupported) return;
+    const rec = recognitionRef.current;
+    if (!rec) return;
+
+    try {
+      if (isDictating) {
+        rec.stop();
+      } else {
+        rec.start();
+      }
+    } catch (_) {
+      // Certains navigateurs jettent si start() est appelé trop vite.
+    }
+  }
 
   // ---------- Boot ----------
   useEffect(() => {
@@ -155,7 +225,6 @@ export default function Chat() {
       setUserId(uid);
       setEmail(session.user.email || "");
 
-      // slug agent depuis URL
       const url = new URL(window.location.href);
       const raw = url.searchParams.get("agent");
       const slug = safeDecode(raw).trim().toLowerCase();
@@ -175,19 +244,15 @@ export default function Chat() {
 
       setAgent(a);
 
-      // conversation_id optionnel dans URL (si on ouvre une ancienne conv)
       const convParam = url.searchParams.get("c");
       const convIdFromUrl = convParam ? safeDecode(convParam).trim() : "";
 
-      // Charge historique
       const h = await fetchHistory({ uid, agentSlug: a.slug });
       if (!mounted) return;
       setHistory(h);
 
-      // Choix conversation à ouvrir
       let chosenConvId = null;
 
-      // 1) si convId dans url et appartient à l'user => on l'ouvre
       if (convIdFromUrl) {
         const msgs = await fetchMessages({ uid, convId: convIdFromUrl });
         if (msgs.length > 0) {
@@ -200,7 +265,6 @@ export default function Chat() {
         }
       }
 
-      // 2) sinon, si historique existant, ouvre la dernière
       if (h && h.length > 0) {
         chosenConvId = h[0].id;
         setConversationId(chosenConvId);
@@ -211,7 +275,6 @@ export default function Chat() {
         if (msgs.length > 0) {
           setMessages(msgs);
         } else {
-          // fallback message d'accueil
           setMessages([
             {
               role: "assistant",
@@ -225,7 +288,6 @@ export default function Chat() {
         return;
       }
 
-      // 3) sinon crée nouvelle conversation + accueil
       const newConvId = await createConversation({
         uid,
         agentSlug: a.slug,
@@ -242,7 +304,6 @@ export default function Chat() {
         },
       ]);
 
-      // refresh historique
       const h2 = await fetchHistory({ uid, agentSlug: a.slug });
       if (!mounted) return;
       setHistory(h2);
@@ -253,7 +314,6 @@ export default function Chat() {
 
     boot();
 
-    // écoute auth
     const { data } = supabase.auth.onAuthStateChange((_event, newSession) => {
       if (!newSession) window.location.href = "/login";
     });
@@ -276,7 +336,6 @@ export default function Chat() {
 
     setConversationId(convId);
 
-    // Met à jour l’URL (sans recharger)
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("agent", agent.slug);
@@ -322,7 +381,6 @@ export default function Chat() {
       },
     ]);
 
-    // URL
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("agent", agent.slug);
@@ -343,12 +401,10 @@ export default function Chat() {
     setInput("");
     setErrorMsg("");
 
-    // UI immédiat
     setMessages((prev) => [...prev, { role: "user", content: userText }]);
     setSending(true);
     scrollToBottom();
 
-    // Persist user message
     await insertMessage({
       uid: userId,
       convId: conversationId,
@@ -356,27 +412,16 @@ export default function Chat() {
       content: userText,
     });
 
-    // Si c'est le premier message user, on met un title
-    const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
+    const isFirstUser =
+      messages.filter((m) => m.role === "user").length === 0;
     const titleMaybe = isFirstUser
       ? formatTitleFromFirstUserMessage(userText)
       : null;
 
-    // ✅ MODIF UNIQUEMENT ICI : récupérer le token Supabase pour /api/chat
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    const token = session?.access_token;
-
-    // Appel IA
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          // ✅ MODIF UNIQUEMENT ICI : passer le token
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: userText,
           agentSlug: agent.slug,
@@ -388,7 +433,6 @@ export default function Chat() {
 
       const reply = (data?.reply || "Réponse vide.").toString();
 
-      // UI + persist assistant
       setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
       await insertMessage({
         uid: userId,
@@ -397,14 +441,12 @@ export default function Chat() {
         content: reply,
       });
 
-      // touch conversation (updated_at + title si besoin)
       await touchConversation({
         uid: userId,
         convId: conversationId,
         titleMaybe,
       });
 
-      // refresh sidebar
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
 
@@ -426,11 +468,7 @@ export default function Chat() {
         content: "Erreur interne. Réessayez plus tard.",
       });
 
-      await touchConversation({
-        uid: userId,
-        convId: conversationId,
-        titleMaybe,
-      });
+      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
 
@@ -464,19 +502,6 @@ export default function Chat() {
       </main>
     );
   }
-
-  // ✅ AJOUT (mobile) : uniquement des styles conditionnels (desktop inchangé)
-  const layoutStyle = isMobile
-    ? { ...styles.layout, ...styles.layoutMobile }
-    : styles.layout;
-
-  const sidebarStyle = isMobile
-    ? { ...styles.sidebar, ...styles.sidebarMobile }
-    : styles.sidebar;
-
-  const chatCardStyle = isMobile
-    ? { ...styles.chatCard, ...styles.chatCardMobile }
-    : styles.chatCard;
 
   return (
     <main style={styles.page}>
@@ -514,9 +539,9 @@ export default function Chat() {
         </div>
       </header>
 
-      <section style={layoutStyle}>
+      <section style={styles.layout}>
         {/* Sidebar */}
-        <aside style={sidebarStyle}>
+        <aside style={styles.sidebar}>
           <div style={styles.sidebarTop}>
             <div style={styles.sidebarTitle}>Historique</div>
             <button onClick={newConversation} style={styles.newBtn}>
@@ -563,7 +588,7 @@ export default function Chat() {
         </aside>
 
         {/* Chat */}
-        <div style={chatCardStyle}>
+        <div style={styles.chatCard}>
           {errorMsg ? <div style={styles.alert}>{errorMsg}</div> : null}
 
           <div style={styles.thread} ref={threadRef}>
@@ -602,6 +627,29 @@ export default function Chat() {
               rows={2}
               autoComplete="off"
             />
+
+            {/* Bouton dictée */}
+            <button
+              type="button"
+              onClick={toggleDictation}
+              disabled={!speechSupported}
+              aria-label={isDictating ? "Arrêter la dictée" : "Démarrer la dictée"}
+              title={
+                !speechSupported
+                  ? "Dictée indisponible sur ce navigateur"
+                  : isDictating
+                  ? "Arrêter la dictée"
+                  : "Démarrer la dictée"
+              }
+              style={{
+                ...styles.micBtn,
+                ...(isDictating ? styles.micBtnActive : null),
+                ...(!speechSupported ? styles.micBtnDisabled : null),
+              }}
+            >
+              {isDictating ? "■" : "🎙"}
+            </button>
+
             <button
               style={canSend ? styles.btn : styles.btnDisabled}
               onClick={sendMessage}
@@ -750,13 +798,6 @@ const styles = {
     boxSizing: "border-box",
   },
 
-  // ✅ AJOUT (mobile) : uniquement layout responsive
-  layoutMobile: {
-    gridTemplateColumns: "1fr",
-    gridTemplateRows: "auto 1fr",
-  },
-
-  /* Sidebar */
   sidebar: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -766,11 +807,6 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     minHeight: 0,
-  },
-
-  // ✅ AJOUT (mobile) : limite la hauteur de l’historique pour laisser le chat visible
-  sidebarMobile: {
-    maxHeight: "34vh",
   },
 
   sidebarTop: {
@@ -853,7 +889,6 @@ const styles = {
     color: "rgba(238,242,255,.65)",
   },
 
-  /* Chat card */
   chatCard: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -862,11 +897,6 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
-    minHeight: 0,
-  },
-
-  // ✅ AJOUT (mobile) : garde le chat visible sous l’historique
-  chatCardMobile: {
     minHeight: 0,
   },
 
@@ -946,6 +976,33 @@ const styles = {
     lineHeight: 1.4,
   },
 
+  // --- Bouton micro ---
+  micBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.35)",
+    color: "#eef2ff",
+    fontWeight: 900,
+    cursor: "pointer",
+    boxShadow: "0 18px 45px rgba(0,0,0,.35)",
+    display: "grid",
+    placeItems: "center",
+    userSelect: "none",
+  },
+
+  micBtnActive: {
+    background:
+      "linear-gradient(135deg, rgba(255,140,40,.18), rgba(80,120,255,.12))",
+    border: "1px solid rgba(255,140,40,.18)",
+  },
+
+  micBtnDisabled: {
+    opacity: 0.45,
+    cursor: "not-allowed",
+  },
+
   btn: {
     padding: "12px 16px",
     borderRadius: 999,
@@ -970,7 +1027,6 @@ const styles = {
     minWidth: 110,
   },
 
-  /* Loading */
   center: {
     position: "relative",
     zIndex: 1,
