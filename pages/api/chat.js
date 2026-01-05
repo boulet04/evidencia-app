@@ -1,36 +1,21 @@
 // pages/api/chat.js
-import Mistral from "@mistralai/mistralai";
+import { Mistral } from "@mistralai/mistralai";
 import { createClient } from "@supabase/supabase-js";
 import agentPrompts from "../../lib/agentPrompts";
 
-// Supabase admin (bypass RLS) - SERVER ONLY
+const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
+
+// Supabase admin (server-side) pour lire les configs même avec RLS
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  { auth: { persistSession: false } }
 );
 
-const mistral = new Mistral({
-  apiKey: process.env.MISTRAL_API_KEY,
-});
-
-function buildSystemPrompt({ basePrompt, customPrompt, context }) {
-  const parts = [];
-
-  // Prompt de base (agentPrompts.js)
-  if (basePrompt && basePrompt.trim()) parts.push(basePrompt.trim());
-
-  // Prompt personnalisé (console admin)
-  if (customPrompt && customPrompt.trim()) {
-    parts.push(`PROMPT PERSONNALISÉ (prioritaire) :\n${customPrompt.trim()}`);
-  }
-
-  // Contexte (jsonb)
-  if (context) {
-    // Tu peux stocker ce que tu veux (urls, notes, etc.)
-    parts.push(`CONTEXTE (données) :\n${JSON.stringify(context, null, 2)}`);
-  }
-
-  return parts.join("\n\n---\n\n").trim();
+function getBearerToken(req) {
+  const h = req.headers.authorization || "";
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : "";
 }
 
 export default async function handler(req, res) {
@@ -39,63 +24,71 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Méthode non autorisée." });
     }
 
-    // 1) Auth: on récupère le token Supabase envoyé par le client
-    const auth = req.headers.authorization || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-    if (!token) return res.status(401).json({ error: "Token manquant." });
+    // 0) Vérif clés
+    if (!process.env.MISTRAL_API_KEY) {
+      return res.status(500).json({ error: "MISTRAL_API_KEY manquante (Vercel)." });
+    }
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      return res.status(500).json({
+        error: "Clés Supabase serveur manquantes (NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY).",
+      });
+    }
+
+    const { message, agentSlug } = req.body || {};
+    const slug = (agentSlug || "").toString().trim().toLowerCase();
+    const userMsg = (message || "").toString();
+
+    if (!slug) return res.status(400).json({ error: "Aucun agent sélectionné." });
+    if (!userMsg.trim()) return res.status(400).json({ error: "Message vide." });
+
+    // 1) Identifier le user via JWT Supabase (envoyé depuis le front)
+    const token = getBearerToken(req);
+    if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
 
     const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-    if (userErr || !userData?.user) {
-      return res.status(401).json({ error: "Token invalide." });
+    if (userErr || !userData?.user?.id) {
+      return res.status(401).json({ error: "Session invalide (token)." });
     }
     const userId = userData.user.id;
 
-    // 2) Inputs
-    const { message, agentSlug } = req.body || {};
-    const cleanMsg = (message || "").trim();
-    const cleanSlug = (agentSlug || "").trim().toLowerCase();
-
-    if (!cleanSlug) return res.status(400).json({ error: "Aucun agent sélectionné." });
-    if (!cleanMsg) return res.status(400).json({ error: "Message vide." });
-
-    // 3) Vérif agent (table agents = source de vérité)
+    // 2) Agent (table agents) pour récupérer agent_id
     const { data: agentRow, error: agentErr } = await supabaseAdmin
       .from("agents")
-      .select("id, slug, name")
-      .eq("slug", cleanSlug)
+      .select("id, slug, name, description")
+      .eq("slug", slug)
       .maybeSingle();
 
     if (agentErr || !agentRow) {
       return res.status(404).json({ error: "Agent introuvable." });
     }
 
-    // 4) Récup config personnalisée (prompt + context) pour (user_id, agent_id)
+    // 3) Charger config personnalisée (prompt / data / workflow) si existe
     const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
-      .select("system_prompt, context")
+      .select("context")
       .eq("user_id", userId)
       .eq("agent_id", agentRow.id)
       .maybeSingle();
 
-    // Si pas de config => fallback sur prompt base
-    const basePrompt = agentPrompts?.[cleanSlug]?.systemPrompt || `Tu es ${agentRow.name || cleanSlug}.`;
-    const customPrompt = cfg?.system_prompt || "";
-    const context = cfg?.context || null;
+    // Si erreur RLS / table, on n’explose pas : on continue sans custom
+    const customPrompt = !cfgErr ? (cfg?.context?.prompt || "") : "";
 
-    const systemPrompt = buildSystemPrompt({ basePrompt, customPrompt, context });
+    // 4) Prompt final
+    const basePrompt = agentPrompts?.[slug]?.systemPrompt || "";
+    const systemPrompt = [basePrompt, customPrompt].filter(Boolean).join("\n\n").trim();
 
     // 5) Appel Mistral
     const completion = await mistral.chat.complete({
       model: "mistral-small-latest",
       messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: cleanMsg },
+        ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
+        { role: "user", content: userMsg },
       ],
       temperature: 0.7,
     });
 
     const reply =
-      completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
+      completion?.choices?.[0]?.message?.content?.toString().trim() || "Réponse vide.";
 
     return res.status(200).json({ reply });
   } catch (err) {
