@@ -1274,4 +1274,5 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
   },
+};
 
