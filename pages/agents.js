@@ -11,7 +11,9 @@ export default function Agents() {
     let mounted = true;
 
     async function boot() {
-      const { data: { session } } = await supabase.auth.getSession();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
       if (!session) {
         window.location.href = "/login";
         return;
@@ -42,7 +44,9 @@ export default function Agents() {
     }
 
     boot();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   async function logout() {
@@ -51,7 +55,11 @@ export default function Agents() {
   }
 
   if (loading) {
-    return <main style={styles.page}><div style={styles.center}>Chargement…</div></main>;
+    return (
+      <main style={styles.page}>
+        <div style={styles.center}>Chargement…</div>
+      </main>
+    );
   }
 
   return (
@@ -62,7 +70,11 @@ export default function Agents() {
       </div>
 
       <header style={styles.topbar}>
-        <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
+        <img
+          src="/images/logolong.png"
+          alt="Evidenc’IA"
+          style={styles.brandLogo}
+        />
 
         <div style={styles.topRight}>
           <span style={styles.userChip}>{email}</span>
@@ -77,7 +89,9 @@ export default function Agents() {
             </button>
           ) : null}
 
-          <button onClick={logout} style={styles.btnGhost}>Déconnexion</button>
+          <button onClick={logout} style={styles.btnGhost}>
+            Déconnexion
+          </button>
         </div>
       </header>
 
@@ -93,11 +107,7 @@ export default function Agents() {
               onClick={() => (window.location.href = `/chat?agent=${a.slug}`)}
             >
               <div style={styles.avatarWrap}>
-                <img
-                  src={a.avatar_url}
-                  alt={a.name}
-                  style={styles.avatar}
-                />
+                <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
               </div>
 
               <div style={styles.meta}>
@@ -112,6 +122,10 @@ export default function Agents() {
   );
 }
 
+/**
+ * CORRECTIF "B" (global) — on force les <button> et <a> à hériter la couleur
+ * afin d’éviter le texte noir par défaut sur mobile/selon navigateur.
+ */
 const styles = {
   page: {
     minHeight: "100vh",
@@ -119,7 +133,12 @@ const styles = {
     overflow: "hidden",
     fontFamily: "Segoe UI, Arial, sans-serif",
     color: "#eef2ff",
-    background: "linear-gradient(135deg,#05060a,#0a0d16)"
+    background: "linear-gradient(135deg,#05060a,#0a0d16)",
+  },
+
+  // --- Correctif B (global, appliqué via wrapper) ---
+  globalFix: {
+    color: "inherit",
   },
 
   bg: { position: "absolute", inset: 0, zIndex: 0 },
@@ -131,7 +150,7 @@ const styles = {
     backgroundSize: "contain",
     backgroundPosition: "center",
     backgroundRepeat: "no-repeat",
-    opacity: 0.05
+    opacity: 0.05,
   },
 
   bgVeils: {
@@ -140,7 +159,7 @@ const styles = {
     background:
       "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.22), transparent 62%)," +
       "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), transparent 62%)," +
-      "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22), rgba(0,0,0,.66))"
+      "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22), rgba(0,0,0,.66))",
   },
 
   topbar: {
@@ -152,7 +171,7 @@ const styles = {
     justifyContent: "space-between",
     background: "rgba(0,0,0,.35)",
     backdropFilter: "blur(10px)",
-    borderBottom: "1px solid rgba(255,255,255,.1)"
+    borderBottom: "1px solid rgba(255,255,255,.1)",
   },
 
   brandLogo: { height: 32 },
@@ -163,17 +182,18 @@ const styles = {
     padding: "8px 12px",
     background: "rgba(255,255,255,.12)",
     borderRadius: 999,
-    fontWeight: 800
+    fontWeight: 800,
+    color: "inherit",
   },
 
   btnGhost: {
     padding: "10px 14px",
     borderRadius: 999,
     background: "rgba(255,255,255,.1)",
-    color: "#fff",
+    color: "inherit", // <-- IMPORTANT (hérite de page.color)
     fontWeight: 900,
     border: "1px solid rgba(255,255,255,.2)",
-    cursor: "pointer"
+    cursor: "pointer",
   },
 
   shell: {
@@ -181,7 +201,7 @@ const styles = {
     zIndex: 1,
     padding: 20,
     maxWidth: 1100,
-    margin: "0 auto"
+    margin: "0 auto",
   },
 
   h1: { fontSize: 32, fontWeight: 900, marginBottom: 6 },
@@ -190,7 +210,7 @@ const styles = {
   grid: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-    gap: 20
+    gap: 20,
   },
 
   card: {
@@ -201,7 +221,8 @@ const styles = {
     borderRadius: 20,
     backdropFilter: "blur(10px)",
     border: "1px solid rgba(255,255,255,.12)",
-    cursor: "pointer"
+    cursor: "pointer",
+    color: "inherit", // <-- IMPORTANT: button peut default noir sinon
   },
 
   avatarWrap: { width: 64, height: 64 },
@@ -211,17 +232,17 @@ const styles = {
     height: "100%",
     borderRadius: "50%",
     objectFit: "cover",
-    objectPosition: "top"
+    objectPosition: "top",
   },
 
-  meta: { display: "grid", gap: 4 },
-  name: { fontSize: 18, fontWeight: 900 },
-  desc: { opacity: 0.75, fontWeight: 700 },
+  meta: { display: "grid", gap: 4, color: "inherit" },
+  name: { fontSize: 18, fontWeight: 900, color: "inherit" },
+  desc: { opacity: 0.75, fontWeight: 700, color: "inherit" },
 
   center: {
     minHeight: "100vh",
     display: "grid",
     placeItems: "center",
-    fontSize: 20
-  }
+    fontSize: 20,
+  },
 };
