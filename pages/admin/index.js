@@ -768,7 +768,7 @@ const styles = {
     height: 74,
     borderRadius: "50%",
     objectFit: "cover",
-    objectPosition: "center 15%", // <-- IMPORTANT (remonte l'image)
+    objectPosition: "center 25%", // <-- IMPORTANT (remonte l'image)
     display: "block",
   },
 
