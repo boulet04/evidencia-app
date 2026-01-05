@@ -8,7 +8,7 @@ export default function Chat() {
   const [email, setEmail] = useState("");
   const [userId, setUserId] = useState("");
 
-  const [agent, setAgent] = useState(null); // { slug, name, description, avatar_url, id }
+  const [agent, setAgent] = useState(null); // { id, slug, name, description, avatar_url }
   const [conversationId, setConversationId] = useState(null);
 
   const [history, setHistory] = useState([]); // 10 dernières conversations (par user + agent)
@@ -34,12 +34,8 @@ export default function Chat() {
     }
   }
 
-  function safeStr(v) {
-    return (v || "").toString();
-  }
-
   function formatTitleFromFirstUserMessage(text) {
-    const t = safeStr(text).trim().replace(/\s+/g, " ");
+    const t = (text || "").trim().replace(/\s+/g, " ");
     if (!t) return "Nouvelle conversation";
     return t.length > 42 ? t.slice(0, 42) + "…" : t;
   }
@@ -52,7 +48,11 @@ export default function Chat() {
     });
   }
 
-  // ---------- Data ----------
+  function greetingFor(a) {
+    return `Bonjour, je suis ${a?.name || "votre agent"}. Comment puis-je vous aider ?`;
+  }
+
+  // ---------- Supabase access ----------
   async function fetchAgent(slug) {
     const { data: a, error } = await supabase
       .from("agents")
@@ -77,8 +77,23 @@ export default function Chat() {
     return data || [];
   }
 
-  // IMPORTANT: votre table s'appelle "messages" (pas conversation_messages)
-  async function fetchMessages({ convId }) {
+  async function conversationBelongsToUser({ uid, convId }) {
+    const { data, error } = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("id", convId)
+      .eq("user_id", uid)
+      .maybeSingle();
+
+    if (error) return false;
+    return !!data?.id;
+  }
+
+  // IMPORTANT: table = "messages" (pas "conversation_messages")
+  async function fetchMessages({ uid, convId }) {
+    const ok = await conversationBelongsToUser({ uid, convId });
+    if (!ok) return [];
+
     const { data, error } = await supabase
       .from("messages")
       .select("id, role, content, created_at")
@@ -87,19 +102,6 @@ export default function Chat() {
 
     if (error) return [];
     return data || [];
-  }
-
-  async function conversationBelongsToUser({ uid, agentSlug, convId }) {
-    const { data, error } = await supabase
-      .from("conversations")
-      .select("id")
-      .eq("id", convId)
-      .eq("user_id", uid)
-      .eq("agent_slug", agentSlug)
-      .maybeSingle();
-
-    if (error) return false;
-    return !!data?.id;
   }
 
   async function createConversation({ uid, agentSlug, title }) {
@@ -124,7 +126,7 @@ export default function Chat() {
     await supabase.from("conversations").update(patch).eq("user_id", uid).eq("id", convId);
   }
 
-  // IMPORTANT: insert dans "messages" (sans user_id)
+  // IMPORTANT: table = "messages" (pas "conversation_messages")
   async function insertMessage({ convId, role, content }) {
     await supabase.from("messages").insert({
       conversation_id: convId,
@@ -155,7 +157,6 @@ export default function Chat() {
       setUserId(uid);
       setEmail(session.user.email || "");
 
-      // slug agent depuis URL
       const url = new URL(window.location.href);
       const raw = url.searchParams.get("agent");
       const slug = safeDecode(raw).trim().toLowerCase();
@@ -178,66 +179,48 @@ export default function Chat() {
       const convParam = url.searchParams.get("c");
       const convIdFromUrl = convParam ? safeDecode(convParam).trim() : "";
 
-      // Charge historique
+      // Sidebar history
       const h = await fetchHistory({ uid, agentSlug: a.slug });
       if (!mounted) return;
       setHistory(h);
 
-      // 1) si convId dans URL et appartient à l'user => on l'ouvre (même si 0 message)
+      // 1) URL convId si valide
       if (convIdFromUrl) {
-        const ok = await conversationBelongsToUser({
-          uid,
-          agentSlug: a.slug,
-          convId: convIdFromUrl,
-        });
+        const msgs = await fetchMessages({ uid, convId: convIdFromUrl });
+        if (!mounted) return;
 
-        if (ok) {
+        if (msgs.length > 0) {
           setConversationId(convIdFromUrl);
-          const msgs = await fetchMessages({ convId: convIdFromUrl });
-          if (!mounted) return;
-
-          setMessages(
-            msgs.length > 0
-              ? msgs
-              : [
-                  {
-                    role: "assistant",
-                    content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
-                  },
-                ]
-          );
-
+          setMessages(msgs);
           setLoading(false);
           scrollToBottom();
           return;
         }
       }
 
-      // 2) sinon, si historique existant, ouvre la dernière
+      // 2) Sinon dernière conversation (si existe)
       if (h && h.length > 0) {
-        const chosenConvId = h[0].id;
-        setConversationId(chosenConvId);
+        const chosen = h[0].id;
+        setConversationId(chosen);
 
-        const msgs = await fetchMessages({ convId: chosenConvId });
+        const msgs = await fetchMessages({ uid, convId: chosen });
         if (!mounted) return;
 
-        setMessages(
-          msgs.length > 0
-            ? msgs
-            : [
-                {
-                  role: "assistant",
-                  content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
-                },
-              ]
-        );
+        if (msgs.length > 0) {
+          setMessages(msgs);
+        } else {
+          // Conversation vide -> on insère un message d’accueil en DB pour stabiliser
+          const greet = greetingFor(a);
+          await insertMessage({ convId: chosen, role: "assistant", content: greet });
+          setMessages([{ role: "assistant", content: greet }]);
+        }
 
         setLoading(false);
         scrollToBottom();
         return;
       }
 
-      // 3) sinon crée nouvelle conversation + accueil (non persisté)
+      // 3) Sinon créer conversation + message d’accueil en DB
       const newConvId = await createConversation({
         uid,
         agentSlug: a.slug,
@@ -246,17 +229,20 @@ export default function Chat() {
 
       if (!mounted) return;
 
+      if (!newConvId) {
+        setErrorMsg("Impossible de créer une conversation (policies Supabase ?).");
+        setLoading(false);
+        return;
+      }
+
       setConversationId(newConvId);
-      setMessages([
-        {
-          role: "assistant",
-          content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
-        },
-      ]);
+
+      const greet = greetingFor(a);
+      await insertMessage({ convId: newConvId, role: "assistant", content: greet });
+      setMessages([{ role: "assistant", content: greet }]);
 
       const h2 = await fetchHistory({ uid, agentSlug: a.slug });
-      if (!mounted) return;
-      setHistory(h2);
+      if (mounted) setHistory(h2);
 
       setLoading(false);
       scrollToBottom();
@@ -282,10 +268,11 @@ export default function Chat() {
 
   async function openConversation(convId) {
     if (!userId || !agent || !convId) return;
-    setErrorMsg("");
 
+    setErrorMsg("");
     setConversationId(convId);
 
+    // URL (sans reload)
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("agent", agent.slug);
@@ -293,23 +280,21 @@ export default function Chat() {
       window.history.replaceState({}, "", url.toString());
     } catch (_) {}
 
-    const msgs = await fetchMessages({ convId });
-    setMessages(
-      msgs.length > 0
-        ? msgs
-        : [
-            {
-              role: "assistant",
-              content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?`,
-            },
-          ]
-    );
+    const msgs = await fetchMessages({ uid: userId, convId });
+    if (msgs.length > 0) {
+      setMessages(msgs);
+    } else {
+      const greet = greetingFor(agent);
+      await insertMessage({ convId, role: "assistant", content: greet });
+      setMessages([{ role: "assistant", content: greet }]);
+    }
 
     scrollToBottom();
   }
 
   async function newConversation() {
     if (!userId || !agent) return;
+
     setErrorMsg("");
 
     const convId = await createConversation({
@@ -324,13 +309,12 @@ export default function Chat() {
     }
 
     setConversationId(convId);
-    setMessages([
-      {
-        role: "assistant",
-        content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?`,
-      },
-    ]);
 
+    const greet = greetingFor(agent);
+    await insertMessage({ convId, role: "assistant", content: greet });
+    setMessages([{ role: "assistant", content: greet }]);
+
+    // URL (sans reload)
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("agent", agent.slug);
@@ -351,21 +335,23 @@ export default function Chat() {
     setInput("");
     setErrorMsg("");
 
+    // UI immédiat
     setMessages((prev) => [...prev, { role: "user", content: userText }]);
     setSending(true);
     scrollToBottom();
 
-    // Persist user message
+    // Persist user message (DB)
     await insertMessage({
       convId: conversationId,
       role: "user",
       content: userText,
     });
 
+    // Si c'est le premier message user -> titre
     const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
     const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
 
-    // token pour /api/chat
+    // Token pour /api/chat
     const {
       data: { session },
     } = await supabase.auth.getSession();
@@ -387,13 +373,14 @@ export default function Chat() {
         body: JSON.stringify({
           message: userText,
           agentSlug: agent.slug,
+          conversationId: conversationId, // IMPORTANT
         }),
       });
 
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data?.error || "Erreur API");
 
-      const reply = safeStr(data?.reply || "Réponse vide.");
+      const reply = (data?.reply || "Réponse vide.").toString();
 
       setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
 
@@ -403,7 +390,11 @@ export default function Chat() {
         content: reply,
       });
 
-      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
+      await touchConversation({
+        uid: userId,
+        convId: conversationId,
+        titleMaybe,
+      });
 
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
@@ -469,18 +460,11 @@ export default function Chat() {
 
       <header style={styles.topbar}>
         <div style={styles.topLeft}>
-          <button
-            style={styles.backBtn}
-            onClick={() => (window.location.href = "/agents")}
-          >
+          <button style={styles.backBtn} onClick={() => (window.location.href = "/agents")}>
             ← Retour
           </button>
 
-          <img
-            src="/images/logolong.png"
-            alt="Evidenc’IA"
-            style={styles.brandLogo}
-          />
+          <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
 
           <div style={styles.agentInfo}>
             <div style={styles.agentName}>{agent.name}</div>
@@ -497,6 +481,7 @@ export default function Chat() {
       </header>
 
       <section style={styles.layout}>
+        {/* Sidebar */}
         <aside style={styles.sidebar}>
           <div style={styles.sidebarTop}>
             <div style={styles.sidebarTitle}>Historique</div>
@@ -507,9 +492,7 @@ export default function Chat() {
 
           <div style={styles.sidebarList}>
             {history.length === 0 ? (
-              <div style={styles.sidebarEmpty}>
-                Aucune conversation pour cet agent.
-              </div>
+              <div style={styles.sidebarEmpty}>Aucune conversation pour cet agent.</div>
             ) : (
               history.map((c) => {
                 const active = c.id === conversationId;
@@ -541,6 +524,7 @@ export default function Chat() {
           </div>
         </aside>
 
+        {/* Chat */}
         <div style={styles.chatCard}>
           {errorMsg ? <div style={styles.alert}>{errorMsg}</div> : null}
 
@@ -590,7 +574,7 @@ export default function Chat() {
   );
 }
 
-/* ================== STYLES (inchangés) ================== */
+/* ================== STYLES (charte Evidencia / sans bord blanc) ================== */
 const styles = {
   page: {
     minHeight: "100vh",
@@ -637,7 +621,13 @@ const styles = {
     borderBottom: "1px solid rgba(255,255,255,.10)",
   },
 
-  topLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
+  topLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    minWidth: 0,
+  },
+
   topRight: { display: "flex", alignItems: "center", gap: 10 },
 
   backBtn: {
@@ -714,6 +704,7 @@ const styles = {
     boxSizing: "border-box",
   },
 
+  /* Sidebar */
   sidebar: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -799,8 +790,13 @@ const styles = {
     textOverflow: "ellipsis",
   },
 
-  histDate: { fontWeight: 800, fontSize: 11, color: "rgba(238,242,255,.65)" },
+  histDate: {
+    fontWeight: 800,
+    fontSize: 11,
+    color: "rgba(238,242,255,.65)",
+  },
 
+  /* Chat card */
   chatCard: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -854,7 +850,11 @@ const styles = {
     marginBottom: 6,
   },
 
-  text: { fontSize: 14, fontWeight: 700, color: "rgba(238,242,255,.92)" },
+  text: {
+    fontSize: 14,
+    fontWeight: 700,
+    color: "rgba(238,242,255,.92)",
+  },
 
   composer: {
     display: "flex",
@@ -903,6 +903,7 @@ const styles = {
     minWidth: 110,
   },
 
+  /* Loading */
   center: {
     position: "relative",
     zIndex: 1,
