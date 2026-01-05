@@ -1133,7 +1133,7 @@ const styles = {
     height: 74,
     borderRadius: "50%",
     objectFit: "cover",
-    objectPosition: "center 25%",
+    objectPosition: "center 5%",
     display: "block",
   },
 
