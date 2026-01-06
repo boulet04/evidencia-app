@@ -33,13 +33,13 @@ async function requireAdmin(token) {
 
   const { data: p, error: pErr } = await supabaseAdmin
     .from("profiles")
-    .select("role, is_admin")
+    .select("role")
     .eq("user_id", u.user.id)
     .maybeSingle();
 
   if (pErr) return { ok: false, status: 500, error: pErr.message };
 
-  const isAdmin = p?.role === "admin" || p?.is_admin === true;
+  const isAdmin = p?.role === "admin";
   if (!isAdmin) return { ok: false, status: 403, error: "Accès interdit." };
 
   return { ok: true, userId: u.user.id };
@@ -92,7 +92,7 @@ export default async function handler(req, res) {
 
     const newUserId = created.user.id;
 
-    // 2) create profile (tolérant)
+    // 2) create profile
     const { error: profErr } = await supabaseAdmin.from("profiles").insert({
       user_id: newUserId,
       email,
