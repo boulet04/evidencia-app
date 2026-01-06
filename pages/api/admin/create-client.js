@@ -13,54 +13,79 @@ function getBearerToken(req) {
   return m ? m[1] : "";
 }
 
-function safeStr(v) {
-  return (v ?? "").toString().trim();
+async function assertAdmin(req) {
+  const token = getBearerToken(req);
+  if (!token) return { ok: false, status: 401, error: "Token manquant." };
+
+  const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
+  if (userErr || !userData?.user) return { ok: false, status: 401, error: "Session invalide." };
+
+  const meId = userData.user.id;
+
+  const { data: p, error: pErr } = await supabaseAdmin
+    .from("profiles")
+    .select("role")
+    .eq("user_id", meId)
+    .maybeSingle();
+
+  if (pErr) return { ok: false, status: 500, error: "Erreur lecture profile admin." };
+  if (p?.role !== "admin") return { ok: false, status: 403, error: "Accès refusé (non admin)." };
+
+  return { ok: true, meId };
+}
+
+async function insertClientFlexible(name) {
+  const candidates = [
+    { name },
+    { customer_name: name },
+    { company_name: name },
+    { title: name },
+  ];
+
+  for (const payload of candidates) {
+    const { data, error } = await supabaseAdmin
+      .from("clients")
+      .insert(payload)
+      .select("*")
+      .single();
+
+    if (!error && data) return data;
+
+    // si la colonne n'existe pas, on tente la suivante
+    const msg = (error?.message || "").toLowerCase();
+    if (!msg.includes("column") && !msg.includes("does not exist")) {
+      // autre erreur -> stop
+      throw error;
+    }
+  }
+
+  throw new Error(
+    "Impossible de créer le client : aucune colonne (name/customer_name/company_name/title) ne correspond à ta table clients."
+  );
 }
 
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
 
-    const token = getBearerToken(req);
-    if (!token) return res.status(401).json({ error: "Token manquant." });
-
-    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-    if (userErr || !userData?.user) return res.status(401).json({ error: "Session invalide." });
-
-    const adminId = userData.user.id;
-
-    const { data: adminProfile, error: profErr } = await supabaseAdmin
-      .from("profiles")
-      .select("role")
-      .eq("user_id", adminId)
-      .maybeSingle();
-
-    if (profErr || adminProfile?.role !== "admin") {
-      return res.status(403).json({ error: "Accès interdit (admin requis)." });
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant." });
     }
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant." });
+    }
+
+    const auth = await assertAdmin(req);
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
 
     const { name } = req.body || {};
-    const clientName = safeStr(name);
-
+    const clientName = (name || "").toString().trim();
     if (!clientName) return res.status(400).json({ error: "Nom client manquant." });
 
-    const { data: inserted, error: insErr } = await supabaseAdmin
-      .from("clients")
-      .insert({ name: clientName })
-      .select("id, name, created_at")
-      .single();
-
-    if (insErr) {
-      // unique violation -> client existe déjà
-      if ((insErr.code || "").toString() === "23505") {
-        return res.status(409).json({ error: "Ce client existe déjà." });
-      }
-      return res.status(500).json({ error: "Création client échouée.", details: insErr.message });
-    }
-
-    return res.status(200).json({ ok: true, client: inserted });
+    const client = await insertClientFlexible(clientName);
+    return res.status(200).json({ client });
   } catch (e) {
     console.error("create-client error:", e);
-    return res.status(500).json({ error: "Erreur interne." });
+    return res.status(500).json({ error: e?.message || "Erreur serveur create-client." });
   }
 }
