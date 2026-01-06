@@ -3,11 +3,16 @@ import Mistral from "@mistralai/mistralai";
 import agentPrompts from "../../lib/agentPrompts";
 import { createClient } from "@supabase/supabase-js";
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+const API_VERSION = "chat-api-debug-2026-01-06";
+
+function setHeaders(res) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("X-Evidencia-API", API_VERSION);
+
+  // CORS safe (même en same-origin)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 function getBearerToken(req) {
@@ -34,12 +39,25 @@ function parseMaybeJson(v) {
 }
 
 export default async function handler(req, res) {
-  setCors(res);
+  setHeaders(res);
 
+  // OPTIONS (preflight)
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
 
-  // 0) Env
+  // DEBUG GET -> permet de vérifier que le bon fichier est déployé
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      version: API_VERSION,
+      hint: "Si tu vois ceci, Vercel exécute BIEN pages/api/chat.js",
+    });
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ step: "method", error: "Méthode non autorisée." });
+  }
+
+  // ENV
   const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
   const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -55,9 +73,9 @@ export default async function handler(req, res) {
   const mistral = new Mistral({ apiKey: MISTRAL_API_KEY });
 
   try {
-    // 1) Token user
+    // AUTH
     const token = getBearerToken(req);
-    if (!token) return res.status(401).json({ step: "auth", error: "Non authentifié (token manquant)." });
+    if (!token) return res.status(401).json({ step: "auth", error: "Token manquant (Authorization: Bearer ...)." });
 
     const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
     if (userErr || !userData?.user) {
@@ -69,14 +87,14 @@ export default async function handler(req, res) {
     }
     const userId = userData.user.id;
 
-    // 2) Body
+    // BODY
     const { message, agentSlug } = req.body || {};
     const slug = safeStr(agentSlug).trim().toLowerCase();
     const userMsg = safeStr(message).trim();
-    if (!slug) return res.status(400).json({ step: "body", error: "Aucun agent sélectionné." });
-    if (!userMsg) return res.status(400).json({ step: "body", error: "Message vide." });
+    if (!slug) return res.status(400).json({ step: "body", error: "agentSlug manquant." });
+    if (!userMsg) return res.status(400).json({ step: "body", error: "message vide." });
 
-    // 3) Agent
+    // AGENT
     const { data: agent, error: agentErr } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
@@ -91,7 +109,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // 4) Assignation
+    // ASSIGNATION
     const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
       .select("user_id, agent_id")
@@ -102,18 +120,15 @@ export default async function handler(req, res) {
     if (assignErr) {
       return res.status(500).json({
         step: "assignation",
-        error: "Erreur assignation (user_agents).",
+        error: "Erreur Supabase sur user_agents.",
         detail: safeStr(assignErr?.message),
       });
     }
     if (!assignment) {
-      return res.status(403).json({
-        step: "assignation",
-        error: "Accès interdit : agent non assigné.",
-      });
+      return res.status(403).json({ step: "assignation", error: "Agent non assigné à cet utilisateur." });
     }
 
-    // 5) Prompt custom
+    // PROMPT CUSTOM
     const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -138,7 +153,7 @@ export default async function handler(req, res) {
       ? `${basePrompt}\n\nINSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}`
       : basePrompt;
 
-    // 6) Mistral
+    // MISTRAL
     const completion = await mistral.chat.complete({
       model: process.env.MISTRAL_MODEL || "mistral-small-latest",
       messages: [
@@ -149,7 +164,7 @@ export default async function handler(req, res) {
     });
 
     const reply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
-    return res.status(200).json({ reply });
+    return res.status(200).json({ reply, debug: { version: API_VERSION, hasCustomPrompt: !!customPrompt } });
   } catch (err) {
     console.error("Erreur API /api/chat :", err);
     return res.status(500).json({
