@@ -7,7 +7,7 @@ export default function Admin() {
 
   // Data
   const [clients, setClients] = useState([]);
-  const [clientUsers, setClientUsers] = useState([]);
+  const [clientUsers, setClientUsers] = useState([]); // table pivot client_users
   const [profiles, setProfiles] = useState([]);
   const [agents, setAgents] = useState([]);
   const [userAgents, setUserAgents] = useState([]);
@@ -18,6 +18,15 @@ export default function Admin() {
   const [q, setQ] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
+
+  // Create client/user forms
+  const [createClientOpen, setCreateClientOpen] = useState(false);
+  const [newClientName, setNewClientName] = useState("");
+
+  const [createUserOpen, setCreateUserOpen] = useState(false);
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [newUserRole, setNewUserRole] = useState("user");
 
   // Prompt & data modal state
   const [cfgOpen, setCfgOpen] = useState(false);
@@ -36,8 +45,7 @@ export default function Admin() {
   const isAdmin = useMemo(() => me?.role === "admin", [me]);
 
   function clientLabel(c) {
-    const v =
-      (c?.name || c?.customer_name || c?.company_name || c?.title || "").trim();
+    const v = (c?.name || c?.customer_name || c?.company_name || c?.title || "").trim();
     return v || "Client";
   }
 
@@ -55,6 +63,40 @@ export default function Admin() {
 
   function isAdminUser() {
     return !!me && me.role === "admin";
+  }
+
+  async function getAccessToken() {
+    const { data } = await supabase.auth.getSession();
+    return data?.session?.access_token || "";
+  }
+
+  async function refreshAll() {
+    const [cRes, cuRes, pRes, aRes, uaRes] = await Promise.all([
+      supabase.from("clients").select("*"),
+      supabase.from("client_users").select("client_id, user_id"),
+      supabase.from("profiles").select("user_id, email, role"),
+      supabase.from("agents").select("id, slug, name, description, avatar_url"),
+      supabase
+        .from("user_agents")
+        .select("user_id, agent_id, created_at")
+        .order("created_at", { ascending: false }),
+    ]);
+
+    if (cRes.error || cuRes.error || pRes.error || aRes.error || uaRes.error) {
+      const parts = [];
+      if (cRes.error) parts.push(`clients: ${cRes.error.message}`);
+      if (cuRes.error) parts.push(`client_users: ${cuRes.error.message}`);
+      if (pRes.error) parts.push(`profiles: ${pRes.error.message}`);
+      if (aRes.error) parts.push(`agents: ${aRes.error.message}`);
+      if (uaRes.error) parts.push(`user_agents: ${uaRes.error.message}`);
+      setMsg("Chargement partiel : " + parts.join(" | "));
+    }
+
+    setClients(cRes.data || []);
+    setClientUsers(cuRes.data || []);
+    setProfiles(pRes.data || []);
+    setAgents(aRes.data || []);
+    setUserAgents(uaRes.data || []);
   }
 
   // Indexes
@@ -147,16 +189,13 @@ export default function Admin() {
       setMsg("");
       setLoading(true);
 
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
+      const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         window.location.href = "/login";
         return;
       }
 
-      // 1) Lire profil connecté
+      // profil connecté
       const { data: myP1, error: myE1 } = await supabase
         .from("profiles")
         .select("*")
@@ -165,7 +204,7 @@ export default function Admin() {
 
       let myProfile = myP1;
 
-      // 1bis) si absent, créer profil
+      // si absent, créer profil
       if (!myE1 && !myProfile) {
         const newRow = {
           user_id: session.user.id,
@@ -208,18 +247,11 @@ export default function Admin() {
 
       if (myE1 || !myProfile) {
         setLoading(false);
-        setMsg(
-          myE1
-            ? `Lecture du profil impossible : ${myE1.message}`
-            : "Profil introuvable (table profiles)."
-        );
+        setMsg(myE1 ? `Lecture du profil impossible : ${myE1.message}` : "Profil introuvable.");
         return;
       }
 
-      const myProfileSafe = {
-        ...myProfile,
-        email: myProfile.email || session.user.email || null,
-      };
+      const myProfileSafe = { ...myProfile, email: myProfile.email || session.user.email || null };
       setMe(myProfileSafe);
 
       if (myProfileSafe.role !== "admin") {
@@ -228,44 +260,12 @@ export default function Admin() {
         return;
       }
 
-      // 2) Charger données
-      const [cRes, cuRes, pRes, aRes, uaRes] = await Promise.all([
-        supabase.from("clients").select("*"),
-        supabase.from("client_users").select("client_id, user_id"),
-        supabase.from("profiles").select("user_id, email, role"),
-        supabase.from("agents").select("id, slug, name, description, avatar_url"),
-        supabase
-          .from("user_agents")
-          .select("user_id, agent_id, created_at")
-          .order("created_at", { ascending: false }),
-      ]);
+      await refreshAll();
 
-      if (!mounted) return;
+      // Sélections par défaut
+      const clientsSafe = (await supabase.from("clients").select("*")).data || [];
+      const clientUsersSafe = (await supabase.from("client_users").select("client_id, user_id")).data || [];
 
-      const errors = [cRes.error, cuRes.error, pRes.error, aRes.error, uaRes.error];
-      if (errors.some(Boolean)) {
-        const parts = [];
-        if (cRes.error) parts.push(`clients: ${cRes.error.message}`);
-        if (cuRes.error) parts.push(`client_users: ${cuRes.error.message}`);
-        if (pRes.error) parts.push(`profiles: ${pRes.error.message}`);
-        if (aRes.error) parts.push(`agents: ${aRes.error.message}`);
-        if (uaRes.error) parts.push(`user_agents: ${uaRes.error.message}`);
-        setMsg("Chargement partiel : " + parts.join(" | "));
-      }
-
-      const clientsSafe = cRes.data || [];
-      const clientUsersSafe = cuRes.data || [];
-      const profilesSafe = pRes.data || [];
-      const agentsSafe = aRes.data || [];
-      const userAgentsSafe = uaRes.data || [];
-
-      setClients(clientsSafe);
-      setClientUsers(clientUsersSafe);
-      setProfiles(profilesSafe);
-      setAgents(agentsSafe);
-      setUserAgents(userAgentsSafe);
-
-      // 3) Sélections par défaut
       let defaultClientId = "";
       let defaultUserId = "";
 
@@ -275,9 +275,7 @@ export default function Admin() {
       defaultClientId = firstWithUser?.id || clientsSafe[0]?.id || "";
 
       if (defaultClientId) {
-        defaultUserId =
-          clientUsersSafe.find((x) => x.client_id === defaultClientId)?.user_id ||
-          "";
+        defaultUserId = clientUsersSafe.find((x) => x.client_id === defaultClientId)?.user_id || "";
       }
 
       setSelectedClientId(defaultClientId);
@@ -287,22 +285,105 @@ export default function Admin() {
     }
 
     boot();
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, []);
 
   // Quand on change de client => sélectionner le premier user du client
   useEffect(() => {
     if (!selectedClientId) return;
-    const firstUserId =
-      clientUsers.find((x) => x.client_id === selectedClientId)?.user_id || "";
+    const firstUserId = clientUsers.find((x) => x.client_id === selectedClientId)?.user_id || "";
     setSelectedUserId(firstUserId);
   }, [selectedClientId, clientUsers]);
 
   async function logout() {
     await supabase.auth.signOut();
     window.location.href = "/login";
+  }
+
+  // --------- CREATE CLIENT ----------
+  async function createClient() {
+    if (!isAdminUser()) return;
+    const name = newClientName.trim();
+    if (!name) {
+      setMsg("Nom client requis.");
+      return;
+    }
+
+    setSaving(true);
+    setMsg("");
+
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error("Session expirée. Reconnectez-vous.");
+
+      const resp = await fetch("/api/admin/create-client", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name }),
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || "Création client échouée.");
+
+      await refreshAll();
+      setCreateClientOpen(false);
+      setNewClientName("");
+      setSelectedClientId(data.client.id);
+      setSelectedUserId("");
+      setMsg("Client créé.");
+      setTimeout(() => setMsg(""), 2000);
+    } catch (e) {
+      setMsg(e?.message || "Erreur création client.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // --------- CREATE USER ----------
+  async function createUser() {
+    if (!isAdminUser()) return;
+    if (!selectedClientId) {
+      setMsg("Sélectionne un client d’abord.");
+      return;
+    }
+
+    const email = newUserEmail.trim().toLowerCase();
+    const password = newUserPassword.trim();
+    const role = newUserRole;
+
+    if (!email) return setMsg("Email requis.");
+    if (!password || password.length < 6) return setMsg("Mot de passe min 6 caractères.");
+
+    setSaving(true);
+    setMsg("");
+
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error("Session expirée. Reconnectez-vous.");
+
+      const resp = await fetch("/api/admin/create-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ clientId: selectedClientId, email, password, role }),
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || "Création utilisateur échouée.");
+
+      await refreshAll();
+      setCreateUserOpen(false);
+      setNewUserEmail("");
+      setNewUserPassword("");
+      setNewUserRole("user");
+
+      setSelectedUserId(data.user.id);
+      setMsg("Utilisateur créé.");
+      setTimeout(() => setMsg(""), 2000);
+    } catch (e) {
+      setMsg(e?.message || "Erreur création utilisateur.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function toggleAgent(agentId) {
@@ -445,23 +526,14 @@ export default function Admin() {
 
     try {
       const context = {
-        workflow: {
-          provider: cfgWorkflowProvider || "",
-          id: cfgWorkflowId || "",
-        },
+        workflow: { provider: cfgWorkflowProvider || "", id: cfgWorkflowId || "" },
         sources: cfgSources,
       };
 
-      // upsert via contrainte unique (user_id, agent_id)
       const { error } = await supabase
         .from("client_agent_configs")
         .upsert(
-          {
-            user_id: selectedUserId,
-            agent_id: cfgAgent.id,
-            system_prompt: cfgPrompt || "",
-            context,
-          },
+          { user_id: selectedUserId, agent_id: cfgAgent.id, system_prompt: cfgPrompt || "", context },
           { onConflict: "user_id,agent_id" }
         );
 
@@ -494,10 +566,7 @@ export default function Admin() {
         <div style={styles.card}>
           <div style={styles.h1}>Backoffice</div>
           <div style={styles.alert}>{msg || "Accès refusé."}</div>
-          <button
-            style={styles.btnGhost}
-            onClick={() => (window.location.href = "/agents")}
-          >
+          <button style={styles.btnGhost} onClick={() => (window.location.href = "/agents")}>
             Retour aux agents
           </button>
         </div>
@@ -525,7 +594,54 @@ export default function Admin() {
         {/* CLIENTS + USERS */}
         <aside style={styles.panel}>
           <div style={styles.panelHeader}>
-            <div style={styles.panelTitle}>Clients</div>
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={styles.panelTitle}>Clients</div>
+
+              <div style={styles.row}>
+                <button
+                  type="button"
+                  style={styles.btnPrimary}
+                  onClick={() => setCreateClientOpen((v) => !v)}
+                >
+                  + Client
+                </button>
+
+                <button
+                  type="button"
+                  style={styles.btnGhost}
+                  onClick={() => refreshAll()}
+                  title="Rafraîchir"
+                >
+                  Rafraîchir
+                </button>
+              </div>
+
+              {createClientOpen ? (
+                <div style={styles.formBox}>
+                  <div style={styles.label}>Nom du client</div>
+                  <div style={styles.row}>
+                    <input
+                      value={newClientName}
+                      onChange={(e) => setNewClientName(e.target.value)}
+                      placeholder="Ex: Evidencia"
+                      style={styles.input}
+                    />
+                    <button
+                      type="button"
+                      style={styles.btnPrimary}
+                      onClick={createClient}
+                      disabled={saving}
+                    >
+                      Créer
+                    </button>
+                  </div>
+                  <div style={styles.hint}>
+                    Cela crée une ligne dans <b>clients</b>.
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -554,7 +670,10 @@ export default function Admin() {
                     }}
                   >
                     <button
-                      onClick={() => setSelectedClientId(c.id)}
+                      onClick={() => {
+                        setSelectedClientId(c.id);
+                        setCreateUserOpen(false);
+                      }}
                       style={styles.clientHeaderBtn}
                       title={c.label}
                       type="button"
@@ -562,6 +681,66 @@ export default function Admin() {
                       <div style={styles.clientName}>{c.label}</div>
                       <div style={styles.clientCount}>{(c.users || []).length} user(s)</div>
                     </button>
+
+                    {/* CREATE USER FOR THIS CLIENT (only when selected) */}
+                    {activeClient ? (
+                      <div style={{ padding: "0 10px 10px 10px" }}>
+                        <button
+                          type="button"
+                          style={styles.btnPrimary}
+                          onClick={() => setCreateUserOpen((v) => !v)}
+                          disabled={!selectedClientId}
+                        >
+                          + Utilisateur
+                        </button>
+
+                        {createUserOpen ? (
+                          <div style={{ ...styles.formBox, marginTop: 10 }}>
+                            <div style={styles.label}>Créer utilisateur (dans ce client)</div>
+
+                            <div style={styles.row}>
+                              <input
+                                value={newUserEmail}
+                                onChange={(e) => setNewUserEmail(e.target.value)}
+                                placeholder="email@domaine.com"
+                                style={styles.input}
+                              />
+                              <select
+                                value={newUserRole}
+                                onChange={(e) => setNewUserRole(e.target.value)}
+                                style={styles.select}
+                              >
+                                <option value="user">user</option>
+                                <option value="admin">admin</option>
+                              </select>
+                            </div>
+
+                            <div style={styles.row}>
+                              <input
+                                value={newUserPassword}
+                                onChange={(e) => setNewUserPassword(e.target.value)}
+                                placeholder="Mot de passe (min 6)"
+                                style={styles.input}
+                                type="password"
+                              />
+                              <button
+                                type="button"
+                                style={styles.btnPrimary}
+                                onClick={createUser}
+                                disabled={saving}
+                              >
+                                Créer
+                              </button>
+                            </div>
+
+                            <div style={styles.hint}>
+                              Le mot de passe n’est pas stocké (normal).  
+                              Liaison via <b>client_users</b> + profil dans <b>profiles</b>.
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
 
                     <div style={styles.clientUsers}>
                       {(c.users || []).length === 0 ? (
@@ -583,7 +762,9 @@ export default function Admin() {
                               }}
                               title={u.email || u.user_id}
                             >
-                              <div style={styles.userEmail}>{u.email || "(email non renseigné)"}</div>
+                              <div style={styles.userEmail}>
+                                {u.email || "(email non renseigné)"}
+                              </div>
                               <div style={styles.userBadge}>{u.role}</div>
                             </button>
                           );
@@ -654,7 +835,6 @@ export default function Admin() {
                     />
                   </div>
 
-                  {/* ✅ CORRECTION: affichage nom + description */}
                   <div style={styles.agentMeta}>
                     <div style={styles.agentName}>{a.name}</div>
                     <div style={styles.agentDesc}>{a.description}</div>
@@ -663,7 +843,6 @@ export default function Admin() {
                   <div style={styles.actionsRow}>
                     <div style={styles.check}>{checked ? "Assigné" : "Non assigné"}</div>
 
-                    {/* bouton prompt/données sans déclencher toggle */}
                     <button
                       type="button"
                       style={styles.cfgBtn}
@@ -684,7 +863,7 @@ export default function Admin() {
         </div>
       </section>
 
-      {/* MODALE */}
+      {/* MODALE CONFIG */}
       {cfgOpen ? (
         <div style={styles.modalOverlay} onMouseDown={closeConfig} role="dialog" aria-modal="true">
           <div style={styles.modal} onMouseDown={(e) => e.stopPropagation()}>
@@ -737,7 +916,7 @@ export default function Admin() {
                       placeholder="Ex: Tu travailles pour la société X. Ton objectif est…"
                     />
                     <div style={styles.hint}>
-                      Ce prompt est stocké dans <b>client_agent_configs.system_prompt</b>.
+                      Stocké dans <b>client_agent_configs.system_prompt</b>.
                     </div>
                   </div>
                 ) : null}
@@ -784,17 +963,10 @@ export default function Admin() {
                                 {s.type === "url" ? "URL" : "Fichier"}
                               </div>
                               <div style={styles.sourceVal}>
-                                {s.type === "url"
-                                  ? s.value
-                                  : `${s.name} (${s.path})`}
+                                {s.type === "url" ? s.value : `${s.name} (${s.path})`}
                               </div>
                             </div>
-                            <button
-                              type="button"
-                              style={styles.btnGhost}
-                              onClick={() => removeSource(idx)}
-                              title="Supprimer"
-                            >
+                            <button type="button" style={styles.btnGhost} onClick={() => removeSource(idx)}>
                               Supprimer
                             </button>
                           </div>
@@ -803,7 +975,7 @@ export default function Admin() {
                     </div>
 
                     <div style={styles.hint}>
-                      Ces sources sont stockées dans <b>client_agent_configs.context.sources</b>.
+                      Stocké dans <b>client_agent_configs.context.sources</b>.
                     </div>
                   </div>
                 ) : null}
@@ -832,9 +1004,7 @@ export default function Admin() {
                     </div>
 
                     <div style={styles.hint}>
-                      On stocke uniquement la référence du workflow (pas d’exécution ici) dans{" "}
-                      <b>client_agent_configs.context.workflow</b>.  
-                      Le déclenchement réel se fera plus tard via ton backend / n8n / Make.
+                      Référence stockée dans <b>client_agent_configs.context.workflow</b>.
                     </div>
                   </div>
                 ) : null}
@@ -923,6 +1093,7 @@ const styles = {
     cursor: "pointer",
     appearance: "none",
     WebkitAppearance: "none",
+    whiteSpace: "nowrap",
   },
 
   layout: {
@@ -999,8 +1170,7 @@ const styles = {
 
   clientBlockActive: {
     border: "1px solid rgba(255,140,40,.18)",
-    background:
-      "linear-gradient(135deg, rgba(255,140,40,.10), rgba(80,120,255,.08))",
+    background: "linear-gradient(135deg, rgba(255,140,40,.10), rgba(80,120,255,.08))",
   },
 
   clientHeaderBtn: {
@@ -1117,16 +1287,10 @@ const styles = {
 
   agentCardOn: {
     border: "1px solid rgba(255,140,40,.25)",
-    background:
-      "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
+    background: "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
   },
 
-  agentTop: {
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    paddingTop: 6,
-  },
+  agentTop: { display: "flex", justifyContent: "center", alignItems: "center", paddingTop: 6 },
 
   avatar: {
     width: 74,
@@ -1137,7 +1301,6 @@ const styles = {
     display: "block",
   },
 
-  // ✅ NOMS + DESC
   agentMeta: {
     display: "grid",
     gap: 4,
@@ -1147,27 +1310,10 @@ const styles = {
     WebkitTextFillColor: "currentColor",
     padding: "0 6px",
   },
-  agentName: {
-    fontWeight: 900,
-    fontSize: 14,
-    color: "inherit",
-    WebkitTextFillColor: "currentColor",
-  },
-  agentDesc: {
-    fontWeight: 700,
-    fontSize: 12,
-    opacity: 0.8,
-    color: "inherit",
-    WebkitTextFillColor: "currentColor",
-  },
+  agentName: { fontWeight: 900, fontSize: 14, color: "inherit", WebkitTextFillColor: "currentColor" },
+  agentDesc: { fontWeight: 700, fontSize: 12, opacity: 0.8, color: "inherit", WebkitTextFillColor: "currentColor" },
 
-  actionsRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 10,
-    marginTop: 2,
-  },
+  actionsRow: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginTop: 2 },
 
   check: {
     fontWeight: 900,
@@ -1222,6 +1368,62 @@ const styles = {
   h1: { fontSize: 22, fontWeight: 900 },
   p: { marginTop: 10, opacity: 0.8, fontWeight: 800 },
 
+  // Common form UI
+  formBox: {
+    padding: 12,
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.18)",
+    maxWidth: 360,
+  },
+
+  row: { display: "flex", gap: 10, alignItems: "center" },
+
+  label: { fontWeight: 900, fontSize: 12, marginBottom: 8, opacity: 0.9 },
+
+  hint: { marginTop: 8, fontSize: 12, opacity: 0.78, fontWeight: 700, lineHeight: 1.35 },
+
+  input: {
+    flex: 1,
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.40)",
+    color: "#eef2ff",
+    outline: "none",
+    fontWeight: 800,
+    fontSize: 12,
+    minWidth: 0,
+  },
+
+  select: {
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.40)",
+    color: "#eef2ff",
+    outline: "none",
+    fontWeight: 800,
+    fontSize: 12,
+  },
+
+  textarea: {
+    width: "100%",
+    minHeight: 140,
+    resize: "vertical",
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.40)",
+    color: "#eef2ff",
+    outline: "none",
+    fontWeight: 800,
+    fontSize: 12,
+    lineHeight: 1.4,
+  },
+
+  file: { flex: 1, minWidth: 0, color: "#eef2ff" },
+
   // MODAL
   modalOverlay: {
     position: "fixed",
@@ -1256,6 +1458,26 @@ const styles = {
 
   modalTitle: { fontWeight: 900, fontSize: 13 },
 
+  modalBody: { padding: 14 },
+
+  modalFooter: {
+    padding: 14,
+    borderTop: "1px solid rgba(255,255,255,.08)",
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: 10,
+    background: "rgba(0,0,0,.18)",
+  },
+
+  block: {
+    padding: 12,
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.16)",
+    display: "grid",
+    gap: 10,
+  },
+
   tabs: {
     display: "flex",
     gap: 8,
@@ -1274,5 +1496,27 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
   },
-};
 
+  tabOn: {
+    border: "1px solid rgba(255,140,40,.28)",
+    background: "rgba(255,140,40,.12)",
+  },
+
+  sourcesList: { display: "grid", gap: 10, marginTop: 6 },
+
+  sourceItem: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 10,
+    alignItems: "center",
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.22)",
+    minWidth: 0,
+  },
+
+  sourceType: { fontWeight: 900, fontSize: 12, opacity: 0.85 },
+
+  sourceVal: { fontWeight: 800, fontSize: 12, opacity: 0.85, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+};
