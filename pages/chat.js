@@ -8,15 +8,18 @@ export default function Chat() {
   const [email, setEmail] = useState("");
   const [userId, setUserId] = useState("");
 
-  const [agent, setAgent] = useState(null); // { id, slug, name, description, avatar_url }
+  const [agent, setAgent] = useState(null);
   const [conversationId, setConversationId] = useState(null);
 
-  const [history, setHistory] = useState([]); // 10 dernières conversations (par user + agent)
+  const [history, setHistory] = useState([]);
   const [messages, setMessages] = useState([]);
 
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+
+  // Mobile UI
+  const [showHistory, setShowHistory] = useState(false);
 
   const threadRef = useRef(null);
 
@@ -25,7 +28,6 @@ export default function Chat() {
     [input, sending]
   );
 
-  // ---------- Helpers ----------
   function safeDecode(v) {
     try {
       return decodeURIComponent(v || "");
@@ -48,15 +50,10 @@ export default function Chat() {
     });
   }
 
-  function greetingFor(a) {
-    return `Bonjour, je suis ${a?.name || "votre agent"}. Comment puis-je vous aider ?`;
-  }
-
-  // ---------- Supabase access ----------
   async function fetchAgent(slug) {
     const { data: a, error } = await supabase
       .from("agents")
-      .select("id, slug, name, description, avatar_url")
+      .select("slug, name, description, avatar_url")
       .eq("slug", slug)
       .maybeSingle();
 
@@ -77,26 +74,11 @@ export default function Chat() {
     return data || [];
   }
 
-  async function conversationBelongsToUser({ uid, convId }) {
-    const { data, error } = await supabase
-      .from("conversations")
-      .select("id")
-      .eq("id", convId)
-      .eq("user_id", uid)
-      .maybeSingle();
-
-    if (error) return false;
-    return !!data?.id;
-  }
-
-  // IMPORTANT: table = "messages" (pas "conversation_messages")
   async function fetchMessages({ uid, convId }) {
-    const ok = await conversationBelongsToUser({ uid, convId });
-    if (!ok) return [];
-
     const { data, error } = await supabase
-      .from("messages")
+      .from("conversation_messages")
       .select("id, role, content, created_at")
+      .eq("user_id", uid)
       .eq("conversation_id", convId)
       .order("created_at", { ascending: true });
 
@@ -126,27 +108,22 @@ export default function Chat() {
     await supabase.from("conversations").update(patch).eq("user_id", uid).eq("id", convId);
   }
 
-  // IMPORTANT: table = "messages" (pas "conversation_messages")
-  async function insertMessage({ convId, role, content }) {
-    await supabase.from("messages").insert({
+  async function insertMessage({ uid, convId, role, content }) {
+    await supabase.from("conversation_messages").insert({
+      user_id: uid,
       conversation_id: convId,
       role,
       content,
     });
   }
 
-  // ---------- Boot ----------
   useEffect(() => {
     let mounted = true;
 
     async function boot() {
       setErrorMsg("");
-      setLoading(true);
 
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
+      const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         window.location.href = "/login";
         return;
@@ -179,16 +156,13 @@ export default function Chat() {
       const convParam = url.searchParams.get("c");
       const convIdFromUrl = convParam ? safeDecode(convParam).trim() : "";
 
-      // Sidebar history
       const h = await fetchHistory({ uid, agentSlug: a.slug });
       if (!mounted) return;
       setHistory(h);
 
-      // 1) URL convId si valide
+      // open conv from url if valid
       if (convIdFromUrl) {
         const msgs = await fetchMessages({ uid, convId: convIdFromUrl });
-        if (!mounted) return;
-
         if (msgs.length > 0) {
           setConversationId(convIdFromUrl);
           setMessages(msgs);
@@ -198,29 +172,26 @@ export default function Chat() {
         }
       }
 
-      // 2) Sinon dernière conversation (si existe)
+      // open last
       if (h && h.length > 0) {
-        const chosen = h[0].id;
-        setConversationId(chosen);
+        const chosenConvId = h[0].id;
+        setConversationId(chosenConvId);
 
-        const msgs = await fetchMessages({ uid, convId: chosen });
+        const msgs = await fetchMessages({ uid, convId: chosenConvId });
         if (!mounted) return;
 
-        if (msgs.length > 0) {
-          setMessages(msgs);
-        } else {
-          // Conversation vide -> on insère un message d’accueil en DB pour stabiliser
-          const greet = greetingFor(a);
-          await insertMessage({ convId: chosen, role: "assistant", content: greet });
-          setMessages([{ role: "assistant", content: greet }]);
-        }
+        setMessages(
+          msgs.length > 0
+            ? msgs
+            : [{ role: "assistant", content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?` }]
+        );
 
         setLoading(false);
         scrollToBottom();
         return;
       }
 
-      // 3) Sinon créer conversation + message d’accueil en DB
+      // create new
       const newConvId = await createConversation({
         uid,
         agentSlug: a.slug,
@@ -229,20 +200,12 @@ export default function Chat() {
 
       if (!mounted) return;
 
-      if (!newConvId) {
-        setErrorMsg("Impossible de créer une conversation (policies Supabase ?).");
-        setLoading(false);
-        return;
-      }
-
       setConversationId(newConvId);
-
-      const greet = greetingFor(a);
-      await insertMessage({ convId: newConvId, role: "assistant", content: greet });
-      setMessages([{ role: "assistant", content: greet }]);
+      setMessages([{ role: "assistant", content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?` }]);
 
       const h2 = await fetchHistory({ uid, agentSlug: a.slug });
-      if (mounted) setHistory(h2);
+      if (!mounted) return;
+      setHistory(h2);
 
       setLoading(false);
       scrollToBottom();
@@ -260,7 +223,6 @@ export default function Chat() {
     };
   }, []);
 
-  // ---------- Actions ----------
   async function logout() {
     await supabase.auth.signOut();
     window.location.href = "/login";
@@ -268,33 +230,32 @@ export default function Chat() {
 
   async function openConversation(convId) {
     if (!userId || !agent || !convId) return;
-
     setErrorMsg("");
     setConversationId(convId);
 
-    // URL (sans reload)
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("agent", agent.slug);
       url.searchParams.set("c", convId);
       window.history.replaceState({}, "", url.toString());
-    } catch (_) {}
+    } catch {}
 
     const msgs = await fetchMessages({ uid: userId, convId });
-    if (msgs.length > 0) {
-      setMessages(msgs);
-    } else {
-      const greet = greetingFor(agent);
-      await insertMessage({ convId, role: "assistant", content: greet });
-      setMessages([{ role: "assistant", content: greet }]);
-    }
+
+    setMessages(
+      msgs.length > 0
+        ? msgs
+        : [{ role: "assistant", content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?` }]
+    );
+
+    // mobile: fermer l’historique après sélection
+    setShowHistory(false);
 
     scrollToBottom();
   }
 
   async function newConversation() {
     if (!userId || !agent) return;
-
     setErrorMsg("");
 
     const convId = await createConversation({
@@ -309,21 +270,19 @@ export default function Chat() {
     }
 
     setConversationId(convId);
+    setMessages([{ role: "assistant", content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?` }]);
 
-    const greet = greetingFor(agent);
-    await insertMessage({ convId, role: "assistant", content: greet });
-    setMessages([{ role: "assistant", content: greet }]);
-
-    // URL (sans reload)
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("agent", agent.slug);
       url.searchParams.set("c", convId);
       window.history.replaceState({}, "", url.toString());
-    } catch (_) {}
+    } catch {}
 
     const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
     setHistory(h);
+
+    setShowHistory(false);
 
     scrollToBottom();
   }
@@ -335,28 +294,23 @@ export default function Chat() {
     setInput("");
     setErrorMsg("");
 
-    // UI immédiat
     setMessages((prev) => [...prev, { role: "user", content: userText }]);
     setSending(true);
     scrollToBottom();
 
-    // Persist user message (DB)
     await insertMessage({
+      uid: userId,
       convId: conversationId,
       role: "user",
       content: userText,
     });
 
-    // Si c'est le premier message user -> titre
     const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
     const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
 
-    // Token pour /api/chat
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-
+    const { data: { session } } = await supabase.auth.getSession();
     const accessToken = session?.access_token || "";
+
     if (!accessToken) {
       setErrorMsg("Session expirée. Reconnectez-vous.");
       setSending(false);
@@ -370,11 +324,7 @@ export default function Chat() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${accessToken}`,
         },
-        body: JSON.stringify({
-          message: userText,
-          agentSlug: agent.slug,
-          conversationId: conversationId, // IMPORTANT
-        }),
+        body: JSON.stringify({ message: userText, agentSlug: agent.slug }),
       });
 
       const data = await resp.json().catch(() => ({}));
@@ -385,16 +335,13 @@ export default function Chat() {
       setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
 
       await insertMessage({
+        uid: userId,
         convId: conversationId,
         role: "assistant",
         content: reply,
       });
 
-      await touchConversation({
-        uid: userId,
-        convId: conversationId,
-        titleMaybe,
-      });
+      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
 
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
@@ -404,12 +351,10 @@ export default function Chat() {
       const msg = e?.message || "Erreur interne. Réessayez plus tard.";
       setErrorMsg(msg);
 
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "Erreur interne. Réessayez plus tard." },
-      ]);
+      setMessages((prev) => [...prev, { role: "assistant", content: "Erreur interne. Réessayez plus tard." }]);
 
       await insertMessage({
+        uid: userId,
         convId: conversationId,
         role: "assistant",
         content: "Erreur interne. Réessayez plus tard.",
@@ -433,7 +378,6 @@ export default function Chat() {
     }
   }
 
-  // ---------- UI ----------
   if (loading || !agent) {
     return (
       <main style={styles.page}>
@@ -473,6 +417,15 @@ export default function Chat() {
         </div>
 
         <div style={styles.topRight}>
+          {/* bouton mobile pour afficher/masquer l’historique */}
+          <button
+            style={styles.histToggle}
+            onClick={() => setShowHistory((v) => !v)}
+            aria-label="Afficher l’historique"
+          >
+            Historique
+          </button>
+
           <span style={styles.userChip}>{email || "Connecté"}</span>
           <button onClick={logout} style={styles.btnGhost}>
             Déconnexion
@@ -482,12 +435,17 @@ export default function Chat() {
 
       <section style={styles.layout}>
         {/* Sidebar */}
-        <aside style={styles.sidebar}>
+        <aside style={{ ...styles.sidebar, ...(showHistory ? styles.sidebarMobileOn : null) }}>
           <div style={styles.sidebarTop}>
             <div style={styles.sidebarTitle}>Historique</div>
-            <button onClick={newConversation} style={styles.newBtn}>
-              + Nouvelle
-            </button>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={newConversation} style={styles.newBtn}>
+                + Nouvelle
+              </button>
+              <button onClick={() => setShowHistory(false)} style={styles.closeHist}>
+                Fermer
+              </button>
+            </div>
           </div>
 
           <div style={styles.sidebarList}>
@@ -500,10 +458,7 @@ export default function Chat() {
                   <button
                     key={c.id}
                     onClick={() => openConversation(c.id)}
-                    style={{
-                      ...styles.histItem,
-                      ...(active ? styles.histItemActive : null),
-                    }}
+                    style={{ ...styles.histItem, ...(active ? styles.histItemActive : null) }}
                     title={c.title || "Conversation"}
                   >
                     <div style={styles.histTitle}>{c.title || "Conversation"}</div>
@@ -537,12 +492,7 @@ export default function Chat() {
                   justifyContent: m.role === "user" ? "flex-end" : "flex-start",
                 }}
               >
-                <div
-                  style={{
-                    ...styles.bubble,
-                    ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot),
-                  }}
-                >
+                <div style={{ ...styles.bubble, ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot) }}>
                   <div style={styles.role}>{m.role === "user" ? "Vous" : agent.name}</div>
                   <div style={styles.text}>{m.content}</div>
                 </div>
@@ -560,11 +510,7 @@ export default function Chat() {
               rows={2}
               autoComplete="off"
             />
-            <button
-              style={canSend ? styles.btn : styles.btnDisabled}
-              onClick={sendMessage}
-              disabled={!canSend}
-            >
+            <button style={canSend ? styles.btn : styles.btnDisabled} onClick={sendMessage} disabled={!canSend}>
               {sending ? "Envoi…" : "Envoyer"}
             </button>
           </div>
@@ -574,7 +520,6 @@ export default function Chat() {
   );
 }
 
-/* ================== STYLES (charte Evidencia / sans bord blanc) ================== */
 const styles = {
   page: {
     minHeight: "100vh",
@@ -621,13 +566,7 @@ const styles = {
     borderBottom: "1px solid rgba(255,255,255,.10)",
   },
 
-  topLeft: {
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-    minWidth: 0,
-  },
-
+  topLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
   topRight: { display: "flex", alignItems: "center", gap: 10 },
 
   backBtn: {
@@ -669,6 +608,17 @@ const styles = {
     textOverflow: "ellipsis",
   },
 
+  histToggle: {
+    padding: "10px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.35)",
+    color: "#eef2ff",
+    fontWeight: 900,
+    cursor: "pointer",
+    display: "none", // visible only on mobile via media-like logic below
+  },
+
   userChip: {
     fontSize: 12,
     fontWeight: 900,
@@ -693,6 +643,7 @@ const styles = {
     cursor: "pointer",
   },
 
+  // IMPORTANT: pas de height fixe ici; on laisse le layout gérer, sinon mobile casse
   layout: {
     position: "relative",
     zIndex: 1,
@@ -700,11 +651,10 @@ const styles = {
     gridTemplateColumns: "320px 1fr",
     gap: 14,
     padding: 14,
-    height: "calc(100vh - 64px)",
     boxSizing: "border-box",
+    minHeight: "calc(100vh - 64px)",
   },
 
-  /* Sidebar */
   sidebar: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -716,6 +666,9 @@ const styles = {
     minHeight: 0,
   },
 
+  // mobile overlay hidden by default
+  sidebarMobileOn: {},
+
   sidebarTop: {
     padding: 14,
     display: "flex",
@@ -726,12 +679,7 @@ const styles = {
     background: "rgba(0,0,0,.18)",
   },
 
-  sidebarTitle: {
-    fontWeight: 900,
-    color: "#eef2ff",
-    fontSize: 13,
-    letterSpacing: 0.2,
-  },
+  sidebarTitle: { fontWeight: 900, color: "#eef2ff", fontSize: 13, letterSpacing: 0.2 },
 
   newBtn: {
     padding: "10px 12px",
@@ -744,13 +692,18 @@ const styles = {
     whiteSpace: "nowrap",
   },
 
-  sidebarList: {
-    padding: 10,
-    overflowY: "auto",
-    display: "grid",
-    gap: 10,
-    minHeight: 0,
+  closeHist: {
+    padding: "10px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.28)",
+    color: "#eef2ff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
   },
+
+  sidebarList: { padding: 10, overflowY: "auto", display: "grid", gap: 10, minHeight: 0 },
 
   sidebarEmpty: {
     padding: 12,
@@ -776,8 +729,7 @@ const styles = {
   },
 
   histItemActive: {
-    background:
-      "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
+    background: "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
     border: "1px solid rgba(255,140,40,.18)",
   },
 
@@ -790,13 +742,8 @@ const styles = {
     textOverflow: "ellipsis",
   },
 
-  histDate: {
-    fontWeight: 800,
-    fontSize: 11,
-    color: "rgba(238,242,255,.65)",
-  },
+  histDate: { fontWeight: 800, fontSize: 11, color: "rgba(238,242,255,.65)" },
 
-  /* Chat card */
   chatCard: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -805,7 +752,7 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
-    minHeight: 0,
+    minHeight: "calc(100vh - 64px - 28px)", // topbar + padding approximate; keeps usable
   },
 
   alert: {
@@ -819,15 +766,7 @@ const styles = {
     fontSize: 13,
   },
 
-  thread: {
-    flex: 1,
-    overflowY: "auto",
-    padding: 14,
-    display: "grid",
-    gap: 12,
-    minHeight: 0,
-  },
-
+  thread: { flex: 1, overflowY: "auto", padding: 14, display: "grid", gap: 12, minHeight: 0 },
   bubbleRow: { display: "flex" },
 
   bubble: {
@@ -843,18 +782,8 @@ const styles = {
   bubbleUser: { background: "rgba(255,255,255,.10)" },
   bubbleBot: { background: "rgba(0,0,0,.35)" },
 
-  role: {
-    fontSize: 11,
-    fontWeight: 900,
-    color: "rgba(238,242,255,.72)",
-    marginBottom: 6,
-  },
-
-  text: {
-    fontSize: 14,
-    fontWeight: 700,
-    color: "rgba(238,242,255,.92)",
-  },
+  role: { fontSize: 11, fontWeight: 900, color: "rgba(238,242,255,.72)", marginBottom: 6 },
+  text: { fontSize: 14, fontWeight: 700, color: "rgba(238,242,255,.92)" },
 
   composer: {
     display: "flex",
@@ -883,8 +812,7 @@ const styles = {
     padding: "12px 16px",
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,.12)",
-    background:
-      "linear-gradient(135deg, rgba(255,140,40,.18), rgba(80,120,255,.12))",
+    background: "linear-gradient(135deg, rgba(255,140,40,.18), rgba(80,120,255,.12))",
     color: "#eef2ff",
     fontWeight: 900,
     cursor: "pointer",
@@ -903,7 +831,6 @@ const styles = {
     minWidth: 110,
   },
 
-  /* Loading */
   center: {
     position: "relative",
     zIndex: 1,
@@ -923,10 +850,28 @@ const styles = {
     backdropFilter: "blur(14px)",
   },
 
-  loadingSub: {
-    marginTop: 6,
-    color: "rgba(255,255,255,.78)",
-    fontWeight: 800,
-    fontSize: 12,
-  },
+  loadingSub: { marginTop: 6, color: "rgba(255,255,255,.78)", fontWeight: 800, fontSize: 12 },
 };
+
+// --- Mobile fix (sans CSS externe) ---
+// On applique un mini "media query" JS: si écran < 900px, on modifie layout/sidebar/histToggle
+if (typeof window !== "undefined") {
+  const isMobile = window.matchMedia && window.matchMedia("(max-width: 900px)").matches;
+  if (isMobile) {
+    styles.layout.gridTemplateColumns = "1fr";
+    styles.chatCard.minHeight = "calc(100vh - 64px - 28px)";
+    styles.histToggle.display = "inline-flex";
+    styles.userChip.maxWidth = 160;
+
+    // Sidebar en overlay sur mobile
+    styles.sidebar.position = "fixed";
+    styles.sidebar.top = "64px";
+    styles.sidebar.left = "14px";
+    styles.sidebar.right = "14px";
+    styles.sidebar.bottom = "14px";
+    styles.sidebar.zIndex = 5;
+    styles.sidebar.display = "none";
+
+    styles.sidebarMobileOn.display = "flex";
+  }
+}
