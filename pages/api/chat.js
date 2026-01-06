@@ -5,11 +5,22 @@ import { createClient } from "@supabase/supabase-js";
 
 const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
 
+// Supabase Admin (service role) -> uniquement côté serveur
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
   { auth: { persistSession: false } }
 );
+
+function setCors(res) {
+  // Même si tu es en same-origin, ça évite les 405 si un proxy/preview déclenche un preflight
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
+}
 
 function getBearerToken(req) {
   const h = req.headers?.authorization || "";
@@ -18,7 +29,7 @@ function getBearerToken(req) {
 }
 
 function safeStr(v) {
-  return (v || "").toString();
+  return (v ?? "").toString();
 }
 
 function parseMaybeJson(v) {
@@ -35,12 +46,19 @@ function parseMaybeJson(v) {
 }
 
 export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Méthode non autorisée." });
-    }
+  setCors(res);
 
-    // IMPORTANT : erreurs env explicites
+  // IMPORTANT: répondre aux OPTIONS (sinon 405)
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Méthode non autorisée." });
+  }
+
+  try {
+    // Erreurs env explicites
     if (!process.env.MISTRAL_API_KEY) {
       return res.status(500).json({ error: "MISTRAL_API_KEY manquant sur Vercel." });
     }
@@ -66,9 +84,10 @@ export default async function handler(req, res) {
     // 2) Body
     const { message, agentSlug } = req.body || {};
     const slug = safeStr(agentSlug).trim().toLowerCase();
+    const userMsg = safeStr(message).trim();
 
     if (!slug) return res.status(400).json({ error: "Aucun agent sélectionné." });
-    if (!safeStr(message).trim()) return res.status(400).json({ error: "Message vide." });
+    if (!userMsg) return res.status(400).json({ error: "Message vide." });
 
     // 3) Charger agent
     const { data: agent, error: agentErr } = await supabaseAdmin
@@ -100,7 +119,8 @@ export default async function handler(req, res) {
       .eq("agent_id", agent.id)
       .maybeSingle();
 
-    const ctxObj = parseMaybeJson(cfg?.context);
+    const ctxObj = !cfgErr ? parseMaybeJson(cfg?.context) : null;
+
     const customPrompt =
       safeStr(cfg?.system_prompt).trim() ||
       safeStr(ctxObj?.prompt).trim() ||
@@ -121,7 +141,7 @@ export default async function handler(req, res) {
       model: process.env.MISTRAL_MODEL || "mistral-small-latest",
       messages: [
         { role: "system", content: finalSystemPrompt },
-        { role: "user", content: safeStr(message).trim() },
+        { role: "user", content: userMsg },
       ],
       temperature: 0.7,
     });
