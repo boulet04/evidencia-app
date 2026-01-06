@@ -1,4 +1,3 @@
-// pages/admin/index.js
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabaseClient";
 
@@ -20,19 +19,17 @@ export default function Admin() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
 
-  // Create client modal
+  // Create client/user modals
   const [createClientOpen, setCreateClientOpen] = useState(false);
-  const [newClientName, setNewClientName] = useState("");
-  const [createClientErr, setCreateClientErr] = useState("");
-  const [createClientSaving, setCreateClientSaving] = useState(false);
+  const [createClientName, setCreateClientName] = useState("");
 
-  // Create user modal
   const [createUserOpen, setCreateUserOpen] = useState(false);
-  const [newUserEmail, setNewUserEmail] = useState("");
-  const [newUserPassword, setNewUserPassword] = useState("");
-  const [newUserRole, setNewUserRole] = useState("user");
-  const [createUserErr, setCreateUserErr] = useState("");
-  const [createUserSaving, setCreateUserSaving] = useState(false);
+  const [createUserClientId, setCreateUserClientId] = useState("");
+  const [createUserEmail, setCreateUserEmail] = useState("");
+  const [createUserPassword, setCreateUserPassword] = useState("");
+  const [createUserRole, setCreateUserRole] = useState("user");
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createErr, setCreateErr] = useState("");
 
   // Prompt & data modal state
   const [cfgOpen, setCfgOpen] = useState(false);
@@ -51,7 +48,7 @@ export default function Admin() {
   const isAdmin = useMemo(() => me?.role === "admin", [me]);
 
   function safeStr(v) {
-    return (v || "").toString();
+    return (v ?? "").toString();
   }
 
   function clientLabel(c) {
@@ -80,7 +77,28 @@ export default function Admin() {
     return m;
   }, [clients]);
 
-  // Build Client -> Users
+  const selectedClient = useMemo(() => {
+    return selectedClientId ? clientById.get(selectedClientId) || null : null;
+  }, [clientById, selectedClientId]);
+
+  const selectedUser = useMemo(() => {
+    if (!selectedUserId) return null;
+    const p = profileByUserId.get(selectedUserId);
+    return {
+      user_id: selectedUserId,
+      email: safeStr(p?.email),
+      role: safeStr(p?.role) || "user",
+    };
+  }, [profileByUserId, selectedUserId]);
+
+  const assignedSet = useMemo(() => {
+    const set = new Set();
+    for (const row of userAgents) {
+      if (row.user_id === selectedUserId) set.add(row.agent_id);
+    }
+    return set;
+  }, [userAgents, selectedUserId]);
+
   const clientTree = useMemo(() => {
     const usersByClient = new Map();
 
@@ -104,7 +122,11 @@ export default function Admin() {
     list.sort((a, b) => a.label.localeCompare(b.label, "fr"));
 
     for (const item of list) {
-      item.users.sort((a, b) => safeStr(a.email).localeCompare(safeStr(b.email), "fr"));
+      item.users.sort((a, b) => {
+        if (a.role === "admin" && b.role !== "admin") return 1;
+        if (a.role !== "admin" && b.role === "admin") return -1;
+        return safeStr(a.email).localeCompare(safeStr(b.email), "fr");
+      });
     }
 
     const s = q.trim().toLowerCase();
@@ -124,35 +146,7 @@ export default function Admin() {
       .filter(Boolean);
   }, [clients, clientUsers, profileByUserId, q]);
 
-  const selectedClient = useMemo(() => {
-    return selectedClientId ? clientById.get(selectedClientId) || null : null;
-  }, [clientById, selectedClientId]);
-
-  const selectedUser = useMemo(() => {
-    if (!selectedUserId) return null;
-    const p = profileByUserId.get(selectedUserId);
-    return {
-      user_id: selectedUserId,
-      email: safeStr(p?.email),
-      role: safeStr(p?.role) || "user",
-    };
-  }, [profileByUserId, selectedUserId]);
-
-  const assignedSet = useMemo(() => {
-    const set = new Set();
-    for (const row of userAgents) {
-      if (row.user_id === selectedUserId) set.add(row.agent_id);
-    }
-    return set;
-  }, [userAgents, selectedUserId]);
-
-  async function getAccessToken() {
-    const { data: { session } } = await supabase.auth.getSession();
-    return session?.access_token || "";
-  }
-
-  async function refreshAll() {
-    setMsg("");
+  async function fetchAll() {
     const [cRes, cuRes, pRes, aRes, uaRes] = await Promise.all([
       supabase.from("clients").select("*"),
       supabase.from("client_users").select("client_id, user_id"),
@@ -189,15 +183,19 @@ export default function Admin() {
       setMsg("");
       setLoading(true);
 
-      const { data: { session } } = await supabase.auth.getSession();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
       if (!session) {
         window.location.href = "/login";
         return;
       }
 
+      // profil admin
       const { data: myP, error: myE } = await supabase
         .from("profiles")
-        .select("*")
+        .select("user_id, email, role")
         .eq("user_id", session.user.id)
         .maybeSingle();
 
@@ -205,31 +203,37 @@ export default function Admin() {
 
       if (myE || !myP) {
         setLoading(false);
-        setMsg(myE ? `Lecture du profil impossible : ${myE.message}` : "Profil introuvable.");
+        setMsg(myE ? myE.message : "Profil introuvable.");
         return;
       }
 
-      const meSafe = { ...myP, email: myP.email || session.user.email || null };
-      setMe(meSafe);
+      setMe({
+        user_id: myP.user_id,
+        email: myP.email || session.user.email,
+        role: myP.role || "user",
+      });
 
-      if (meSafe.role !== "admin") {
+      if (myP.role !== "admin") {
         setLoading(false);
         setMsg("Accès refusé : vous n’êtes pas admin.");
         return;
       }
 
-      await refreshAll();
+      await fetchAll();
 
-      // sélection par défaut
-      const c = (clients || []);
-      const defaultClient = c[0]?.id || "";
-      setSelectedClientId(defaultClient);
+      // default selection
+      const c0 = clients?.[0]?.id || "";
+      setSelectedClientId(c0);
+      const u0 = (clientUsers || []).find((x) => x.client_id === c0)?.user_id || "";
+      setSelectedUserId(u0);
 
       setLoading(false);
     }
 
     boot();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -248,6 +252,8 @@ export default function Admin() {
 
   async function toggleAgent(agentId) {
     if (!selectedUserId || !agentId) return;
+    if (!isAdmin) return;
+
     setSaving(true);
     setMsg("");
 
@@ -274,123 +280,13 @@ export default function Admin() {
           .single();
 
         if (error) throw error;
+
         setUserAgents((prev) => [data, ...prev]);
       }
     } catch (e) {
       setMsg(e?.message || "Erreur lors de la mise à jour.");
     } finally {
       setSaving(false);
-    }
-  }
-
-  // -------- CREATE CLIENT --------
-  function openCreateClient() {
-    setCreateClientErr("");
-    setNewClientName("");
-    setCreateClientOpen(true);
-  }
-
-  async function doCreateClient() {
-    setCreateClientSaving(true);
-    setCreateClientErr("");
-    try {
-      const token = await getAccessToken();
-      if (!token) throw new Error("Session expirée. Reconnectez-vous.");
-
-      const resp = await fetch("/api/admin/create-client", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ name: newClientName }),
-      });
-
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(data?.error || "Erreur create-client.");
-
-      const client = data?.client;
-      if (!client?.id) throw new Error("Client créé mais réponse invalide.");
-
-      // Ajoute localement (évite l’effet “ça disparaît”)
-      setClients((prev) => [client, ...prev]);
-      setSelectedClientId(client.id);
-      setSelectedUserId("");
-
-      setCreateClientOpen(false);
-      setMsg("Client créé.");
-      setTimeout(() => setMsg(""), 2000);
-
-      // Reload soft
-      await refreshAll();
-    } catch (e) {
-      setCreateClientErr(e?.message || "Création client impossible.");
-    } finally {
-      setCreateClientSaving(false);
-    }
-  }
-
-  // -------- CREATE USER --------
-  function openCreateUser() {
-    if (!selectedClientId) {
-      setMsg("Sélectionnez un client d’abord.");
-      return;
-    }
-    setCreateUserErr("");
-    setNewUserEmail("");
-    setNewUserPassword("");
-    setNewUserRole("user");
-    setCreateUserOpen(true);
-  }
-
-  async function doCreateUser() {
-    setCreateUserSaving(true);
-    setCreateUserErr("");
-    try {
-      const token = await getAccessToken();
-      if (!token) throw new Error("Session expirée. Reconnectez-vous.");
-
-      const resp = await fetch("/api/admin/create-user", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          clientId: selectedClientId,
-          email: newUserEmail,
-          password: newUserPassword,
-          role: newUserRole,
-        }),
-      });
-
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(data?.error || "Erreur create-user.");
-
-      // Ajout local immédiat
-      const u = data?.user;
-      const cu = data?.client_user;
-
-      if (u?.user_id) {
-        setProfiles((prev) => {
-          const next = prev.filter((p) => p.user_id !== u.user_id);
-          return [{ user_id: u.user_id, email: u.email, role: u.role }, ...next];
-        });
-      }
-      if (cu?.client_id && cu?.user_id) {
-        setClientUsers((prev) => [{ client_id: cu.client_id, user_id: cu.user_id }, ...prev]);
-        setSelectedUserId(cu.user_id);
-      }
-
-      setCreateUserOpen(false);
-      setMsg("Utilisateur créé.");
-      setTimeout(() => setMsg(""), 2000);
-
-      await refreshAll();
-    } catch (e) {
-      setCreateUserErr(e?.message || "Création utilisateur impossible.");
-    } finally {
-      setCreateUserSaving(false);
     }
   }
 
@@ -494,7 +390,10 @@ export default function Admin() {
 
     try {
       const context = {
-        workflow: { provider: cfgWorkflowProvider || "", id: cfgWorkflowId || "" },
+        workflow: {
+          provider: cfgWorkflowProvider || "",
+          id: cfgWorkflowId || "",
+        },
         sources: cfgSources,
       };
 
@@ -522,6 +421,115 @@ export default function Admin() {
     }
   }
 
+  // -------- CREATE CLIENT / USER (fix disparition : setQ('') + refresh state) --------
+  async function authToken() {
+    const { data: { session } } = await supabase.auth.getSession();
+    return session?.access_token || "";
+  }
+
+  async function createClient() {
+    const name = createClientName.trim();
+    if (!name) return;
+
+    setCreateBusy(true);
+    setCreateErr("");
+    try {
+      const token = await authToken();
+      const resp = await fetch("/api/admin/create-client", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ name }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || "Erreur création client.");
+
+      // IMPORTANT: on vide le filtre sinon le client "disparaît"
+      setQ("");
+
+      // Update state sans F5
+      const newClient = data.client;
+      setClients((prev) => [newClient, ...prev]);
+
+      // Selection nouveau client
+      setSelectedClientId(newClient.id);
+      setSelectedUserId("");
+
+      // reset modal
+      setCreateClientName("");
+      setCreateClientOpen(false);
+
+      setMsg("Client créé.");
+      setTimeout(() => setMsg(""), 2000);
+    } catch (e) {
+      setCreateErr(e?.message || "Erreur.");
+    } finally {
+      setCreateBusy(false);
+    }
+  }
+
+  async function createUser() {
+    const clientId = (createUserClientId || selectedClientId || "").trim();
+    const email = createUserEmail.trim().toLowerCase();
+    const password = createUserPassword;
+    const role = createUserRole;
+
+    if (!clientId) return setCreateErr("Choisis un client.");
+    if (!email) return setCreateErr("Email obligatoire.");
+    if (!password || password.length < 6) return setCreateErr("Mot de passe min 6 caractères.");
+
+    setCreateBusy(true);
+    setCreateErr("");
+
+    try {
+      const token = await authToken();
+      const resp = await fetch("/api/admin/create-user", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ clientId, email, password, role }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data?.error || "Erreur création utilisateur.");
+
+      // IMPORTANT: on vide le filtre sinon le user/le client "disparaît"
+      setQ("");
+
+      const newUser = data.user; // {id,email,role}
+
+      // Update state sans F5
+      setProfiles((prev) => [
+        { user_id: newUser.id, email: newUser.email, role: newUser.role },
+        ...prev.filter((p) => p.user_id !== newUser.id),
+      ]);
+
+      setClientUsers((prev) => [
+        { client_id: clientId, user_id: newUser.id },
+        ...prev,
+      ]);
+
+      setSelectedClientId(clientId);
+      setSelectedUserId(newUser.id);
+
+      // reset modal
+      setCreateUserEmail("");
+      setCreateUserPassword("");
+      setCreateUserRole("user");
+      setCreateUserOpen(false);
+
+      setMsg("Utilisateur créé.");
+      setTimeout(() => setMsg(""), 2000);
+    } catch (e) {
+      setCreateErr(e?.message || "Erreur.");
+    } finally {
+      setCreateBusy(false);
+    }
+  }
+
   if (loading) {
     return (
       <main style={styles.page}>
@@ -542,7 +550,6 @@ export default function Admin() {
           <button
             style={styles.btnGhost}
             onClick={() => (window.location.href = "/agents")}
-            type="button"
           >
             Retour aux agents
           </button>
@@ -561,28 +568,45 @@ export default function Admin() {
 
         <div style={styles.topRight}>
           <span style={styles.chip}>{me?.email || "admin"}</span>
-          <button style={styles.btnGhost} onClick={logout} type="button">
+          <button style={styles.btnGhost} onClick={logout}>
             Déconnexion
           </button>
         </div>
       </header>
 
       <section style={styles.layout}>
-        {/* CLIENTS + USERS */}
+        {/* LEFT: clients/users */}
         <aside style={styles.panel}>
           <div style={styles.panelHeader}>
-            <div style={{ display: "grid", gap: 10 }}>
+            <div>
               <div style={styles.panelTitle}>Clients</div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button type="button" style={styles.btnPrimary} onClick={openCreateClient}>
+
+              <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+                <button
+                  type="button"
+                  style={styles.btnPrimary}
+                  onClick={() => {
+                    setCreateErr("");
+                    setCreateClientOpen(true);
+                    setCreateClientName("");
+                    setQ(""); // IMPORTANT: évite l’impression de disparition
+                  }}
+                >
                   + Client
                 </button>
+
                 <button
                   type="button"
                   style={styles.btnGhost}
-                  onClick={openCreateUser}
-                  disabled={!selectedClientId}
-                  title={!selectedClientId ? "Sélectionne un client d’abord" : ""}
+                  onClick={() => {
+                    setCreateErr("");
+                    setCreateUserOpen(true);
+                    setCreateUserClientId(selectedClientId || "");
+                    setCreateUserEmail("");
+                    setCreateUserPassword("");
+                    setCreateUserRole("user");
+                    setQ(""); // IMPORTANT
+                  }}
                 >
                   + Utilisateur
                 </button>
@@ -643,7 +667,9 @@ export default function Admin() {
                               }}
                               title={u.email || u.user_id}
                             >
-                              <div style={styles.userEmail}>{u.email || "(email non renseigné)"}</div>
+                              <div style={styles.userEmail}>
+                                {u.email || "(email non renseigné)"}
+                              </div>
                               <div style={styles.userBadge}>{u.role}</div>
                             </button>
                           );
@@ -657,7 +683,7 @@ export default function Admin() {
           </div>
         </aside>
 
-        {/* ASSIGN */}
+        {/* RIGHT: assign */}
         <div style={styles.panel}>
           <div style={styles.panelHeader}>
             <div>
@@ -730,7 +756,6 @@ export default function Admin() {
                         openConfig(a);
                       }}
                       disabled={!selectedUserId}
-                      title="Configurer prompt, sources et workflow"
                     >
                       Prompt & données
                     </button>
@@ -742,120 +767,122 @@ export default function Admin() {
         </div>
       </section>
 
-      {/* MODALE CREATE CLIENT */}
+      {/* CREATE CLIENT MODAL */}
       {createClientOpen ? (
-        <div style={styles.modalOverlay} onMouseDown={() => setCreateClientOpen(false)} role="dialog" aria-modal="true">
+        <div style={styles.modalOverlay} onMouseDown={() => setCreateClientOpen(false)}>
           <div style={styles.modal} onMouseDown={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
               <div style={styles.modalTitle}>Créer un client</div>
-              <button type="button" style={styles.btnGhost} onClick={() => setCreateClientOpen(false)}>
+              <button style={styles.btnGhost} onClick={() => setCreateClientOpen(false)}>
                 Fermer
               </button>
             </div>
 
             <div style={styles.modalBody}>
-              {createClientErr ? <div style={styles.alert}>{createClientErr}</div> : null}
-
+              {createErr ? <div style={styles.alert}>{createErr}</div> : null}
               <div style={styles.block}>
                 <div style={styles.label}>Nom du client</div>
                 <input
-                  value={newClientName}
-                  onChange={(e) => setNewClientName(e.target.value)}
+                  value={createClientName}
+                  onChange={(e) => setCreateClientName(e.target.value)}
                   style={styles.input}
-                  placeholder="Ex: Evidencia"
+                  placeholder="Ex: Bcontact"
                 />
               </div>
             </div>
 
             <div style={styles.modalFooter}>
-              <button type="button" style={styles.btnGhost} onClick={() => setCreateClientOpen(false)}>
+              <button style={styles.btnGhost} onClick={() => setCreateClientOpen(false)}>
                 Annuler
               </button>
-              <button
-                type="button"
-                style={styles.btnPrimary}
-                onClick={doCreateClient}
-                disabled={createClientSaving || !newClientName.trim()}
-              >
-                {createClientSaving ? "Création…" : "Créer"}
+              <button style={styles.btnPrimary} onClick={createClient} disabled={createBusy}>
+                {createBusy ? "Création…" : "Créer"}
               </button>
             </div>
           </div>
         </div>
       ) : null}
 
-      {/* MODALE CREATE USER */}
+      {/* CREATE USER MODAL */}
       {createUserOpen ? (
-        <div style={styles.modalOverlay} onMouseDown={() => setCreateUserOpen(false)} role="dialog" aria-modal="true">
+        <div style={styles.modalOverlay} onMouseDown={() => setCreateUserOpen(false)}>
           <div style={styles.modal} onMouseDown={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
-              <div style={styles.modalTitle}>
-                Créer un utilisateur — {selectedClient ? clientLabel(selectedClient) : "Client"}
-              </div>
-              <button type="button" style={styles.btnGhost} onClick={() => setCreateUserOpen(false)}>
+              <div style={styles.modalTitle}>Créer un utilisateur</div>
+              <button style={styles.btnGhost} onClick={() => setCreateUserOpen(false)}>
                 Fermer
               </button>
             </div>
 
             <div style={styles.modalBody}>
-              {createUserErr ? <div style={styles.alert}>{createUserErr}</div> : null}
+              {createErr ? <div style={styles.alert}>{createErr}</div> : null}
+
+              <div style={styles.block}>
+                <div style={styles.label}>Client</div>
+                <select
+                  value={createUserClientId}
+                  onChange={(e) => setCreateUserClientId(e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="">— choisir —</option>
+                  {clients
+                    .slice()
+                    .sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), "fr"))
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {clientLabel(c)}
+                      </option>
+                    ))}
+                </select>
+              </div>
 
               <div style={styles.block}>
                 <div style={styles.label}>Email</div>
                 <input
-                  value={newUserEmail}
-                  onChange={(e) => setNewUserEmail(e.target.value)}
+                  value={createUserEmail}
+                  onChange={(e) => setCreateUserEmail(e.target.value)}
                   style={styles.input}
-                  placeholder="utilisateur@domaine.com"
+                  placeholder="ex: jb.bern…@bcontact.fr"
                 />
               </div>
 
               <div style={styles.block}>
-                <div style={styles.label}>Mot de passe (min 6 caractères)</div>
+                <div style={styles.label}>Mot de passe</div>
                 <input
-                  value={newUserPassword}
-                  onChange={(e) => setNewUserPassword(e.target.value)}
-                  style={styles.input}
-                  placeholder="********"
                   type="password"
+                  value={createUserPassword}
+                  onChange={(e) => setCreateUserPassword(e.target.value)}
+                  style={styles.input}
+                  placeholder="min 6 caractères"
                 />
               </div>
 
               <div style={styles.block}>
                 <div style={styles.label}>Rôle</div>
                 <select
-                  value={newUserRole}
-                  onChange={(e) => setNewUserRole(e.target.value)}
+                  value={createUserRole}
+                  onChange={(e) => setCreateUserRole(e.target.value)}
                   style={styles.select}
                 >
                   <option value="user">user</option>
                   <option value="admin">admin</option>
                 </select>
               </div>
-
-              <div style={styles.hint}>
-                Le mot de passe n’est pas stocké : l’utilisateur est créé dans <b>Supabase Auth</b>.
-              </div>
             </div>
 
             <div style={styles.modalFooter}>
-              <button type="button" style={styles.btnGhost} onClick={() => setCreateUserOpen(false)}>
+              <button style={styles.btnGhost} onClick={() => setCreateUserOpen(false)}>
                 Annuler
               </button>
-              <button
-                type="button"
-                style={styles.btnPrimary}
-                onClick={doCreateUser}
-                disabled={createUserSaving || !newUserEmail.trim() || !newUserPassword}
-              >
-                {createUserSaving ? "Création…" : "Créer"}
+              <button style={styles.btnPrimary} onClick={createUser} disabled={createBusy}>
+                {createBusy ? "Création…" : "Créer"}
               </button>
             </div>
           </div>
         </div>
       ) : null}
 
-      {/* MODALE PROMPT/DONNÉES */}
+      {/* MODALE PROMPT/DONNEES */}
       {cfgOpen ? (
         <div style={styles.modalOverlay} onMouseDown={closeConfig} role="dialog" aria-modal="true">
           <div style={styles.modal} onMouseDown={(e) => e.stopPropagation()}>
@@ -905,11 +932,8 @@ export default function Admin() {
                       value={cfgPrompt}
                       onChange={(e) => setCfgPrompt(e.target.value)}
                       style={styles.textarea}
-                      placeholder="Ex: Tu travailles pour la société X. Ton objectif est…"
+                      placeholder="Ex: Tu travailles pour la société X…"
                     />
-                    <div style={styles.hint}>
-                      Stocké dans <b>client_agent_configs.system_prompt</b>.
-                    </div>
                   </div>
                 ) : null}
 
@@ -939,9 +963,6 @@ export default function Admin() {
                           e.target.value = "";
                         }}
                       />
-                      <div style={styles.hint}>
-                        Upload dans le bucket <b>agent_sources</b>.
-                      </div>
                     </div>
 
                     <div style={styles.sourcesList}>
@@ -962,17 +983,12 @@ export default function Admin() {
                               type="button"
                               style={styles.btnGhost}
                               onClick={() => removeSource(idx)}
-                              title="Supprimer"
                             >
                               Supprimer
                             </button>
                           </div>
                         ))
                       )}
-                    </div>
-
-                    <div style={styles.hint}>
-                      Stocké dans <b>client_agent_configs.context.sources</b>.
                     </div>
                   </div>
                 ) : null}
@@ -995,13 +1011,9 @@ export default function Admin() {
                       <input
                         value={cfgWorkflowId}
                         onChange={(e) => setCfgWorkflowId(e.target.value)}
-                        placeholder="ID / nom / webhook / scénario…"
+                        placeholder="ID / nom / webhook…"
                         style={styles.input}
                       />
-                    </div>
-
-                    <div style={styles.hint}>
-                      Stocké dans <b>client_agent_configs.context.workflow</b> (référence uniquement).
                     </div>
                   </div>
                 ) : null}
@@ -1051,7 +1063,6 @@ const styles = {
   brandText: { fontWeight: 900, letterSpacing: 0.2, color: "#eef2ff" },
 
   topRight: { display: "flex", gap: 10, alignItems: "center" },
-
   chip: {
     padding: "8px 12px",
     borderRadius: 999,
@@ -1167,7 +1178,8 @@ const styles = {
 
   clientBlockActive: {
     border: "1px solid rgba(255,140,40,.18)",
-    background: "linear-gradient(135deg, rgba(255,140,40,.10), rgba(80,120,255,.08))",
+    background:
+      "linear-gradient(135deg, rgba(255,140,40,.10), rgba(80,120,255,.08))",
   },
 
   clientHeaderBtn: {
@@ -1284,7 +1296,8 @@ const styles = {
 
   agentCardOn: {
     border: "1px solid rgba(255,140,40,.25)",
-    background: "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
+    background:
+      "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
   },
 
   agentTop: {
@@ -1387,7 +1400,7 @@ const styles = {
   h1: { fontSize: 22, fontWeight: 900 },
   p: { marginTop: 10, opacity: 0.8, fontWeight: 800 },
 
-  // MODAL (générique)
+  // MODAL
   modalOverlay: {
     position: "fixed",
     inset: 0,
@@ -1425,12 +1438,75 @@ const styles = {
 
   modalFooter: {
     padding: 14,
-    borderTop: "1px solid rgba(255,255,255,.08)",
     display: "flex",
     justifyContent: "flex-end",
     gap: 10,
+    borderTop: "1px solid rgba(255,255,255,.08)",
     background: "rgba(0,0,0,.16)",
   },
+
+  block: { display: "grid", gap: 8 },
+
+  label: { fontWeight: 900, fontSize: 12, opacity: 0.9 },
+
+  row: { display: "flex", gap: 10, alignItems: "center" },
+
+  input: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.40)",
+    color: "#eef2ff",
+    outline: "none",
+    fontWeight: 800,
+    fontSize: 12,
+  },
+
+  select: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.40)",
+    color: "#eef2ff",
+    outline: "none",
+    fontWeight: 800,
+    fontSize: 12,
+  },
+
+  textarea: {
+    width: "100%",
+    minHeight: 140,
+    resize: "vertical",
+    padding: "12px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.40)",
+    color: "#eef2ff",
+    outline: "none",
+    fontWeight: 800,
+    fontSize: 12,
+    lineHeight: 1.5,
+  },
+
+  file: { width: "100%" },
+
+  sourcesList: { display: "grid", gap: 10 },
+
+  sourceItem: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 10,
+    alignItems: "center",
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.22)",
+  },
+
+  sourceType: { fontWeight: 900, fontSize: 11, opacity: 0.8 },
+  sourceVal: { fontWeight: 800, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis" },
 
   tabs: {
     display: "flex",
@@ -1452,80 +1528,7 @@ const styles = {
   },
 
   tabOn: {
-    border: "1px solid rgba(255,140,40,.22)",
+    border: "1px solid rgba(255,140,40,.25)",
     background: "rgba(255,140,40,.10)",
-  },
-
-  block: { display: "grid", gap: 8 },
-
-  label: { fontWeight: 900, fontSize: 12, opacity: 0.9 },
-
-  hint: { fontWeight: 800, fontSize: 12, opacity: 0.75, lineHeight: 1.4 },
-
-  row: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
-
-  input: {
-    flex: 1,
-    minWidth: 220,
-    padding: "10px 12px",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(0,0,0,.40)",
-    color: "#eef2ff",
-    outline: "none",
-    fontWeight: 800,
-    fontSize: 12,
-  },
-
-  select: {
-    padding: "10px 12px",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(0,0,0,.40)",
-    color: "#eef2ff",
-    outline: "none",
-    fontWeight: 900,
-    fontSize: 12,
-  },
-
-  textarea: {
-    width: "100%",
-    minHeight: 160,
-    resize: "vertical",
-    padding: "12px 14px",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(0,0,0,.40)",
-    color: "#eef2ff",
-    outline: "none",
-    fontWeight: 800,
-    fontSize: 12,
-    lineHeight: 1.4,
-  },
-
-  file: { color: "#eef2ff" },
-
-  sourcesList: { display: "grid", gap: 10 },
-
-  sourceItem: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 10,
-    padding: 12,
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(0,0,0,.22)",
-  },
-
-  sourceType: { fontWeight: 900, fontSize: 11, opacity: 0.8 },
-
-  sourceVal: {
-    fontWeight: 800,
-    fontSize: 12,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    maxWidth: "70vw",
   },
 };
