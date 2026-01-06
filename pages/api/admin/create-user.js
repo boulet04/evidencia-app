@@ -13,80 +13,96 @@ function getBearerToken(req) {
   return m ? m[1] : "";
 }
 
-function safeStr(v) {
-  return (v ?? "").toString().trim();
+async function assertAdmin(req) {
+  const token = getBearerToken(req);
+  if (!token) return { ok: false, status: 401, error: "Token manquant." };
+
+  const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
+  if (userErr || !userData?.user) return { ok: false, status: 401, error: "Session invalide." };
+
+  const meId = userData.user.id;
+
+  const { data: p, error: pErr } = await supabaseAdmin
+    .from("profiles")
+    .select("role")
+    .eq("user_id", meId)
+    .maybeSingle();
+
+  if (pErr) return { ok: false, status: 500, error: "Erreur lecture profile admin." };
+  if (p?.role !== "admin") return { ok: false, status: 403, error: "Accès refusé (non admin)." };
+
+  return { ok: true, meId };
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
 
-    const token = getBearerToken(req);
-    if (!token) return res.status(401).json({ error: "Token manquant." });
-
-    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-    if (userErr || !userData?.user) return res.status(401).json({ error: "Session invalide." });
-
-    const adminId = userData.user.id;
-
-    const { data: adminProfile, error: profErr } = await supabaseAdmin
-      .from("profiles")
-      .select("role")
-      .eq("user_id", adminId)
-      .maybeSingle();
-
-    if (profErr || adminProfile?.role !== "admin") {
-      return res.status(403).json({ error: "Accès interdit (admin requis)." });
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant." });
+    }
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant." });
     }
 
+    const auth = await assertAdmin(req);
+    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+
     const { clientId, email, password, role } = req.body || {};
-    const cid = safeStr(clientId);
-    const em = safeStr(email).toLowerCase();
-    const pw = safeStr(password);
-    const r = safeStr(role) || "user";
+    const cId = (clientId || "").toString().trim();
+    const em = (email || "").toString().trim().toLowerCase();
+    const pw = (password || "").toString();
+    const rl = (role || "user").toString().trim() || "user";
 
-    if (!cid) return res.status(400).json({ error: "clientId manquant." });
-    if (!em) return res.status(400).json({ error: "Email manquant." });
-    if (!pw || pw.length < 6) return res.status(400).json({ error: "Mot de passe (min 6) manquant." });
-    if (!["user", "admin"].includes(r)) return res.status(400).json({ error: "Role invalide." });
+    if (!cId) return res.status(400).json({ error: "clientId manquant." });
+    if (!em || !isValidEmail(em)) return res.status(400).json({ error: "Email invalide." });
+    if (!pw || pw.length < 6) return res.status(400).json({ error: "Mot de passe (min 6 caractères) requis." });
+    if (!["user", "admin"].includes(rl)) return res.status(400).json({ error: "Role invalide (user/admin)." });
 
-    const { data: clientRow, error: cErr } = await supabaseAdmin
-      .from("clients")
-      .select("id, name")
-      .eq("id", cid)
-      .maybeSingle();
-
-    if (cErr || !clientRow) return res.status(404).json({ error: "Client introuvable." });
-
+    // 1) Créer l’utilisateur dans Supabase Auth
     const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
       email: em,
       password: pw,
       email_confirm: true,
     });
 
-    if (createErr || !created?.user?.id) {
-      return res.status(500).json({ error: "Création utilisateur échouée.", details: createErr?.message || "" });
+    if (createErr || !created?.user) {
+      return res.status(500).json({ error: createErr?.message || "Création Auth user impossible." });
     }
 
     const newUserId = created.user.id;
 
-    const { error: upErr } = await supabaseAdmin.from("profiles").upsert({
-      user_id: newUserId,
-      role: r,
-      client_id: clientRow.id,
-      client_name: clientRow.name,
-    });
+    // 2) Upsert profile
+    const { error: profErr } = await supabaseAdmin
+      .from("profiles")
+      .upsert(
+        { user_id: newUserId, email: em, role: rl },
+        { onConflict: "user_id" }
+      );
 
-    if (upErr) return res.status(500).json({ error: "Profile non créé.", details: upErr.message });
+    if (profErr) {
+      return res.status(500).json({ error: "Profile insert/upsert impossible: " + profErr.message });
+    }
+
+    // 3) Lier user au client
+    const { error: linkErr } = await supabaseAdmin
+      .from("client_users")
+      .insert({ client_id: cId, user_id: newUserId });
+
+    if (linkErr) {
+      return res.status(500).json({ error: "client_users insert impossible: " + linkErr.message });
+    }
 
     return res.status(200).json({
-      ok: true,
-      client: clientRow,
-      user: { id: newUserId, email: em, role: r },
-      note: "Le mot de passe n’est pas récupérable après création (normal).",
+      user: { user_id: newUserId, email: em, role: rl },
+      client_user: { client_id: cId, user_id: newUserId },
     });
   } catch (e) {
     console.error("create-user error:", e);
-    return res.status(500).json({ error: "Erreur interne." });
+    return res.status(500).json({ error: e?.message || "Erreur serveur create-user." });
   }
 }
