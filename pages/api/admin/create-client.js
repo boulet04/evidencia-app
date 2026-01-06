@@ -24,7 +24,6 @@ function safeStr(v) {
 
 function isMissingColumnError(err) {
   const msg = safeStr(err?.message).toLowerCase();
-  // PostgREST/Supabase renvoie souvent "column ... does not exist" ou similaire
   return msg.includes("column") && msg.includes("does not exist");
 }
 
@@ -34,20 +33,19 @@ async function requireAdmin(token) {
 
   const { data: p, error: pErr } = await supabaseAdmin
     .from("profiles")
-    .select("role, is_admin")
+    .select("role")
     .eq("user_id", u.user.id)
     .maybeSingle();
 
   if (pErr) return { ok: false, status: 500, error: pErr.message };
 
-  const isAdmin = p?.role === "admin" || p?.is_admin === true;
+  const isAdmin = p?.role === "admin";
   if (!isAdmin) return { ok: false, status: 403, error: "Accès interdit." };
 
   return { ok: true, userId: u.user.id };
 }
 
 async function insertClientWithFallback(name) {
-  // On tente plusieurs colonnes possibles (d’après ton UI clientLabel)
   const tries = [
     { name },
     { company_name: name },
@@ -67,10 +65,7 @@ async function insertClientWithFallback(name) {
     if (!error) return data;
     lastErr = error;
 
-    // Si c’est une erreur "colonne inexistante", on tente la suivante
     if (isMissingColumnError(error)) continue;
-
-    // Autres erreurs (contrainte NOT NULL, RLS, etc.) => on remonte directement
     break;
   }
 
