@@ -1,4 +1,3 @@
-// pages/api/admin/create-client.js
 import { createClient } from "@supabase/supabase-js";
 
 const supabaseAdmin = createClient(
@@ -7,85 +6,104 @@ const supabaseAdmin = createClient(
   { auth: { persistSession: false } }
 );
 
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
 function getBearerToken(req) {
   const h = req.headers?.authorization || "";
   const m = h.match(/^Bearer\s+(.+)$/i);
   return m ? m[1] : "";
 }
 
-async function assertAdmin(req) {
-  const token = getBearerToken(req);
-  if (!token) return { ok: false, status: 401, error: "Token manquant." };
+function safeStr(v) {
+  return (v ?? "").toString();
+}
 
-  const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-  if (userErr || !userData?.user) return { ok: false, status: 401, error: "Session invalide." };
+function isMissingColumnError(err) {
+  const msg = safeStr(err?.message).toLowerCase();
+  // PostgREST/Supabase renvoie souvent "column ... does not exist" ou similaire
+  return msg.includes("column") && msg.includes("does not exist");
+}
 
-  const meId = userData.user.id;
+async function requireAdmin(token) {
+  const { data: u, error: uErr } = await supabaseAdmin.auth.getUser(token);
+  if (uErr || !u?.user) return { ok: false, status: 401, error: "Session invalide." };
 
   const { data: p, error: pErr } = await supabaseAdmin
     .from("profiles")
-    .select("role")
-    .eq("user_id", meId)
+    .select("role, is_admin")
+    .eq("user_id", u.user.id)
     .maybeSingle();
 
-  if (pErr) return { ok: false, status: 500, error: "Erreur lecture profile admin." };
-  if (p?.role !== "admin") return { ok: false, status: 403, error: "Accès refusé (non admin)." };
+  if (pErr) return { ok: false, status: 500, error: pErr.message };
 
-  return { ok: true, meId };
+  const isAdmin = p?.role === "admin" || p?.is_admin === true;
+  if (!isAdmin) return { ok: false, status: 403, error: "Accès interdit." };
+
+  return { ok: true, userId: u.user.id };
 }
 
-async function insertClientFlexible(name) {
-  const candidates = [
+async function insertClientWithFallback(name) {
+  // On tente plusieurs colonnes possibles (d’après ton UI clientLabel)
+  const tries = [
     { name },
-    { customer_name: name },
     { company_name: name },
+    { customer_name: name },
     { title: name },
   ];
 
-  for (const payload of candidates) {
+  let lastErr = null;
+
+  for (const payload of tries) {
     const { data, error } = await supabaseAdmin
       .from("clients")
       .insert(payload)
       .select("*")
       .single();
 
-    if (!error && data) return data;
+    if (!error) return data;
+    lastErr = error;
 
-    // si la colonne n'existe pas, on tente la suivante
-    const msg = (error?.message || "").toLowerCase();
-    if (!msg.includes("column") && !msg.includes("does not exist")) {
-      // autre erreur -> stop
-      throw error;
-    }
+    // Si c’est une erreur "colonne inexistante", on tente la suivante
+    if (isMissingColumnError(error)) continue;
+
+    // Autres erreurs (contrainte NOT NULL, RLS, etc.) => on remonte directement
+    break;
   }
 
-  throw new Error(
-    "Impossible de créer le client : aucune colonne (name/customer_name/company_name/title) ne correspond à ta table clients."
-  );
+  throw lastErr || new Error("Création client impossible.");
 }
 
 export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
+  setCors(res);
 
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
+
+  try {
     if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
-      return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant." });
+      return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant sur Vercel." });
     }
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant." });
+      return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant sur Vercel." });
     }
 
-    const auth = await assertAdmin(req);
-    if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+    const token = getBearerToken(req);
+    if (!token) return res.status(401).json({ error: "Non authentifié." });
 
-    const { name } = req.body || {};
-    const clientName = (name || "").toString().trim();
-    if (!clientName) return res.status(400).json({ error: "Nom client manquant." });
+    const adminCheck = await requireAdmin(token);
+    if (!adminCheck.ok) return res.status(adminCheck.status).json({ error: adminCheck.error });
 
-    const client = await insertClientFlexible(clientName);
+    const name = safeStr(req.body?.name).trim();
+    if (!name) return res.status(400).json({ error: "Nom client obligatoire." });
+
+    const client = await insertClientWithFallback(name);
     return res.status(200).json({ client });
   } catch (e) {
     console.error("create-client error:", e);
-    return res.status(500).json({ error: e?.message || "Erreur serveur create-client." });
+    return res.status(500).json({ error: safeStr(e?.message) || "Erreur interne." });
   }
 }
