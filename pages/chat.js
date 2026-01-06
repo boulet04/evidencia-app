@@ -18,9 +18,6 @@ export default function Chat() {
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  // Mobile UI
-  const [showHistory, setShowHistory] = useState(false);
-
   const threadRef = useRef(null);
 
   const canSend = useMemo(
@@ -74,11 +71,11 @@ export default function Chat() {
     return data || [];
   }
 
-  async function fetchMessages({ uid, convId }) {
+  // IMPORTANT : ta table s'appelle "messages"
+  async function fetchMessages({ convId }) {
     const { data, error } = await supabase
-      .from("conversation_messages")
-      .select("id, role, content, created_at")
-      .eq("user_id", uid)
+      .from("messages")
+      .select("id, role, content, created_at, conversation_id")
       .eq("conversation_id", convId)
       .order("created_at", { ascending: true });
 
@@ -108,9 +105,9 @@ export default function Chat() {
     await supabase.from("conversations").update(patch).eq("user_id", uid).eq("id", convId);
   }
 
-  async function insertMessage({ uid, convId, role, content }) {
-    await supabase.from("conversation_messages").insert({
-      user_id: uid,
+  // IMPORTANT : insert dans "messages"
+  async function insertMessage({ convId, role, content }) {
+    await supabase.from("messages").insert({
       conversation_id: convId,
       role,
       content,
@@ -123,7 +120,10 @@ export default function Chat() {
     async function boot() {
       setErrorMsg("");
 
-      const { data: { session } } = await supabase.auth.getSession();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
       if (!session) {
         window.location.href = "/login";
         return;
@@ -160,11 +160,13 @@ export default function Chat() {
       if (!mounted) return;
       setHistory(h);
 
-      // open conv from url if valid
+      let chosenConvId = null;
+
       if (convIdFromUrl) {
-        const msgs = await fetchMessages({ uid, convId: convIdFromUrl });
+        const msgs = await fetchMessages({ convId: convIdFromUrl });
         if (msgs.length > 0) {
-          setConversationId(convIdFromUrl);
+          chosenConvId = convIdFromUrl;
+          setConversationId(chosenConvId);
           setMessages(msgs);
           setLoading(false);
           scrollToBottom();
@@ -172,26 +174,29 @@ export default function Chat() {
         }
       }
 
-      // open last
       if (h && h.length > 0) {
-        const chosenConvId = h[0].id;
+        chosenConvId = h[0].id;
         setConversationId(chosenConvId);
 
-        const msgs = await fetchMessages({ uid, convId: chosenConvId });
+        const msgs = await fetchMessages({ convId: chosenConvId });
         if (!mounted) return;
 
-        setMessages(
-          msgs.length > 0
-            ? msgs
-            : [{ role: "assistant", content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?` }]
-        );
+        if (msgs.length > 0) {
+          setMessages(msgs);
+        } else {
+          setMessages([
+            {
+              role: "assistant",
+              content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
+            },
+          ]);
+        }
 
         setLoading(false);
         scrollToBottom();
         return;
       }
 
-      // create new
       const newConvId = await createConversation({
         uid,
         agentSlug: a.slug,
@@ -201,7 +206,12 @@ export default function Chat() {
       if (!mounted) return;
 
       setConversationId(newConvId);
-      setMessages([{ role: "assistant", content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?` }]);
+      setMessages([
+        {
+          role: "assistant",
+          content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?`,
+        },
+      ]);
 
       const h2 = await fetchHistory({ uid, agentSlug: a.slug });
       if (!mounted) return;
@@ -231,6 +241,7 @@ export default function Chat() {
   async function openConversation(convId) {
     if (!userId || !agent || !convId) return;
     setErrorMsg("");
+
     setConversationId(convId);
 
     try {
@@ -238,18 +249,19 @@ export default function Chat() {
       url.searchParams.set("agent", agent.slug);
       url.searchParams.set("c", convId);
       window.history.replaceState({}, "", url.toString());
-    } catch {}
+    } catch (_) {}
 
-    const msgs = await fetchMessages({ uid: userId, convId });
-
+    const msgs = await fetchMessages({ convId });
     setMessages(
       msgs.length > 0
         ? msgs
-        : [{ role: "assistant", content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?` }]
+        : [
+            {
+              role: "assistant",
+              content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?`,
+            },
+          ]
     );
-
-    // mobile: fermer l’historique après sélection
-    setShowHistory(false);
 
     scrollToBottom();
   }
@@ -270,19 +282,22 @@ export default function Chat() {
     }
 
     setConversationId(convId);
-    setMessages([{ role: "assistant", content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?` }]);
+    setMessages([
+      {
+        role: "assistant",
+        content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?`,
+      },
+    ]);
 
     try {
       const url = new URL(window.location.href);
       url.searchParams.set("agent", agent.slug);
       url.searchParams.set("c", convId);
       window.history.replaceState({}, "", url.toString());
-    } catch {}
+    } catch (_) {}
 
     const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
     setHistory(h);
-
-    setShowHistory(false);
 
     scrollToBottom();
   }
@@ -299,7 +314,6 @@ export default function Chat() {
     scrollToBottom();
 
     await insertMessage({
-      uid: userId,
       convId: conversationId,
       role: "user",
       content: userText,
@@ -308,7 +322,9 @@ export default function Chat() {
     const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
     const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
 
-    const { data: { session } } = await supabase.auth.getSession();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
     const accessToken = session?.access_token || "";
 
     if (!accessToken) {
@@ -324,7 +340,10 @@ export default function Chat() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${accessToken}`,
         },
-        body: JSON.stringify({ message: userText, agentSlug: agent.slug }),
+        body: JSON.stringify({
+          message: userText,
+          agentSlug: agent.slug,
+        }),
       });
 
       const data = await resp.json().catch(() => ({}));
@@ -333,35 +352,31 @@ export default function Chat() {
       const reply = (data?.reply || "Réponse vide.").toString();
 
       setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
-
       await insertMessage({
-        uid: userId,
         convId: conversationId,
         role: "assistant",
         content: reply,
       });
 
       await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
-
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
 
       scrollToBottom();
     } catch (e) {
-      const msg = e?.message || "Erreur interne. Réessayez plus tard.";
-      setErrorMsg(msg);
-
-      setMessages((prev) => [...prev, { role: "assistant", content: "Erreur interne. Réessayez plus tard." }]);
+      setErrorMsg(e?.message || "Erreur interne. Réessayez plus tard.");
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "Erreur interne. Réessayez plus tard." },
+      ]);
 
       await insertMessage({
-        uid: userId,
         convId: conversationId,
         role: "assistant",
         content: "Erreur interne. Réessayez plus tard.",
       });
 
       await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
-
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
 
@@ -417,15 +432,6 @@ export default function Chat() {
         </div>
 
         <div style={styles.topRight}>
-          {/* bouton mobile pour afficher/masquer l’historique */}
-          <button
-            style={styles.histToggle}
-            onClick={() => setShowHistory((v) => !v)}
-            aria-label="Afficher l’historique"
-          >
-            Historique
-          </button>
-
           <span style={styles.userChip}>{email || "Connecté"}</span>
           <button onClick={logout} style={styles.btnGhost}>
             Déconnexion
@@ -434,18 +440,12 @@ export default function Chat() {
       </header>
 
       <section style={styles.layout}>
-        {/* Sidebar */}
-        <aside style={{ ...styles.sidebar, ...(showHistory ? styles.sidebarMobileOn : null) }}>
+        <aside style={styles.sidebar}>
           <div style={styles.sidebarTop}>
             <div style={styles.sidebarTitle}>Historique</div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={newConversation} style={styles.newBtn}>
-                + Nouvelle
-              </button>
-              <button onClick={() => setShowHistory(false)} style={styles.closeHist}>
-                Fermer
-              </button>
-            </div>
+            <button onClick={newConversation} style={styles.newBtn}>
+              + Nouvelle
+            </button>
           </div>
 
           <div style={styles.sidebarList}>
@@ -479,7 +479,6 @@ export default function Chat() {
           </div>
         </aside>
 
-        {/* Chat */}
         <div style={styles.chatCard}>
           {errorMsg ? <div style={styles.alert}>{errorMsg}</div> : null}
 
@@ -492,7 +491,12 @@ export default function Chat() {
                   justifyContent: m.role === "user" ? "flex-end" : "flex-start",
                 }}
               >
-                <div style={{ ...styles.bubble, ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot) }}>
+                <div
+                  style={{
+                    ...styles.bubble,
+                    ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot),
+                  }}
+                >
                   <div style={styles.role}>{m.role === "user" ? "Vous" : agent.name}</div>
                   <div style={styles.text}>{m.content}</div>
                 </div>
@@ -529,9 +533,7 @@ const styles = {
     color: "#eef2ff",
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
   },
-
   bg: { position: "absolute", inset: 0, zIndex: 0 },
-
   bgLogo: {
     position: "absolute",
     inset: 0,
@@ -543,7 +545,6 @@ const styles = {
     filter: "contrast(1.05) saturate(1.05) brightness(.80)",
     transform: "scale(1.02)",
   },
-
   bgVeils: {
     position: "absolute",
     inset: 0,
@@ -552,7 +553,6 @@ const styles = {
       "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), rgba(0,0,0,0) 62%)," +
       "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22) 30%, rgba(0,0,0,.22) 70%, rgba(0,0,0,.66))",
   },
-
   topbar: {
     position: "relative",
     zIndex: 2,
@@ -565,10 +565,8 @@ const styles = {
     backdropFilter: "blur(10px)",
     borderBottom: "1px solid rgba(255,255,255,.10)",
   },
-
   topLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
   topRight: { display: "flex", alignItems: "center", gap: 10 },
-
   backBtn: {
     padding: "10px 12px",
     borderRadius: 999,
@@ -579,16 +577,13 @@ const styles = {
     cursor: "pointer",
     whiteSpace: "nowrap",
   },
-
   brandLogo: {
     height: 24,
     width: "auto",
     display: "block",
     filter: "drop-shadow(0 10px 26px rgba(0,0,0,.55))",
   },
-
   agentInfo: { display: "grid", gap: 2, minWidth: 0 },
-
   agentName: {
     fontWeight: 900,
     fontSize: 13,
@@ -598,7 +593,6 @@ const styles = {
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
-
   agentDesc: {
     fontWeight: 800,
     fontSize: 12,
@@ -607,18 +601,6 @@ const styles = {
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
-
-  histToggle: {
-    padding: "10px 12px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(0,0,0,.35)",
-    color: "#eef2ff",
-    fontWeight: 900,
-    cursor: "pointer",
-    display: "none", // visible only on mobile via media-like logic below
-  },
-
   userChip: {
     fontSize: 12,
     fontWeight: 900,
@@ -632,7 +614,6 @@ const styles = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-
   btnGhost: {
     padding: "10px 14px",
     borderRadius: 999,
@@ -642,8 +623,6 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
   },
-
-  // IMPORTANT: pas de height fixe ici; on laisse le layout gérer, sinon mobile casse
   layout: {
     position: "relative",
     zIndex: 1,
@@ -651,10 +630,9 @@ const styles = {
     gridTemplateColumns: "320px 1fr",
     gap: 14,
     padding: 14,
+    height: "calc(100vh - 64px)",
     boxSizing: "border-box",
-    minHeight: "calc(100vh - 64px)",
   },
-
   sidebar: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -665,10 +643,6 @@ const styles = {
     flexDirection: "column",
     minHeight: 0,
   },
-
-  // mobile overlay hidden by default
-  sidebarMobileOn: {},
-
   sidebarTop: {
     padding: 14,
     display: "flex",
@@ -678,9 +652,7 @@ const styles = {
     borderBottom: "1px solid rgba(255,255,255,.08)",
     background: "rgba(0,0,0,.18)",
   },
-
   sidebarTitle: { fontWeight: 900, color: "#eef2ff", fontSize: 13, letterSpacing: 0.2 },
-
   newBtn: {
     padding: "10px 12px",
     borderRadius: 999,
@@ -691,20 +663,13 @@ const styles = {
     cursor: "pointer",
     whiteSpace: "nowrap",
   },
-
-  closeHist: {
-    padding: "10px 12px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(0,0,0,.28)",
-    color: "#eef2ff",
-    fontWeight: 900,
-    cursor: "pointer",
-    whiteSpace: "nowrap",
+  sidebarList: {
+    padding: 10,
+    overflowY: "auto",
+    display: "grid",
+    gap: 10,
+    minHeight: 0,
   },
-
-  sidebarList: { padding: 10, overflowY: "auto", display: "grid", gap: 10, minHeight: 0 },
-
   sidebarEmpty: {
     padding: 12,
     borderRadius: 16,
@@ -714,7 +679,6 @@ const styles = {
     fontSize: 12,
     lineHeight: 1.35,
   },
-
   histItem: {
     textAlign: "left",
     width: "100%",
@@ -727,12 +691,10 @@ const styles = {
     display: "grid",
     gap: 6,
   },
-
   histItemActive: {
     background: "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
     border: "1px solid rgba(255,140,40,.18)",
   },
-
   histTitle: {
     fontWeight: 900,
     fontSize: 13,
@@ -741,9 +703,7 @@ const styles = {
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
-
   histDate: { fontWeight: 800, fontSize: 11, color: "rgba(238,242,255,.65)" },
-
   chatCard: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -752,9 +712,8 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
-    minHeight: "calc(100vh - 64px - 28px)", // topbar + padding approximate; keeps usable
+    minHeight: 0,
   },
-
   alert: {
     margin: 12,
     padding: 12,
@@ -765,10 +724,8 @@ const styles = {
     fontWeight: 900,
     fontSize: 13,
   },
-
   thread: { flex: 1, overflowY: "auto", padding: 14, display: "grid", gap: 12, minHeight: 0 },
   bubbleRow: { display: "flex" },
-
   bubble: {
     maxWidth: 760,
     borderRadius: 18,
@@ -778,13 +735,10 @@ const styles = {
     lineHeight: 1.45,
     border: "1px solid rgba(255,255,255,.10)",
   },
-
   bubbleUser: { background: "rgba(255,255,255,.10)" },
   bubbleBot: { background: "rgba(0,0,0,.35)" },
-
   role: { fontSize: 11, fontWeight: 900, color: "rgba(238,242,255,.72)", marginBottom: 6 },
   text: { fontSize: 14, fontWeight: 700, color: "rgba(238,242,255,.92)" },
-
   composer: {
     display: "flex",
     gap: 10,
@@ -793,7 +747,6 @@ const styles = {
     background: "rgba(0,0,0,.22)",
     backdropFilter: "blur(10px)",
   },
-
   textarea: {
     flex: 1,
     resize: "none",
@@ -807,7 +760,6 @@ const styles = {
     fontSize: 14,
     lineHeight: 1.4,
   },
-
   btn: {
     padding: "12px 16px",
     borderRadius: 999,
@@ -819,7 +771,6 @@ const styles = {
     minWidth: 110,
     boxShadow: "0 18px 45px rgba(0,0,0,.45)",
   },
-
   btnDisabled: {
     padding: "12px 16px",
     borderRadius: 999,
@@ -830,7 +781,6 @@ const styles = {
     cursor: "not-allowed",
     minWidth: 110,
   },
-
   center: {
     position: "relative",
     zIndex: 1,
@@ -839,7 +789,6 @@ const styles = {
     placeItems: "center",
     padding: 24,
   },
-
   loadingCard: {
     width: "100%",
     maxWidth: 520,
@@ -849,29 +798,5 @@ const styles = {
     boxShadow: "0 24px 70px rgba(0,0,0,.60)",
     backdropFilter: "blur(14px)",
   },
-
   loadingSub: { marginTop: 6, color: "rgba(255,255,255,.78)", fontWeight: 800, fontSize: 12 },
 };
-
-// --- Mobile fix (sans CSS externe) ---
-// On applique un mini "media query" JS: si écran < 900px, on modifie layout/sidebar/histToggle
-if (typeof window !== "undefined") {
-  const isMobile = window.matchMedia && window.matchMedia("(max-width: 900px)").matches;
-  if (isMobile) {
-    styles.layout.gridTemplateColumns = "1fr";
-    styles.chatCard.minHeight = "calc(100vh - 64px - 28px)";
-    styles.histToggle.display = "inline-flex";
-    styles.userChip.maxWidth = 160;
-
-    // Sidebar en overlay sur mobile
-    styles.sidebar.position = "fixed";
-    styles.sidebar.top = "64px";
-    styles.sidebar.left = "14px";
-    styles.sidebar.right = "14px";
-    styles.sidebar.bottom = "14px";
-    styles.sidebar.zIndex = 5;
-    styles.sidebar.display = "none";
-
-    styles.sidebarMobileOn.display = "flex";
-  }
-}
