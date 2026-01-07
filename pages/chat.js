@@ -179,9 +179,6 @@ export default function Chat() {
 
     await insertMessage({ uid: userId, convId: conversationId, role: "user", content: userText });
 
-    const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
-    const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
-
     const { data: { session } } = await supabase.auth.getSession();
     try {
       const resp = await fetch("/api/chat", {
@@ -193,7 +190,7 @@ export default function Chat() {
       const reply = data.reply || "Désolé, je ne peux pas répondre.";
       setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
       await insertMessage({ uid: userId, convId: conversationId, role: "assistant", content: reply });
-      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
+      await touchConversation({ uid: userId, convId: conversationId });
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
       scrollToBottom();
@@ -214,9 +211,16 @@ export default function Chat() {
       
       <header style={styles.topbar}>
         <div style={styles.topLeft}>
-          {/* Bouton retour avec l'avatar ajouté juste après */}
+          {/* 1. Bouton Retour */}
           <button style={styles.backBtn} onClick={() => (window.location.href = "/agents")}>← Retour</button>
           
+          {/* 2. Infos de l'agent (Nom + Description) */}
+          <div style={styles.agentInfo}>
+            <div style={styles.agentName}>{agent.name}</div>
+            <div style={styles.agentDesc}>{agent.description}</div>
+          </div>
+
+          {/* 3. Avatar de l'agent (Placé à droite du nom) */}
           <img 
             src={agentAvatar} 
             alt={agent.name} 
@@ -225,10 +229,6 @@ export default function Chat() {
           />
 
           <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
-          <div style={styles.agentInfo}>
-            <div style={styles.agentName}>{agent.name}</div>
-            <div style={styles.agentDesc}>{agent.description}</div>
-          </div>
         </div>
         <div style={styles.topRight}>
           <span style={styles.userChip}>{email}</span>
@@ -284,18 +284,18 @@ const styles = {
   bg: { position: "absolute", inset: 0, zIndex: 0 },
   bgLogo: { position: "absolute", inset: 0, backgroundImage: "url('/images/logopc.png')", backgroundRepeat: "no-repeat", backgroundSize: "contain", backgroundPosition: "center", opacity: 0.08 },
   bgVeils: { position: "absolute", inset: 0, background: "radial-gradient(circle at 50% 50%, rgba(255,140,40,0.1), transparent)" },
-  topbar: { position: "relative", zIndex: 2, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(0,0,0,.3)", backdropFilter: "blur(10px)", borderBottom: "1px solid rgba(255,255,255,.1)" },
-  topLeft: { display: "flex", alignItems: "center", gap: 12 },
+  topbar: { position: "relative", zIndex: 2, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(0,0,0,.3)", backdropFilter: "blur(10px)", borderBottom: "1px solid rgba(255,255,255,.1)" },
+  topLeft: { display: "flex", alignItems: "center", gap: 15 },
   topRight: { display: "flex", alignItems: "center", gap: 10 },
   backBtn: { padding: "8px 12px", borderRadius: 20, border: "1px solid rgba(255,255,255,.1)", background: "rgba(0,0,0,.3)", color: "#fff", cursor: "pointer" },
-  topAvatar: { width: 32, height: 32, borderRadius: "50%", objectFit: "cover", objectPosition: "center 20%", border: "1px solid rgba(255,255,255,0.2)" }, // Style ajouté pour l'avatar du haut
-  brandLogo: { height: 24 },
+  topAvatar: { width: 45, height: 45, borderRadius: "50%", objectFit: "cover", objectPosition: "center 20%", border: "2px solid rgba(255,140,40,0.3)" },
+  brandLogo: { height: 20, marginLeft: 15, opacity: 0.8 },
   agentInfo: { display: "grid" },
-  agentName: { fontWeight: 900, fontSize: 13 },
-  agentDesc: { fontSize: 11, opacity: 0.7 },
+  agentName: { fontWeight: 900, fontSize: 14, color: "#fff" },
+  agentDesc: { fontSize: 11, opacity: 0.6 },
   userChip: { fontSize: 11, padding: "6px 12px", borderRadius: 20, background: "rgba(0,0,0,.3)", border: "1px solid rgba(255,255,255,.1)" },
   btnGhost: { background: "none", border: "none", color: "#ff4d4d", fontSize: 11, cursor: "pointer" },
-  layout: { position: "relative", zIndex: 1, display: "grid", gridTemplateColumns: "280px 1fr", gap: 14, padding: 14, height: "calc(100vh - 64px)" },
+  layout: { position: "relative", zIndex: 1, display: "grid", gridTemplateColumns: "280px 1fr", gap: 14, padding: 14, height: "calc(100vh - 65px)" },
   sidebar: { borderRadius: 22, background: "rgba(0,0,0,.4)", backdropFilter: "blur(14px)", display: "flex", flexDirection: "column", overflow: "hidden" },
   sidebarTop: { padding: 15, display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid rgba(255,255,255,0.05)" },
   sidebarTitle: { fontWeight: 900, fontSize: 12 },
