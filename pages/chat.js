@@ -56,7 +56,7 @@ export default function Chat() {
   }
 
   async function fetchMessages({ uid, convId }) {
-    const { data, error } = await supabase.from("conversation_messages").select("id, role, content, created_at").eq("user_id", uid).eq("conversation_id", convId).order("created_at", { ascending: true });
+    const { data, error } = await supabase.from("messages").select("id, role, content, created_at").eq("user_id", uid).eq("conversation_id", convId).order("created_at", { ascending: true });
     return error ? [] : data || [];
   }
 
