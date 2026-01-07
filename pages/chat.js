@@ -1,4 +1,3 @@
-// pages/chat.js
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 
@@ -369,6 +368,7 @@ export default function Chat() {
         body: JSON.stringify({
           message: userText,
           agentSlug: agent.slug,
+          conversationId: conversationId, // Ajouté pour l'API Mistral
         }),
       });
 
@@ -514,7 +514,6 @@ export default function Chat() {
                     }}
                     title={c.title || "Conversation"}
                   >
-                    {/* ✅ Avatar “bulle” + titre */}
                     <div style={styles.histRow}>
                       <img
                         src={agentAvatar}
@@ -569,7 +568,6 @@ export default function Chat() {
                       ...(isUser ? styles.bubbleUser : styles.bubbleBot),
                     }}
                   >
-                    {/* ✅ Header bulle : avatar agent + nom (seulement côté assistant) */}
                     <div style={styles.bubbleHeader}>
                       {!isUser ? (
                         <img
@@ -621,7 +619,6 @@ export default function Chat() {
   );
 }
 
-/* ================== STYLES (charte Evidencia) ================== */
 const styles = {
   page: {
     minHeight: "100vh",
@@ -755,7 +752,6 @@ const styles = {
     boxSizing: "border-box",
   },
 
-  /* Sidebar */
   sidebar: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -865,7 +861,6 @@ const styles = {
     color: "rgba(238,242,255,.65)",
   },
 
-  /* Chat card */
   chatCard: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -993,7 +988,6 @@ const styles = {
     minWidth: 110,
   },
 
-  /* Loading */
   center: {
     position: "relative",
     zIndex: 1,
