@@ -51,7 +51,11 @@ export default function Chat() {
   }
 
   async function fetchHistory({ uid, agentSlug }) {
-    const { data, error } = await supabase.from("conversations").select("id, title, updated_at").eq("user_id", uid).eq("agent_slug", agentSlug).order("updated_at", { ascending: false }).limit(10);
+    const { data, error } = await supabase.from("conversations")
+      .select("id, title, updated_at")
+      .eq("user_id", uid)
+      .eq("agent_slug", agentSlug)
+      .order("updated_at", { ascending: false });
     return error ? [] : data || [];
   }
 
@@ -98,11 +102,11 @@ export default function Chat() {
       if (!mounted) return;
       setAgent(a);
 
+      const h = await fetchHistory({ uid, agentSlug: a.slug });
+      if (mounted) setHistory(h);
+
       const convParam = url.searchParams.get("c");
       const convIdFromUrl = convParam ? safeDecode(convParam).trim() : "";
-      const h = await fetchHistory({ uid, agentSlug: a.slug });
-      if (!mounted) return;
-      setHistory(h);
 
       let chosenConvId = null;
       if (convIdFromUrl) {
@@ -179,6 +183,9 @@ export default function Chat() {
 
     await insertMessage({ uid: userId, convId: conversationId, role: "user", content: userText });
 
+    const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
+    const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
+
     const { data: { session } } = await supabase.auth.getSession();
     try {
       const resp = await fetch("/api/chat", {
@@ -190,7 +197,7 @@ export default function Chat() {
       const reply = data.reply || "Désolé, je ne peux pas répondre.";
       setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
       await insertMessage({ uid: userId, convId: conversationId, role: "assistant", content: reply });
-      await touchConversation({ uid: userId, convId: conversationId });
+      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
       scrollToBottom();
@@ -208,26 +215,14 @@ export default function Chat() {
   return (
     <main style={styles.page}>
       <div style={styles.bg} aria-hidden="true"><div style={styles.bgLogo} /><div style={styles.bgVeils} /></div>
-      
       <header style={styles.topbar}>
         <div style={styles.topLeft}>
-          {/* 1. Bouton Retour */}
           <button style={styles.backBtn} onClick={() => (window.location.href = "/agents")}>← Retour</button>
-          
-          {/* 2. Infos de l'agent (Nom + Description) */}
           <div style={styles.agentInfo}>
             <div style={styles.agentName}>{agent.name}</div>
             <div style={styles.agentDesc}>{agent.description}</div>
           </div>
-
-          {/* 3. Avatar de l'agent (Placé à droite du nom) */}
-          <img 
-            src={agentAvatar} 
-            alt={agent.name} 
-            style={styles.topAvatar} 
-            onError={(e) => e.target.src="/images/logopc.png"} 
-          />
-
+          <img src={agentAvatar} alt={agent.name} style={styles.topAvatar} onError={(e) => e.target.src="/images/logopc.png"} />
           <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
         </div>
         <div style={styles.topRight}>
