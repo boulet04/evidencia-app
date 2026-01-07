@@ -31,12 +31,20 @@ function parseMaybeJson(v) {
   return null;
 }
 
+/**
+ * Normalise les URL saisies dans l'admin:
+ * - "www.site.fr" => "https://www.site.fr"
+ * - "site.fr" => "https://site.fr"
+ * - garde https:// et http://
+ */
 function normalizeUrlMaybe(u) {
   const s = safeStr(u).trim();
   if (!s) return "";
   if (s.startsWith("http://") || s.startsWith("https://")) return s;
-  // Si l’utilisateur met "www.bcontact.fr"
+  if (s.startsWith("//")) return "https:" + s;
   if (s.startsWith("www.")) return "https://" + s;
+  // si l'utilisateur tape juste "bcontact.fr"
+  if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(s)) return "https://" + s;
   return s;
 }
 
@@ -44,7 +52,6 @@ function isLikelyDoc(urlOrPath) {
   const s = safeStr(urlOrPath).trim();
   if (!s) return false;
 
-  // Supporte les URL signées avec querystring : on regarde le pathname
   try {
     const u = new URL(s);
     const p = (u.pathname || "").toLowerCase();
@@ -81,6 +88,49 @@ function truncate(text, maxChars) {
   return t.slice(0, maxChars) + "\n\n[...contenu tronqué...]";
 }
 
+/**
+ * Convertit un HTML en texte utile:
+ * - supprime scripts/styles/noscript/svg
+ * - enlève tags
+ * - décode quelques entités HTML courantes
+ * - compacte les espaces
+ * Objectif: donner à l'agent le contenu "lisible" et pas le code Wix.
+ */
+function htmlToText(html) {
+  let s = safeStr(html);
+  if (!s) return "";
+
+  // Retire blocs inutiles (grosses sources de bruit Wix)
+  s = s.replace(/<script[\s\S]*?<\/script>/gi, " ");
+  s = s.replace(/<style[\s\S]*?<\/style>/gi, " ");
+  s = s.replace(/<noscript[\s\S]*?<\/noscript>/gi, " ");
+  s = s.replace(/<svg[\s\S]*?<\/svg>/gi, " ");
+  s = s.replace(/<!--[\s\S]*?-->/g, " ");
+
+  // Remplace quelques balises par des retours ligne (structure)
+  s = s.replace(/<\/(p|div|section|article|header|footer|li|h1|h2|h3|h4|h5|h6|br)>/gi, "\n");
+
+  // Retire le reste des tags
+  s = s.replace(/<[^>]+>/g, " ");
+
+  // Décode entités courantes
+  s = s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+
+  // Compacte espaces / lignes
+  s = s.replace(/[ \t]+/g, " ");
+  s = s.replace(/\n\s+\n/g, "\n");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  s = s.trim();
+
+  return s;
+}
+
 /** Supabase Admin client (Service Role) */
 function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -96,6 +146,7 @@ function getSupabaseAdmin() {
 
 /**
  * OCR Mistral: POST https://api.mistral.ai/v1/ocr
+ * On log l'erreur précise au lieu de "HTTP 422".
  */
 async function mistralOcrFromUrl({ apiKey, url }) {
   const r = await fetch("https://api.mistral.ai/v1/ocr", {
@@ -113,13 +164,26 @@ async function mistralOcrFromUrl({ apiKey, url }) {
     }),
   });
 
-  const json = await r.json().catch(() => null);
+  const ct = (r.headers.get("content-type") || "").toLowerCase();
+  let payload = null;
+
+  try {
+    if (ct.includes("application/json")) payload = await r.json();
+    else payload = await r.text();
+  } catch {
+    payload = null;
+  }
+
   if (!r.ok) {
-    const msg = json?.message || json?.error || `OCR échoué (HTTP ${r.status})`;
+    const msg =
+      (typeof payload === "object" && payload && (payload.message || payload.error)) ||
+      (typeof payload === "string" && payload.slice(0, 600)) ||
+      `OCR échoué (HTTP ${r.status})`;
+
     throw new Error(msg);
   }
 
-  const pages = Array.isArray(json?.pages) ? json.pages : [];
+  const pages = Array.isArray(payload?.pages) ? payload.pages : [];
   const merged = pages
     .map((p) => `--- Page ${p?.index ?? "?"} ---\n${p?.markdown || ""}`)
     .join("\n\n");
@@ -127,9 +191,16 @@ async function mistralOcrFromUrl({ apiKey, url }) {
   return merged.trim();
 }
 
-async function fetchTextUrl(url) {
+/**
+ * Fetch URL robuste:
+ * - User-Agent / Accept
+ * - support HTML/TXT/JSON
+ * - si HTML => on renvoie du texte nettoyé (pas le code)
+ */
+async function fetchUrlAsUsefulText(url) {
   const r = await fetch(url, {
     method: "GET",
+    redirect: "follow",
     headers: {
       "User-Agent": "EvidenciaBot/1.0 (+https://evidencia-app.vercel.app)",
       Accept: "text/html,text/plain,application/json;q=0.9,*/*;q=0.8",
@@ -139,12 +210,31 @@ async function fetchTextUrl(url) {
   const ct = (r.headers.get("content-type") || "").toLowerCase();
   if (!r.ok) throw new Error(`Fetch URL échoué (HTTP ${r.status})`);
 
-  // On limite aux contenus texte/html/json
-  if (!ct.includes("text/") && !ct.includes("application/json") && !ct.includes("application/xhtml")) {
-    return `Contenu non texte (${ct}).`;
+  // JSON
+  if (ct.includes("application/json")) {
+    const txt = await r.text();
+    return truncate(txt, 12000);
   }
 
-  return await r.text();
+  // Texte / HTML
+  if (ct.includes("text/") || ct.includes("application/xhtml")) {
+    const raw = await r.text();
+
+    // Si HTML => convertir en texte "lisible"
+    if (ct.includes("text/html") || raw.includes("<html") || raw.includes("<body")) {
+      const cleaned = htmlToText(raw);
+      // si la page est trop "vide" après nettoyage, on garde un extrait brut minimum
+      if (!cleaned || cleaned.length < 120) {
+        return truncate(raw, 12000);
+      }
+      return truncate(cleaned, 12000);
+    }
+
+    // texte brut
+    return truncate(raw, 12000);
+  }
+
+  return `Contenu non texte (${ct}).`;
 }
 
 /**
@@ -178,8 +268,8 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
           const md = await mistralOcrFromUrl({ apiKey, url });
           parts.push(`SOURCE (OCR URL) : ${url}\n${truncate(md, 12000)}`);
         } else {
-          const txt = await fetchTextUrl(url);
-          parts.push(`SOURCE (URL TEXTE) : ${url}\n${truncate(txt, 8000)}`);
+          const txt = await fetchUrlAsUsefulText(url);
+          parts.push(`SOURCE (URL TEXTE) : ${url}\n${truncate(txt, 12000)}`);
         }
       }
 
@@ -203,8 +293,8 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
           const md = await mistralOcrFromUrl({ apiKey, url: signedUrl });
           parts.push(`SOURCE (OCR FICHIER) : ${name || path}\n${truncate(md, 12000)}`);
         } else {
-          const txt = await fetchTextUrl(signedUrl);
-          parts.push(`SOURCE (FICHIER TEXTE) : ${name || path}\n${truncate(txt, 8000)}`);
+          const txt = await fetchUrlAsUsefulText(signedUrl);
+          parts.push(`SOURCE (FICHIER TEXTE) : ${name || path}\n${truncate(txt, 12000)}`);
         }
       }
 
