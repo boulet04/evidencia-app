@@ -29,12 +29,9 @@ export default function Admin() {
     return data?.session?.access_token || "";
   }
 
-  async function refreshAll({ keepSelection = true } = {}) {
+  async function refreshAll() {
     setLoading(true);
     setMsg("");
-
-    const prevClientId = selectedClientId;
-    const prevUserId = selectedUserId;
 
     const [
       cRes,
@@ -62,16 +59,6 @@ export default function Admin() {
     setUserAgents(uaRes.data || []);
     setAgentConfigs(cfgRes.data || []);
 
-    if (keepSelection) {
-      const clientOk = (cRes.data || []).some((c) => c.id === prevClientId);
-      setSelectedClientId(clientOk ? prevClientId : "");
-      const userOk = (cuRes.data || []).some((x) => x.user_id === prevUserId && x.client_id === prevClientId);
-      setSelectedUserId(userOk ? prevUserId : "");
-    } else {
-      setSelectedClientId("");
-      setSelectedUserId("");
-    }
-
     setLoading(false);
   }
 
@@ -86,7 +73,7 @@ export default function Admin() {
     return clients.filter((c) => (c?.name || "").toLowerCase().includes(qq));
   }, [clients, q]);
 
-  const usersForClient = useMemo(() => {
+  const usersForSelectedClient = useMemo(() => {
     if (!selectedClientId) return [];
     const links = clientUsers.filter((x) => x.client_id === selectedClientId);
 
@@ -99,6 +86,21 @@ export default function Admin() {
       };
     });
   }, [selectedClientId, clientUsers, profiles]);
+
+  // Si on change de client, on auto-sélectionne le 1er user (si dispo)
+  useEffect(() => {
+    if (!selectedClientId) {
+      setSelectedUserId("");
+      return;
+    }
+    // Si l'utilisateur sélectionné n'appartient plus au client -> reset puis auto-pick
+    const stillOk = usersForSelectedClient.some((u) => u.user_id === selectedUserId);
+    if (!stillOk) {
+      const first = usersForSelectedClient[0]?.user_id || "";
+      setSelectedUserId(first);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedClientId, usersForSelectedClient.length]);
 
   function isAssigned(agentId) {
     if (!selectedUserId) return false;
@@ -117,17 +119,14 @@ export default function Admin() {
 
     const res = await fetch("/api/admin/toggle-user-agent", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ userId: selectedUserId, agentId, assign }),
     });
 
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
-    await refreshAll({ keepSelection: true });
+    await refreshAll();
   }
 
   function openPromptModal(agent) {
@@ -145,10 +144,7 @@ export default function Admin() {
 
     const res = await fetch("/api/admin/save-agent-config", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({
         userId: selectedUserId,
         agentId: modalAgent.id,
@@ -162,7 +158,7 @@ export default function Admin() {
 
     setModalOpen(false);
     setModalAgent(null);
-    await refreshAll({ keepSelection: true });
+    await refreshAll();
   }
 
   async function deleteAgentConversations(agentSlug, agentName) {
@@ -177,10 +173,7 @@ export default function Admin() {
 
     const res = await fetch("/api/admin/delete-agent-conversations", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ userId: selectedUserId, agentSlug }),
     });
 
@@ -223,6 +216,7 @@ export default function Admin() {
                       style={{ ...styles.clientCard, ...(active ? styles.clientCardActive : {}) }}
                       onClick={() => {
                         setSelectedClientId(c.id);
+                        // on reset, le useEffect auto-pick fera le reste
                         setSelectedUserId("");
                       }}
                     >
@@ -244,7 +238,7 @@ export default function Admin() {
               <div style={styles.muted}>Sélectionnez un client.</div>
             ) : (
               <div style={{ display: "grid", gap: 10 }}>
-                {usersForClient.map((u) => {
+                {usersForSelectedClient.map((u) => {
                   const active = u.user_id === selectedUserId;
                   return (
                     <div
@@ -260,7 +254,7 @@ export default function Admin() {
                     </div>
                   );
                 })}
-                {usersForClient.length === 0 && (
+                {usersForSelectedClient.length === 0 && (
                   <div style={styles.muted}>Aucun utilisateur lié.</div>
                 )}
               </div>
@@ -279,9 +273,25 @@ export default function Admin() {
                 : "Sélectionnez un client"}
             </div>
 
+            {/* Diagnostic rapide (utile tant que vous êtes en mise au point) */}
+            <div style={styles.diag}>
+              <div><b>Client sélectionné</b>: {selectedClientId ? "oui" : "non"}</div>
+              <div><b>User sélectionné</b>: {selectedUserId ? "oui" : "non"}</div>
+              <div><b>Agents chargés</b>: {agents.length}</div>
+              <div><b>Liaisons user_agents</b>: {userAgents.length}</div>
+              <div><b>Configs prompt</b>: {agentConfigs.length}</div>
+            </div>
+
             {!selectedUserId ? (
               <div style={styles.muted}>
                 Choisissez un client puis un utilisateur pour gérer les agents, le prompt et les conversations.
+              </div>
+            ) : agents.length === 0 ? (
+              <div style={styles.alert}>
+                Aucun agent n’a été chargé depuis la table <b>agents</b>.
+                <div style={styles.small}>
+                  Cela arrive si la table est vide OU si une policy RLS bloque la lecture côté client.
+                </div>
               </div>
             ) : (
               <div style={styles.grid}>
@@ -345,9 +355,7 @@ export default function Admin() {
       {modalOpen && modalAgent && (
         <div style={styles.modalOverlay} onClick={() => setModalOpen(false)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.modalTitle}>
-              Prompt & données — {modalAgent.name}
-            </div>
+            <div style={styles.modalTitle}>Prompt & données — {modalAgent.name}</div>
 
             <div style={styles.modalLabel}>System prompt</div>
             <textarea
@@ -374,9 +382,7 @@ export default function Admin() {
               </button>
             </div>
 
-            <div style={styles.small}>
-              Note : le JSON doit être valide. Si vous mettez un JSON invalide, l’enregistrement sera refusé.
-            </div>
+            <div style={styles.small}>Le JSON doit être valide.</div>
           </div>
         </div>
       )}
@@ -389,14 +395,12 @@ const styles = {
     minHeight: "100vh",
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
     color: "rgba(238,242,255,.92)",
-    fontFamily: '"Segoe UI", Arial, sans-serif',
+    fontFamily: '"Segoe UI", Arial, sans-serif",
   },
   header: { display: "flex", gap: 12, padding: "18px 18px 0", alignItems: "baseline" },
   brand: { fontWeight: 900, fontSize: 18 },
   title: { opacity: 0.85, fontWeight: 800 },
   wrap: { display: "grid", gridTemplateColumns: "380px 1fr", gap: 16, padding: 18 },
-  left: {},
-  right: {},
   box: {
     border: "1px solid rgba(255,255,255,.12)",
     borderRadius: 16,
@@ -444,11 +448,20 @@ const styles = {
     background: "rgba(255,80,80,.10)",
     fontWeight: 900,
   },
-  grid: {
+  diag: {
     display: "grid",
-    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-    gap: 14,
+    gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+    gap: 10,
+    padding: 10,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(255,255,255,.03)",
+    marginBottom: 12,
+    fontSize: 12,
+    fontWeight: 800,
+    opacity: 0.9,
   },
+  grid: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 14 },
   agentCard: {
     borderRadius: 16,
     border: "1px solid rgba(255,255,255,.12)",
@@ -499,8 +512,6 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
   },
-
-  // Modal
   modalOverlay: {
     position: "fixed",
     inset: 0,
