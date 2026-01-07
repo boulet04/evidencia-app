@@ -395,7 +395,7 @@ const styles = {
     minHeight: "100vh",
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
     color: "rgba(238,242,255,.92)",
-    fontFamily: '"Segoe UI", Arial, sans-serif",
+  fontFamily: "Segoe UI, Arial, sans-serif",
   },
   header: { display: "flex", gap: 12, padding: "18px 18px 0", alignItems: "baseline" },
   brand: { fontWeight: 900, fontSize: 18 },
