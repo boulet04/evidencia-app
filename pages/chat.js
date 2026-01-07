@@ -1,6 +1,6 @@
 // pages/admin/index.js
 import { useEffect, useMemo, useState } from "react";
-import { supabase } from "../../lib/supabaseClient";
+import { supabase } from "../lib/supabaseClient.js";
 
 export default function Admin() {
   const [loading, setLoading] = useState(true);
