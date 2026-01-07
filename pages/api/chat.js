@@ -1,6 +1,6 @@
 // pages/api/chat.js
 import agentPrompts from "../../lib/agentPrompts";
-import { getSupabaseAdmin } from "../../lib/supabaseAdmin";
+import { createClient } from "@supabase/supabase-js";
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -35,7 +35,6 @@ function isLikelyDoc(urlOrPath) {
   const s = safeStr(urlOrPath).trim();
   if (!s) return false;
 
-  // Supporte les URL signées avec querystring : on regarde le pathname
   try {
     const u = new URL(s);
     const p = (u.pathname || "").toLowerCase();
@@ -72,6 +71,19 @@ function truncate(text, maxChars) {
   return t.slice(0, maxChars) + "\n\n[...contenu tronqué...]";
 }
 
+/** Supabase Admin client (Service Role) */
+function getSupabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url) throw new Error("NEXT_PUBLIC_SUPABASE_URL manquant.");
+  if (!serviceKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY manquant.");
+
+  return createClient(url, serviceKey, {
+    auth: { persistSession: false },
+  });
+}
+
 /**
  * OCR Mistral: POST https://api.mistral.ai/v1/ocr
  */
@@ -84,10 +96,7 @@ async function mistralOcrFromUrl({ apiKey, url }) {
     },
     body: JSON.stringify({
       model: process.env.MISTRAL_OCR_MODEL || null,
-      document: {
-        type: "document_url",
-        documentUrl: url,
-      },
+      document: { type: "document_url", documentUrl: url },
     }),
   });
 
@@ -98,11 +107,10 @@ async function mistralOcrFromUrl({ apiKey, url }) {
   }
 
   const pages = Array.isArray(json?.pages) ? json.pages : [];
-  const merged = pages
+  return pages
     .map((p) => `--- Page ${p?.index ?? "?"} ---\n${p?.markdown || ""}`)
-    .join("\n\n");
-
-  return merged.trim();
+    .join("\n\n")
+    .trim();
 }
 
 async function fetchTextUrl(url) {
@@ -113,21 +121,18 @@ async function fetchTextUrl(url) {
   if (!ct.includes("text/") && !ct.includes("application/json")) {
     return `Contenu non texte (${ct}).`;
   }
-
   return await r.text();
 }
 
 /**
- * Rend compatible les sources venant de l'admin:
- * - URL : { type:"url", url:"https://..." } (ou ancien {value:"https://..."})
- * - PDF : { type:"pdf", path:"..." } (bucket implicite agent_sources)
- * - Ancien fichier : { type:"file", bucket:"...", path:"..." }
+ * Sources admin compatibles:
+ * - url : { type:"url", url:"https://..." } (ou {value:"https://..."})
+ * - pdf : { type:"pdf", path:"..." , bucket?:"agent_sources" }
+ * - file (ancien) : { type:"file", bucket:"...", path:"..." }
  */
 async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
   const ctxObj = parseMaybeJson(cfg?.context) || {};
   const sources = Array.isArray(ctxObj?.sources) ? ctxObj.sources : [];
-
-  // Limite stricte pour éviter timeouts
   const limited = sources.slice(0, 3);
 
   const parts = [];
@@ -136,7 +141,6 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
     const type = safeStr(s?.type).trim().toLowerCase();
 
     try {
-      // ---- URL ----
       if (type === "url") {
         const url = safeStr(s?.url || s?.value).trim();
         if (!url) continue;
@@ -150,7 +154,6 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
         }
       }
 
-      // ---- FICHIER (ancien) ----
       if (type === "file") {
         const bucket = safeStr(s?.bucket).trim();
         const path = safeStr(s?.path).trim();
@@ -175,12 +178,10 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
         }
       }
 
-      // ---- PDF (nouveau admin) ----
       if (type === "pdf") {
         const bucket = safeStr(s?.bucket).trim() || "agent_sources";
         const path = safeStr(s?.path).trim();
         const name = safeStr(s?.name).trim();
-
         if (!path) continue;
 
         const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 600);
@@ -193,9 +194,7 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
         parts.push(`SOURCE (OCR PDF) : ${name || path}\n${truncate(md, 12000)}`);
       }
     } catch (e) {
-      parts.push(
-        `SOURCE (ERREUR) : ${type}\n${safeStr(e?.message || e)}`
-      );
+      parts.push(`SOURCE (ERREUR) : ${type}\n${safeStr(e?.message || e)}`);
     }
   }
 
@@ -219,6 +218,7 @@ export default async function handler(req, res) {
 
     const supabaseAdmin = getSupabaseAdmin();
 
+    // Auth user via Bearer token (access_token supabase)
     const token = getBearerToken(req);
     if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
 
@@ -280,11 +280,7 @@ export default async function handler(req, res) {
       `- Si une documentation est fournie (sources), utilise-la en priorité et explique ce que tu en déduis.\n` +
       `- Ne jamais inventer de faits. Si tu ne sais pas, dis-le.\n`;
 
-    const sourcesContext = await buildSourcesContext({
-      apiKey,
-      supabaseAdmin,
-      cfg,
-    });
+    const sourcesContext = await buildSourcesContext({ apiKey, supabaseAdmin, cfg });
 
     const finalSystemPrompt = customPrompt
       ? `${basePrompt}\n\nINSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}${behavioral}${sourcesContext}`
@@ -316,7 +312,6 @@ export default async function handler(req, res) {
 
     const reply = safeStr(json?.choices?.[0]?.message?.content).trim() || "Réponse vide.";
 
-    // IMPORTANT: compat UI — on renvoie plusieurs clés possibles
     return res.status(200).json({
       reply,
       answer: reply,
