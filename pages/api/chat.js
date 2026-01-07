@@ -31,10 +31,20 @@ function parseMaybeJson(v) {
   return null;
 }
 
+function normalizeUrlMaybe(u) {
+  const s = safeStr(u).trim();
+  if (!s) return "";
+  if (s.startsWith("http://") || s.startsWith("https://")) return s;
+  // Si l’utilisateur met "www.bcontact.fr"
+  if (s.startsWith("www.")) return "https://" + s;
+  return s;
+}
+
 function isLikelyDoc(urlOrPath) {
   const s = safeStr(urlOrPath).trim();
   if (!s) return false;
 
+  // Supporte les URL signées avec querystring : on regarde le pathname
   try {
     const u = new URL(s);
     const p = (u.pathname || "").toLowerCase();
@@ -96,7 +106,10 @@ async function mistralOcrFromUrl({ apiKey, url }) {
     },
     body: JSON.stringify({
       model: process.env.MISTRAL_OCR_MODEL || null,
-      document: { type: "document_url", documentUrl: url },
+      document: {
+        type: "document_url",
+        documentUrl: url,
+      },
     }),
   });
 
@@ -107,20 +120,30 @@ async function mistralOcrFromUrl({ apiKey, url }) {
   }
 
   const pages = Array.isArray(json?.pages) ? json.pages : [];
-  return pages
+  const merged = pages
     .map((p) => `--- Page ${p?.index ?? "?"} ---\n${p?.markdown || ""}`)
-    .join("\n\n")
-    .trim();
+    .join("\n\n");
+
+  return merged.trim();
 }
 
 async function fetchTextUrl(url) {
-  const r = await fetch(url, { method: "GET" });
-  const ct = r.headers.get("content-type") || "";
+  const r = await fetch(url, {
+    method: "GET",
+    headers: {
+      "User-Agent": "EvidenciaBot/1.0 (+https://evidencia-app.vercel.app)",
+      Accept: "text/html,text/plain,application/json;q=0.9,*/*;q=0.8",
+    },
+  });
+
+  const ct = (r.headers.get("content-type") || "").toLowerCase();
   if (!r.ok) throw new Error(`Fetch URL échoué (HTTP ${r.status})`);
 
-  if (!ct.includes("text/") && !ct.includes("application/json")) {
+  // On limite aux contenus texte/html/json
+  if (!ct.includes("text/") && !ct.includes("application/json") && !ct.includes("application/xhtml")) {
     return `Contenu non texte (${ct}).`;
   }
+
   return await r.text();
 }
 
@@ -129,10 +152,14 @@ async function fetchTextUrl(url) {
  * - url : { type:"url", url:"https://..." } (ou {value:"https://..."})
  * - pdf : { type:"pdf", path:"..." , bucket?:"agent_sources" }
  * - file (ancien) : { type:"file", bucket:"...", path:"..." }
+ *
+ * Retourne { text, debug }
  */
 async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
   const ctxObj = parseMaybeJson(cfg?.context) || {};
   const sources = Array.isArray(ctxObj?.sources) ? ctxObj.sources : [];
+
+  // Limite stricte pour éviter timeouts serverless
   const limited = sources.slice(0, 3);
 
   const parts = [];
@@ -141,19 +168,22 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
     const type = safeStr(s?.type).trim().toLowerCase();
 
     try {
+      // ---- URL ----
       if (type === "url") {
-        const url = safeStr(s?.url || s?.value).trim();
+        const rawUrl = safeStr(s?.url || s?.value).trim();
+        const url = normalizeUrlMaybe(rawUrl);
         if (!url) continue;
 
         if (isLikelyDoc(url)) {
           const md = await mistralOcrFromUrl({ apiKey, url });
-          parts.push(`SOURCE (OCR) : ${url}\n${truncate(md, 12000)}`);
+          parts.push(`SOURCE (OCR URL) : ${url}\n${truncate(md, 12000)}`);
         } else {
           const txt = await fetchTextUrl(url);
           parts.push(`SOURCE (URL TEXTE) : ${url}\n${truncate(txt, 8000)}`);
         }
       }
 
+      // ---- FICHIER (ancien) ----
       if (type === "file") {
         const bucket = safeStr(s?.bucket).trim();
         const path = safeStr(s?.path).trim();
@@ -171,17 +201,19 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
 
         if (isLikelyDoc(path) || isLikelyDoc(name)) {
           const md = await mistralOcrFromUrl({ apiKey, url: signedUrl });
-          parts.push(`SOURCE (OCR) : ${name || path}\n${truncate(md, 12000)}`);
+          parts.push(`SOURCE (OCR FICHIER) : ${name || path}\n${truncate(md, 12000)}`);
         } else {
           const txt = await fetchTextUrl(signedUrl);
           parts.push(`SOURCE (FICHIER TEXTE) : ${name || path}\n${truncate(txt, 8000)}`);
         }
       }
 
+      // ---- PDF (nouveau admin) ----
       if (type === "pdf") {
         const bucket = safeStr(s?.bucket).trim() || "agent_sources";
         const path = safeStr(s?.path).trim();
         const name = safeStr(s?.name).trim();
+
         if (!path) continue;
 
         const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 600);
@@ -198,12 +230,15 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
     }
   }
 
-  if (parts.length === 0) return "";
+  const text =
+    parts.length === 0
+      ? ""
+      : `\n\nDOCUMENTATION FOURNIE (à utiliser en priorité si pertinent) :\n` +
+        parts.map((p, i) => `\n[Source ${i + 1}]\n${p}\n`).join("\n");
 
-  return (
-    `\n\nDOCUMENTATION FOURNIE (à utiliser en priorité si pertinent) :\n` +
-    parts.map((p, i) => `\n[Source ${i + 1}]\n${p}\n`).join("\n")
-  );
+  const debug = parts.join("\n\n---\n\n").slice(0, 4000);
+
+  return { text, debug };
 }
 
 export default async function handler(req, res) {
@@ -218,7 +253,7 @@ export default async function handler(req, res) {
 
     const supabaseAdmin = getSupabaseAdmin();
 
-    // Auth user via Bearer token (access_token supabase)
+    // Auth user via Bearer token (access_token Supabase)
     const token = getBearerToken(req);
     if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
 
@@ -228,6 +263,7 @@ export default async function handler(req, res) {
     }
     const userId = userData.user.id;
 
+    // Body
     const { message, agentSlug } = req.body || {};
     const slug = safeStr(agentSlug).trim().toLowerCase();
     const userMsg = safeStr(message).trim();
@@ -235,6 +271,7 @@ export default async function handler(req, res) {
     if (!slug) return res.status(400).json({ error: "Aucun agent sélectionné." });
     if (!userMsg) return res.status(400).json({ error: "Message vide." });
 
+    // Charger agent
     const { data: agent, error: agentErr } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
@@ -243,6 +280,7 @@ export default async function handler(req, res) {
 
     if (agentErr || !agent) return res.status(404).json({ error: "Agent introuvable." });
 
+    // Vérifier assignation
     const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
       .select("user_id, agent_id")
@@ -253,6 +291,7 @@ export default async function handler(req, res) {
     if (assignErr) return res.status(500).json({ error: "Erreur assignation (user_agents)." });
     if (!assignment) return res.status(403).json({ error: "Accès interdit : agent non assigné." });
 
+    // Prompt personnalisé + context (sources)
     const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -280,12 +319,17 @@ export default async function handler(req, res) {
       `- Si une documentation est fournie (sources), utilise-la en priorité et explique ce que tu en déduis.\n` +
       `- Ne jamais inventer de faits. Si tu ne sais pas, dis-le.\n`;
 
-    const sourcesContext = await buildSourcesContext({ apiKey, supabaseAdmin, cfg });
+    const { text: sourcesContext, debug: sourcesDebug } = await buildSourcesContext({
+      apiKey,
+      supabaseAdmin,
+      cfg,
+    });
 
     const finalSystemPrompt = customPrompt
       ? `${basePrompt}\n\nINSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}${behavioral}${sourcesContext}`
       : `${basePrompt}${behavioral}${sourcesContext}`;
 
+    // Appel Mistral Chat Completions
     const r = await fetch("https://api.mistral.ai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -307,6 +351,7 @@ export default async function handler(req, res) {
       return res.status(500).json({
         error: "Erreur Mistral",
         detail: json?.message || json?.error || JSON.stringify(json) || `HTTP ${r.status}`,
+        sources_debug: sourcesDebug || "",
       });
     }
 
@@ -317,6 +362,7 @@ export default async function handler(req, res) {
       answer: reply,
       content: reply,
       ok: true,
+      sources_debug: sourcesDebug || "",
     });
   } catch (err) {
     console.error("Erreur API /api/chat :", err);
