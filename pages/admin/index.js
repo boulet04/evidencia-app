@@ -35,7 +35,8 @@ export default function Admin() {
 
   async function logout() {
     await supabase.auth.signOut();
-    window.location.href = "/"; // ou /login si vous avez une page dédiée
+    // IMPORTANT: redirection vers la page de connexion habituelle
+    window.location.href = "/login";
   }
 
   function goBack() {
@@ -661,7 +662,6 @@ const styles = {
   },
   agentTop: { display: "flex", gap: 12, alignItems: "center", marginBottom: 12 },
 
-  // AVATAR: on veut voir la tête -> plus grand + position vers le haut
   avatarWrap: {
     width: 64,
     height: 64,
