@@ -1,7 +1,11 @@
+// pages/admin/index.js
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/router";
 import { supabase } from "../../lib/supabaseClient";
 
 export default function Admin() {
+  const router = useRouter();
+
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState("");
 
@@ -30,6 +34,16 @@ export default function Admin() {
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
     return data?.session?.access_token || "";
+  }
+
+  async function handleLogout() {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) return alert(`Erreur déconnexion : ${error.message || String(error)}`);
+      router.push("/login");
+    } catch (e) {
+      alert(`Erreur déconnexion : ${(e?.message || e || "").toString()}`);
+    }
   }
 
   async function refreshAll() {
@@ -254,9 +268,31 @@ export default function Admin() {
 
   return (
     <main style={styles.page}>
-      <div style={styles.header}>
-        <div style={styles.brand}>Evidenc’IA</div>
-        <div style={styles.title}>Console administrateur</div>
+      {/* HEADER conforme à tes flèches :
+          - gauche : Retour, /images/logolong.png, Console administrateur
+          - droite : Déconnexion
+      */}
+      <div style={styles.topBar}>
+        <div style={styles.topBarLeft}>
+          <button style={styles.backBtn} onClick={() => router.back()} title="Retour">
+            ← Retour
+          </button>
+
+          <img
+            src="/images/logolong.png"
+            alt="Evidenc’IA"
+            draggable={false}
+            style={styles.logoLong}
+          />
+
+          <div style={styles.topTitle}>Console administrateur</div>
+        </div>
+
+        <div style={styles.topBarRight}>
+          <button style={styles.logoutBtn} onClick={handleLogout} title="Déconnexion">
+            Déconnexion
+          </button>
+        </div>
       </div>
 
       <div style={styles.wrap}>
@@ -359,9 +395,14 @@ export default function Admin() {
                   return (
                     <article key={a.id} style={styles.agentCard}>
                       <div style={styles.agentTop}>
-                        <div style={styles.avatarWrap}>
+                        {/* Avatar rond + cadrage visage */}
+                        <div style={styles.avatarBubble}>
                           {a.avatar_url ? (
-                            <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
+                            <img
+                              src={a.avatar_url}
+                              alt={a.name}
+                              style={styles.avatarImg}
+                            />
                           ) : (
                             <div style={styles.avatarFallback} />
                           )}
@@ -513,10 +554,73 @@ const styles = {
     color: "rgba(238,242,255,.92)",
     fontFamily: '"Segoe UI", Arial, sans-serif',
   },
-  header: { display: "flex", gap: 12, padding: "18px 18px 0", alignItems: "baseline" },
-  brand: { fontWeight: 900, fontSize: 18 },
-  title: { opacity: 0.85, fontWeight: 800 },
+
+  // ===== TOP BAR (conforme à ta capture) =====
+  topBar: {
+    position: "sticky",
+    top: 0,
+    zIndex: 50,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    height: 64,
+    padding: "10px 18px",
+    background: "linear-gradient(180deg, rgba(0,0,0,0.70), rgba(0,0,0,0.35))",
+    backdropFilter: "blur(10px)",
+    borderBottom: "1px solid rgba(255,255,255,0.08)",
+  },
+  topBarLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: 14,
+    minWidth: 0,
+  },
+  topBarRight: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+  },
+  backBtn: {
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(255,255,255,0.06)",
+    color: "rgba(255,255,255,0.92)",
+    padding: "8px 12px",
+    borderRadius: 999,
+    fontSize: 14,
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  logoLong: {
+    height: 34,
+    width: "auto",
+    objectFit: "contain",
+    display: "block",
+    filter: "drop-shadow(0 8px 18px rgba(0,0,0,0.45))",
+  },
+  topTitle: {
+    color: "rgba(255,255,255,0.95)",
+    fontSize: 16,
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    maxWidth: "52vw",
+  },
+  logoutBtn: {
+    border: "1px solid rgba(255, 120, 120, 0.20)",
+    background: "rgba(255, 0, 0, 0.10)",
+    color: "rgba(255,255,255,0.92)",
+    padding: "8px 12px",
+    borderRadius: 999,
+    fontSize: 14,
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+
   wrap: { display: "grid", gridTemplateColumns: "420px 1fr", gap: 16, padding: 18 },
+  left: {},
+  right: {},
+
   box: {
     border: "1px solid rgba(255,255,255,.12)",
     borderRadius: 16,
@@ -601,9 +705,31 @@ const styles = {
     boxShadow: "0 14px 40px rgba(0,0,0,.45)",
   },
   agentTop: { display: "flex", gap: 12, alignItems: "center", marginBottom: 12 },
-  avatarWrap: { width: 54, height: 54, borderRadius: 16, overflow: "hidden", border: "1px solid rgba(255,255,255,.12)" },
-  avatar: { width: "100%", height: "100%", objectFit: "cover" },
-  avatarFallback: { width: "100%", height: "100%", background: "rgba(255,255,255,.06)" },
+
+  // Avatar “bulle” : rond + on voit le visage
+  avatarBubble: {
+    width: 54,
+    height: 54,
+    borderRadius: 999,
+    overflow: "hidden",
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.06)",
+    boxShadow: "0 12px 24px rgba(0,0,0,.35)",
+    flex: "0 0 auto",
+  },
+  avatarImg: {
+    width: "100%",
+    height: "100%",
+    display: "block",
+    objectFit: "cover",
+    objectPosition: "center 18%", // remonte l’image => visage visible
+  },
+  avatarFallback: {
+    width: "100%",
+    height: "100%",
+    background: "rgba(255,255,255,.06)",
+  },
+
   agentName: { fontWeight: 900, fontSize: 16 },
   agentRole: { fontWeight: 800, opacity: 0.8, fontSize: 12, marginTop: 2 },
   agentActions: { display: "grid", gap: 10 },
