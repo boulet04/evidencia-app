@@ -43,7 +43,6 @@ function normalizeUrlMaybe(u) {
   if (s.startsWith("http://") || s.startsWith("https://")) return s;
   if (s.startsWith("//")) return "https:" + s;
   if (s.startsWith("www.")) return "https://" + s;
-  // si l'utilisateur tape juste "bcontact.fr"
   if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(s)) return "https://" + s;
   return s;
 }
@@ -52,7 +51,7 @@ function isLikelyDoc(urlOrPath) {
   const s = safeStr(urlOrPath).trim();
   if (!s) return false;
 
-  const check = (p) => {
+  const ends = (p) => {
     const x = (p || "").toLowerCase();
     return (
       x.endsWith(".pdf") ||
@@ -62,7 +61,6 @@ function isLikelyDoc(urlOrPath) {
       x.endsWith(".webp") ||
       x.endsWith(".tiff") ||
       x.endsWith(".bmp") ||
-      x.endsWith(".avif") ||
       x.endsWith(".docx") ||
       x.endsWith(".pptx")
     );
@@ -70,23 +68,9 @@ function isLikelyDoc(urlOrPath) {
 
   try {
     const u = new URL(s);
-    return check(u.pathname || "");
+    return ends(u.pathname || "");
   } catch {
-    return check(s);
-  }
-}
-
-function isLikelyImage(urlOrPath) {
-  const s = safeStr(urlOrPath).trim();
-  if (!s) return false;
-
-  const check = (p) => /\.(png|jpg|jpeg|webp|tiff|bmp|avif)$/i.test((p || "").toLowerCase());
-
-  try {
-    const u = new URL(s);
-    return check(u.pathname || "");
-  } catch {
-    return check(s);
+    return ends(s);
   }
 }
 
@@ -102,26 +86,20 @@ function truncate(text, maxChars) {
  * - enlève tags
  * - décode quelques entités HTML courantes
  * - compacte les espaces
- * Objectif: donner à l'agent le contenu "lisible" et pas le code Wix.
  */
 function htmlToText(html) {
   let s = safeStr(html);
   if (!s) return "";
 
-  // Retire blocs inutiles (grosses sources de bruit Wix)
   s = s.replace(/<script[\s\S]*?<\/script>/gi, " ");
   s = s.replace(/<style[\s\S]*?<\/style>/gi, " ");
   s = s.replace(/<noscript[\s\S]*?<\/noscript>/gi, " ");
   s = s.replace(/<svg[\s\S]*?<\/svg>/gi, " ");
   s = s.replace(/<!--[\s\S]*?-->/g, " ");
 
-  // Remplace quelques balises par des retours ligne (structure)
   s = s.replace(/<\/(p|div|section|article|header|footer|li|h1|h2|h3|h4|h5|h6|br)>/gi, "\n");
-
-  // Retire le reste des tags
   s = s.replace(/<[^>]+>/g, " ");
 
-  // Décode entités courantes
   s = s
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
@@ -130,7 +108,6 @@ function htmlToText(html) {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
 
-  // Compacte espaces / lignes
   s = s.replace(/[ \t]+/g, " ");
   s = s.replace(/\n\s+\n/g, "\n");
   s = s.replace(/\n{3,}/g, "\n\n");
@@ -154,18 +131,18 @@ function getSupabaseAdmin() {
 
 /**
  * OCR Mistral: POST https://api.mistral.ai/v1/ocr
- *
- * IMPORTANT:
- * - Pour un PDF/DOCX/PPTX : document: { type:"document_url", document_url:"..." }
- * - Pour une image       : document: { type:"image_url", image_url:"..." }
- * - "model" doit être une chaîne valide (pas null)
+ * IMPORTANT: champs snake_case (document_url / image_url), sinon 422.
  */
 async function mistralOcrFromUrl({ apiKey, url }) {
-  const model = safeStr(process.env.MISTRAL_OCR_MODEL).trim() || "mistral-ocr-latest";
-
-  const document = isLikelyImage(url)
-    ? { type: "image_url", image_url: url }
-    : { type: "document_url", document_url: url };
+  const body = {
+    model: process.env.MISTRAL_OCR_MODEL || "mistral-ocr-latest",
+    document: {
+      type: "document_url",
+      document_url: url,
+    },
+    // table_format: null, // optionnel
+    // include_image_base64: false, // optionnel
+  };
 
   const r = await fetch("https://api.mistral.ai/v1/ocr", {
     method: "POST",
@@ -173,18 +150,15 @@ async function mistralOcrFromUrl({ apiKey, url }) {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model,
-      document,
-      include_image_base64: false,
-    }),
+    body: JSON.stringify(body),
   });
 
   const ct = (r.headers.get("content-type") || "").toLowerCase();
   let payload = null;
 
   try {
-    payload = ct.includes("application/json") ? await r.json() : await r.text();
+    if (ct.includes("application/json")) payload = await r.json();
+    else payload = await r.text();
   } catch {
     payload = null;
   }
@@ -209,14 +183,14 @@ async function mistralOcrFromUrl({ apiKey, url }) {
  * Fetch URL robuste:
  * - User-Agent / Accept
  * - support HTML/TXT/JSON
- * - si HTML => on renvoie du texte nettoyé (pas le code)
+ * - si HTML => on renvoie du texte nettoyé
  */
 async function fetchUrlAsUsefulText(url) {
   const r = await fetch(url, {
     method: "GET",
     redirect: "follow",
     headers: {
-      "User-Agent": "EvidenciaBot/1.0 (+https://evidencia-app.vercel.app)",
+      "User-Agent": "EvidenciaBot/1.0 (+https://app.evidencia.me)",
       Accept: "text/html,text/plain,application/json;q=0.9,*/*;q=0.8",
     },
   });
@@ -224,27 +198,18 @@ async function fetchUrlAsUsefulText(url) {
   const ct = (r.headers.get("content-type") || "").toLowerCase();
   if (!r.ok) throw new Error(`Fetch URL échoué (HTTP ${r.status})`);
 
-  // JSON
   if (ct.includes("application/json")) {
     const txt = await r.text();
     return truncate(txt, 12000);
   }
 
-  // Texte / HTML
   if (ct.includes("text/") || ct.includes("application/xhtml")) {
     const raw = await r.text();
-
-    // Si HTML => convertir en texte "lisible"
     if (ct.includes("text/html") || raw.includes("<html") || raw.includes("<body")) {
       const cleaned = htmlToText(raw);
-      // si la page est trop "vide" après nettoyage, on garde un extrait brut minimum
-      if (!cleaned || cleaned.length < 120) {
-        return truncate(raw, 12000);
-      }
+      if (!cleaned || cleaned.length < 120) return truncate(raw, 12000);
       return truncate(cleaned, 12000);
     }
-
-    // texte brut
     return truncate(raw, 12000);
   }
 
@@ -285,8 +250,6 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
           const txt = await fetchUrlAsUsefulText(url);
           parts.push(`SOURCE (URL TEXTE) : ${url}\n${truncate(txt, 12000)}`);
         }
-
-        continue;
       }
 
       // ---- FICHIER (ancien) ----
@@ -297,8 +260,7 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
 
         if (!bucket || !path) continue;
 
-        // URL signée plus longue (robuste)
-        const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 1800);
+        const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 600);
         if (error || !data?.signedUrl) {
           parts.push(`SOURCE (FICHIER) : ${name || path}\nImpossible de générer l’URL signée.`);
           continue;
@@ -313,8 +275,6 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
           const txt = await fetchUrlAsUsefulText(signedUrl);
           parts.push(`SOURCE (FICHIER TEXTE) : ${name || path}\n${truncate(txt, 12000)}`);
         }
-
-        continue;
       }
 
       // ---- PDF (nouveau admin) ----
@@ -325,8 +285,7 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
 
         if (!path) continue;
 
-        // URL signée plus longue (robuste)
-        const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 1800);
+        const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 600);
         if (error || !data?.signedUrl) {
           parts.push(`SOURCE (PDF) : ${name || path}\nImpossible de générer l’URL signée.`);
           continue;
@@ -334,16 +293,9 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
 
         const md = await mistralOcrFromUrl({ apiKey, url: data.signedUrl });
         parts.push(`SOURCE (OCR PDF) : ${name || path}\n${truncate(md, 12000)}`);
-
-        continue;
-      }
-
-      // ---- Type inconnu ----
-      if (type) {
-        parts.push(`SOURCE (INFO) : ${type}\nType de source non géré.`);
       }
     } catch (e) {
-      parts.push(`SOURCE (ERREUR) : ${type || "inconnu"}\n${safeStr(e?.message || e)}`);
+      parts.push(`SOURCE (ERREUR) : ${type}\n${safeStr(e?.message || e)}`);
     }
   }
 
@@ -370,7 +322,6 @@ export default async function handler(req, res) {
 
     const supabaseAdmin = getSupabaseAdmin();
 
-    // Auth user via Bearer token (access_token Supabase)
     const token = getBearerToken(req);
     if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
 
@@ -380,7 +331,6 @@ export default async function handler(req, res) {
     }
     const userId = userData.user.id;
 
-    // Body
     const { message, agentSlug } = req.body || {};
     const slug = safeStr(agentSlug).trim().toLowerCase();
     const userMsg = safeStr(message).trim();
@@ -388,7 +338,6 @@ export default async function handler(req, res) {
     if (!slug) return res.status(400).json({ error: "Aucun agent sélectionné." });
     if (!userMsg) return res.status(400).json({ error: "Message vide." });
 
-    // Charger agent
     const { data: agent, error: agentErr } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
@@ -397,7 +346,6 @@ export default async function handler(req, res) {
 
     if (agentErr || !agent) return res.status(404).json({ error: "Agent introuvable." });
 
-    // Vérifier assignation
     const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
       .select("user_id, agent_id")
@@ -408,7 +356,6 @@ export default async function handler(req, res) {
     if (assignErr) return res.status(500).json({ error: "Erreur assignation (user_agents)." });
     if (!assignment) return res.status(403).json({ error: "Accès interdit : agent non assigné." });
 
-    // Prompt personnalisé + context (sources)
     const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -432,9 +379,10 @@ export default async function handler(req, res) {
     const behavioral =
       `\n\nRÈGLES DE STYLE :\n` +
       `- Ne répète pas “bonjour” à chaque réponse. Salue au maximum une fois au début d’une nouvelle conversation.\n` +
-      `- Réponds directement, de manière professionnelle, sans te représenter (“je suis Emma…”) sauf si on te le demande.\n` +
+      `- Réponds directement, de manière professionnelle, sans te représenter (“je suis …”) sauf si on te le demande.\n` +
       `- Si une documentation est fournie (sources), utilise-la en priorité et explique ce que tu en déduis.\n` +
-      `- Ne jamais inventer de faits. Si tu ne sais pas, dis-le.\n`;
+      `- Ne jamais inventer de faits. Si tu ne sais pas, dis-le.\n` +
+      `- Format de sortie obligatoire : texte simple, paragraphes courts, listes à puces avec retours à la ligne. Pas de Markdown (pas de ###, pas de **).\n`;
 
     const { text: sourcesContext, debug: sourcesDebug } = await buildSourcesContext({
       apiKey,
@@ -446,7 +394,6 @@ export default async function handler(req, res) {
       ? `${basePrompt}\n\nINSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}${behavioral}${sourcesContext}`
       : `${basePrompt}${behavioral}${sourcesContext}`;
 
-    // Appel Mistral Chat Completions
     const r = await fetch("https://api.mistral.ai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -455,7 +402,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: process.env.MISTRAL_MODEL || "mistral-small-latest",
-        temperature: 0.7,
+        temperature: 0.5,
         messages: [
           { role: "system", content: finalSystemPrompt },
           { role: "user", content: userMsg },
