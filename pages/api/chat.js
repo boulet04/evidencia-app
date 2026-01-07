@@ -8,18 +8,21 @@ export default async function handler(req, res) {
 
   if (!authHeader) return res.status(401).json({ error: "Non autorisé" });
   const token = authHeader.split(" ")[1];
-  const { data: { user } } = await supabase.auth.getUser(token);
-  if (!user) return res.status(401).json({ error: "Session invalide" });
+  const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+  
+  if (authError || !user) return res.status(401).json({ error: "Session invalide" });
 
   try {
-    // 1. On récupère le prompt et le contenu des documents (extracted_content)
-    const { data: config } = await supabase
+    // 1. Récupérer la configuration complète de l'agent pour cet utilisateur
+    const { data: config, error: configError } = await supabase
       .from("client_agent_configs")
       .select("system_prompt, extracted_content")
       .eq("user_id", user.id)
       .single();
 
-    // 2. Appel à Mistral avec le contexte réel
+    if (configError) throw new Error("Configuration agent introuvable");
+
+    // 2. Appel à l'API Mistral avec le contexte (PDF/URL extraits dans l'Admin)
     const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -31,7 +34,7 @@ export default async function handler(req, res) {
         messages: [
           { 
             role: "system", 
-            content: `${config?.system_prompt || "Tu es un assistant."}\n\nVOICI TES DOCUMENTS DE RÉFÉRENCE :\n${config?.extracted_content || "Aucun document fourni."}` 
+            content: `${config.system_prompt}\n\nDOCUMENTS ET SOURCES DE RÉFÉRENCE :\n${config.extracted_content || "Aucun document n'a été indexé pour cet agent."}` 
           },
           { role: "user", content: message }
         ],
@@ -40,15 +43,17 @@ export default async function handler(req, res) {
     });
 
     const data = await response.json();
+    if (!data.choices) throw new Error("Erreur de réponse Mistral");
+    
     const reply = data.choices[0].message.content;
 
-    // 3. Sauvegarde dans l'historique réel (table messages)
+    // 3. Enregistrement dans la table "messages" pour l'historique réel
     await supabase.from("messages").insert([
       { conversation_id: conversationId, role: "user", content: message },
       { conversation_id: conversationId, role: "assistant", content: reply }
     ]);
 
-    // 4. Mise à jour de la conversation pour qu'elle remonte en haut de l'historique
+    // 4. Mise à jour de la conversation pour le tri par date
     await supabase.from("conversations")
       .update({ updated_at: new Date().toISOString() })
       .eq("id", conversationId);
@@ -56,7 +61,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ reply });
 
   } catch (error) {
-    console.error("Erreur Chat:", error);
-    return res.status(500).json({ error: "L'agent est indisponible." });
+    console.error("Erreur API Chat:", error);
+    return res.status(500).json({ error: "L'agent ne répond pas. Vérifiez la configuration dans l'Admin." });
   }
 }
