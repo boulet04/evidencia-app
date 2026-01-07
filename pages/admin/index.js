@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { supabase } from "../lib/supabaseClient";
+import { supabase } from "../../lib/supabaseClient";
 
 export default function Admin() {
   const [loading, setLoading] = useState(true);
@@ -42,7 +42,6 @@ export default function Admin() {
     setClientUsers(cuRes.data || []);
     setProfiles(pRes.data || []);
 
-    // garder sélection si possible
     if (keepSelection && prevClientId) {
       const stillExists = (cRes.data || []).some((c) => c.id === prevClientId);
       setSelectedClientId(stillExists ? prevClientId : "");
@@ -103,7 +102,6 @@ export default function Admin() {
       return;
     }
 
-    // Nettoyage UI
     if (selectedClientId === clientId) setSelectedClientId("");
     setQ("");
     await refreshAll({ keepSelection: false });
@@ -295,7 +293,10 @@ const styles = {
     background: "rgba(255,255,255,.03)",
     cursor: "pointer",
   },
-  clientCardActive: { borderColor: "rgba(255,140,40,.35)", background: "rgba(255,140,40,.08)" },
+  clientCardActive: {
+    borderColor: "rgba(255,140,40,.35)",
+    background: "rgba(255,140,40,.08)",
+  },
   clientName: { fontWeight: 900 },
   small: { fontSize: 12, opacity: 0.75, fontWeight: 800 },
   muted: { opacity: 0.75, fontWeight: 800, fontSize: 13 },
