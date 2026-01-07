@@ -52,33 +52,41 @@ function isLikelyDoc(urlOrPath) {
   const s = safeStr(urlOrPath).trim();
   if (!s) return false;
 
+  const check = (p) => {
+    const x = (p || "").toLowerCase();
+    return (
+      x.endsWith(".pdf") ||
+      x.endsWith(".png") ||
+      x.endsWith(".jpg") ||
+      x.endsWith(".jpeg") ||
+      x.endsWith(".webp") ||
+      x.endsWith(".tiff") ||
+      x.endsWith(".bmp") ||
+      x.endsWith(".avif") ||
+      x.endsWith(".docx") ||
+      x.endsWith(".pptx")
+    );
+  };
+
   try {
     const u = new URL(s);
-    const p = (u.pathname || "").toLowerCase();
-    return (
-      p.endsWith(".pdf") ||
-      p.endsWith(".png") ||
-      p.endsWith(".jpg") ||
-      p.endsWith(".jpeg") ||
-      p.endsWith(".webp") ||
-      p.endsWith(".tiff") ||
-      p.endsWith(".bmp") ||
-      p.endsWith(".docx") ||
-      p.endsWith(".pptx")
-    );
+    return check(u.pathname || "");
   } catch {
-    const p = s.toLowerCase();
-    return (
-      p.endsWith(".pdf") ||
-      p.endsWith(".png") ||
-      p.endsWith(".jpg") ||
-      p.endsWith(".jpeg") ||
-      p.endsWith(".webp") ||
-      p.endsWith(".tiff") ||
-      p.endsWith(".bmp") ||
-      p.endsWith(".docx") ||
-      p.endsWith(".pptx")
-    );
+    return check(s);
+  }
+}
+
+function isLikelyImage(urlOrPath) {
+  const s = safeStr(urlOrPath).trim();
+  if (!s) return false;
+
+  const check = (p) => /\.(png|jpg|jpeg|webp|tiff|bmp|avif)$/i.test((p || "").toLowerCase());
+
+  try {
+    const u = new URL(s);
+    return check(u.pathname || "");
+  } catch {
+    return check(s);
   }
 }
 
@@ -146,9 +154,19 @@ function getSupabaseAdmin() {
 
 /**
  * OCR Mistral: POST https://api.mistral.ai/v1/ocr
- * On log l'erreur précise au lieu de "HTTP 422".
+ *
+ * IMPORTANT:
+ * - Pour un PDF/DOCX/PPTX : document: { type:"document_url", document_url:"..." }
+ * - Pour une image       : document: { type:"image_url", image_url:"..." }
+ * - "model" doit être une chaîne valide (pas null)
  */
 async function mistralOcrFromUrl({ apiKey, url }) {
+  const model = safeStr(process.env.MISTRAL_OCR_MODEL).trim() || "mistral-ocr-latest";
+
+  const document = isLikelyImage(url)
+    ? { type: "image_url", image_url: url }
+    : { type: "document_url", document_url: url };
+
   const r = await fetch("https://api.mistral.ai/v1/ocr", {
     method: "POST",
     headers: {
@@ -156,11 +174,9 @@ async function mistralOcrFromUrl({ apiKey, url }) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: process.env.MISTRAL_OCR_MODEL || null,
-      document: {
-        type: "document_url",
-        documentUrl: url,
-      },
+      model,
+      document,
+      include_image_base64: false,
     }),
   });
 
@@ -168,8 +184,7 @@ async function mistralOcrFromUrl({ apiKey, url }) {
   let payload = null;
 
   try {
-    if (ct.includes("application/json")) payload = await r.json();
-    else payload = await r.text();
+    payload = ct.includes("application/json") ? await r.json() : await r.text();
   } catch {
     payload = null;
   }
@@ -177,9 +192,8 @@ async function mistralOcrFromUrl({ apiKey, url }) {
   if (!r.ok) {
     const msg =
       (typeof payload === "object" && payload && (payload.message || payload.error)) ||
-      (typeof payload === "string" && payload.slice(0, 600)) ||
+      (typeof payload === "string" && payload.slice(0, 1200)) ||
       `OCR échoué (HTTP ${r.status})`;
-
     throw new Error(msg);
   }
 
@@ -271,6 +285,8 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
           const txt = await fetchUrlAsUsefulText(url);
           parts.push(`SOURCE (URL TEXTE) : ${url}\n${truncate(txt, 12000)}`);
         }
+
+        continue;
       }
 
       // ---- FICHIER (ancien) ----
@@ -281,7 +297,8 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
 
         if (!bucket || !path) continue;
 
-        const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 600);
+        // URL signée plus longue (robuste)
+        const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 1800);
         if (error || !data?.signedUrl) {
           parts.push(`SOURCE (FICHIER) : ${name || path}\nImpossible de générer l’URL signée.`);
           continue;
@@ -296,6 +313,8 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
           const txt = await fetchUrlAsUsefulText(signedUrl);
           parts.push(`SOURCE (FICHIER TEXTE) : ${name || path}\n${truncate(txt, 12000)}`);
         }
+
+        continue;
       }
 
       // ---- PDF (nouveau admin) ----
@@ -306,7 +325,8 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
 
         if (!path) continue;
 
-        const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 600);
+        // URL signée plus longue (robuste)
+        const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(path, 1800);
         if (error || !data?.signedUrl) {
           parts.push(`SOURCE (PDF) : ${name || path}\nImpossible de générer l’URL signée.`);
           continue;
@@ -314,9 +334,16 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
 
         const md = await mistralOcrFromUrl({ apiKey, url: data.signedUrl });
         parts.push(`SOURCE (OCR PDF) : ${name || path}\n${truncate(md, 12000)}`);
+
+        continue;
+      }
+
+      // ---- Type inconnu ----
+      if (type) {
+        parts.push(`SOURCE (INFO) : ${type}\nType de source non géré.`);
       }
     } catch (e) {
-      parts.push(`SOURCE (ERREUR) : ${type}\n${safeStr(e?.message || e)}`);
+      parts.push(`SOURCE (ERREUR) : ${type || "inconnu"}\n${safeStr(e?.message || e)}`);
     }
   }
 
