@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
-import { supabase } from "../../lib/supabaseClient";
+import { useState, useEffect } from 'react';
+import { supabase } from '../../lib/supabaseClient';
+import Layout from '../../components/Layout';
 
-export default function AdminConsole() {
-  const [profiles, setProfiles] = useState([]);
+export default function AdminIndex() {
+  const [clients, setClients] = useState([]);
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -11,125 +12,97 @@ export default function AdminConsole() {
   }, []);
 
   async function fetchData() {
-    setLoading(true);
-    // Récupération des profils (clients)
-    const { data: p } = await supabase.from("profiles").select("*").order("created_at", { ascending: false });
-    // Récupération des conversations avec l'email du profil lié
-    const { data: c } = await supabase.from("conversations").select("*, profiles(email)").order("updated_at", { ascending: false });
-    
-    setProfiles(p || []);
-    setConversations(c || []);
-    setLoading(false);
-  }
-
-  // Action : Supprimer une conversation
-  async function deleteConversation(id) {
-    if (!confirm("Supprimer cette conversation ?")) return;
-    const { error } = await supabase.from("conversations").delete().eq("id", id);
-    if (error) alert(error.message); else fetchData();
-  }
-
-  // Action : Supprimer un profil client
-  async function deleteClient(id) {
-    if (!confirm("Supprimer ce profil client ?")) return;
-    const { error } = await supabase.from("profiles").delete().eq("id", id);
-    if (error) alert(error.message); else fetchData();
-  }
-
-  // Action : Supprimer l'utilisateur du système d'authentification (via API)
-  async function deleteUserAuth(userId) {
-    if (!confirm("ATTENTION : Supprimer définitivement l'accès de cet utilisateur ?")) return;
     try {
-      const resp = await fetch("/api/admin/delete-user", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId }),
-      });
-      if (resp.ok) {
-        alert("Accès utilisateur supprimé.");
-        fetchData();
-      } else {
-        alert("Erreur lors de la suppression de l'accès.");
-      }
-    } catch (err) {
-      alert("Erreur réseau.");
+      setLoading(true);
+      // Récupération des clients
+      const { data: clientsData } = await supabase
+        .from('profiles')
+        .select('*')
+        .order('created_at', { ascending: false });
+      
+      // Récupération des conversations
+      const { data: convsData } = await supabase
+        .from('conversations')
+        .select(`
+          *,
+          profiles (email)
+        `)
+        .order('updated_at', { ascending: false });
+
+      setClients(clientsData || []);
+      setConversations(convsData || []);
+    } catch (error) {
+      console.error('Erreur de chargement:', error);
+    } finally {
+      setLoading(false);
     }
   }
 
-  if (loading) return <div style={styles.loading}>Chargement de la console...</div>;
-
   return (
-    <div style={styles.container}>
-      <h1 style={styles.title}>Console Admin - Evidenc’IA</h1>
+    <Layout>
+      <div className="p-8 bg-[#0a0a0a] min-h-screen text-white">
+        <h1 className="text-3xl font-bold text-center text-[#ff8c00] mb-12">
+          Console Admin - Evidenc’IA
+        </h1>
 
-      <section style={styles.section}>
-        <h2 style={styles.secTitle}>Gestion des Clients (Utilisateurs)</h2>
-        <div style={styles.tableWrapper}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Email</th>
-                <th style={styles.th}>Date Inscription</th>
-                <th style={styles.th}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {profiles.map(p => (
-                <tr key={p.id} style={styles.tr}>
-                  <td style={styles.td}>{p.email}</td>
-                  <td style={styles.td}>{new Date(p.created_at).toLocaleDateString()}</td>
-                  <td style={styles.td}>
-                    <button onClick={() => deleteClient(p.id)} style={styles.btnDel}>Suppr Profil</button>
-                    <button onClick={() => deleteUserAuth(p.id)} style={styles.btnDelDark}>Suppr Auth</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+        <div className="max-w-6xl mx-auto space-y-12">
+          {/* Section Clients */}
+          <section>
+            <h2 className="text-xl font-semibold border-l-4 border-[#ff8c00] pl-4 mb-6">
+              Gestion des Clients (Utilisateurs)
+            </h2>
+            <div className="bg-[#1a1a1a] rounded-xl overflow-hidden shadow-2xl">
+              <table className="w-full text-left">
+                <thead className="bg-[#252525] text-gray-400 uppercase text-xs">
+                  <tr>
+                    <th className="px-6 py-4">Email</th>
+                    <th className="px-6 py-4">Date Inscription</th>
+                    <th className="px-6 py-4">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-800">
+                  {clients.map((client) => (
+                    <tr key={client.id} className="hover:bg-[#222]">
+                      <td className="px-6 py-4">{client.email}</td>
+                      <td className="px-6 py-4">{new Date(client.created_at).toLocaleDateString()}</td>
+                      <td className="px-6 py-4 text-[#ff8c00] cursor-pointer hover:underline">Gérer</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
 
-      <section style={styles.section}>
-        <h2 style={styles.secTitle}>Gestion des Conversations</h2>
-        <div style={styles.tableWrapper}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Titre</th>
-                <th style={styles.th}>Agent</th>
-                <th style={styles.th}>Utilisateur</th>
-                <th style={styles.th}>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {conversations.map(c => (
-                <tr key={c.id} style={styles.tr}>
-                  <td style={styles.td}>{c.title}</td>
-                  <td style={styles.td}>{c.agent_slug}</td>
-                  <td style={styles.td}>{c.profiles?.email || "Inconnu"}</td>
-                  <td style={styles.td}>
-                    <button onClick={() => deleteConversation(c.id)} style={styles.btnDel}>Supprimer</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {/* Section Conversations */}
+          <section>
+            <h2 className="text-xl font-semibold border-l-4 border-[#ff8c00] pl-4 mb-6">
+              Gestion des Conversations
+            </h2>
+            <div className="bg-[#1a1a1a] rounded-xl overflow-hidden shadow-2xl">
+              <table className="w-full text-left">
+                <thead className="bg-[#252525] text-gray-400 uppercase text-xs">
+                  <tr>
+                    <th className="px-6 py-4">Titre</th>
+                    <th className="px-6 py-4">Agent</th>
+                    <th className="px-6 py-4">Utilisateur</th>
+                    <th className="px-6 py-4">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-800">
+                  {conversations.map((conv) => (
+                    <tr key={conv.id} className="hover:bg-[#222]">
+                      <td className="px-6 py-4">{conv.title || 'Sans titre'}</td>
+                      <td className="px-6 py-4">{conv.agent_slug}</td>
+                      <td className="px-6 py-4">{conv.profiles?.email}</td>
+                      <td className="px-6 py-4 text-[#ff8c00] cursor-pointer hover:underline">Voir</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
         </div>
-      </section>
-    </div>
+      </div>
+    </Layout>
   );
 }
-
-const styles = {
-  container: { padding: "40px 20px", background: "#05060a", minHeight: "100vh", color: "#fff", fontFamily: "'Segoe UI', sans-serif" },
-  title: { fontSize: 28, marginBottom: 40, color: "#ff8c28", fontWeight: 900, textAlign: 'center' },
-  section: { marginBottom: 50, maxWidth: 1000, margin: '0 auto 40px auto' },
-  secTitle: { fontSize: 18, marginBottom: 20, borderLeft: '4px solid #ff8c28', paddingLeft: 15 },
-  tableWrapper: { background: "rgba(255,255,255,0.03)", borderRadius: 16, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.05)' },
-  table: { width: "100%", borderCollapse: "collapse", fontSize: 14 },
-  th: { textAlign: 'left', padding: '15px 20px', background: 'rgba(255,255,255,0.05)', color: '#ff8c28', fontWeight: 900 },
-  td: { padding: '12px 20px', borderBottom: '1px solid rgba(255,255,255,0.05)' },
-  loading: { color: "#fff", textAlign: "center", marginTop: 100 },
-  btnDel: { background: "#ff4d4d", color: "#fff", border: "none", padding: "6px 12px", borderRadius: 6, cursor: "pointer", marginRight: 8, fontWeight: 600 },
-  btnDelDark: { background: "#333", color: "#bbb", border: "none", padding: "6px 12px", borderRadius: 6, cursor: "pointer", fontWeight: 600 }
-};
