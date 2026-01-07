@@ -1,11 +1,8 @@
 // pages/admin/index.js
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/router";
 import { supabase } from "../../lib/supabaseClient";
 
 export default function Admin() {
-  const router = useRouter();
-
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState("");
 
@@ -36,14 +33,13 @@ export default function Admin() {
     return data?.session?.access_token || "";
   }
 
-  async function handleLogout() {
-    try {
-      const { error } = await supabase.auth.signOut();
-      if (error) return alert(`Erreur déconnexion : ${error.message || String(error)}`);
-      router.push("/login");
-    } catch (e) {
-      alert(`Erreur déconnexion : ${(e?.message || e || "").toString()}`);
-    }
+  async function logout() {
+    await supabase.auth.signOut();
+    window.location.href = "/"; // ou /login si vous avez une page dédiée
+  }
+
+  function goBack() {
+    window.location.href = "/agents";
   }
 
   async function refreshAll() {
@@ -77,7 +73,6 @@ export default function Admin() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Construire des cartes “client + utilisateurs”
   const clientCards = useMemo(() => {
     const qq = (q || "").trim().toLowerCase();
 
@@ -97,7 +92,6 @@ export default function Admin() {
 
     if (!qq) return cards;
 
-    // recherche: client name ou email user
     return cards.filter((c) => {
       const inName = (c.name || "").toLowerCase().includes(qq);
       const inUsers = (c.users || []).some((u) => (u.email || "").toLowerCase().includes(qq));
@@ -105,7 +99,6 @@ export default function Admin() {
     });
   }, [clients, clientUsers, profiles, q]);
 
-  // Auto-sélection: si client change, sélectionner son 1er user
   useEffect(() => {
     if (!selectedClientId) {
       setSelectedUserId("");
@@ -168,7 +161,6 @@ export default function Admin() {
   function addUrlSource() {
     const u = (urlToAdd || "").trim();
     if (!u) return;
-    // validation basique
     if (!/^https?:\/\//i.test(u)) return alert("URL invalide. Exemple: https://...");
     const item = { type: "url", url: u, name: u };
     setSources((prev) => [item, ...prev]);
@@ -208,6 +200,7 @@ export default function Admin() {
 
       const item = {
         type: "pdf",
+        bucket: data.bucket || "agent_sources",
         mime: data.mime || "application/pdf",
         name: data.name || file.name,
         path: data.path,
@@ -225,7 +218,6 @@ export default function Admin() {
     if (!token) return alert("Non authentifié.");
     if (!selectedUserId || !modalAgent) return;
 
-    // construire un context structuré (propre)
     const context = { sources };
 
     const res = await fetch("/api/admin/save-agent-config", {
@@ -268,35 +260,32 @@ export default function Admin() {
 
   return (
     <main style={styles.page}>
-      {/* HEADER conforme à tes flèches :
-          - gauche : Retour, /images/logolong.png, Console administrateur
-          - droite : Déconnexion
-      */}
-      <div style={styles.topBar}>
-        <div style={styles.topBarLeft}>
-          <button style={styles.backBtn} onClick={() => router.back()} title="Retour">
+      <div style={styles.header}>
+        <div style={styles.headerLeft}>
+          <button style={styles.headerBtn} onClick={goBack} title="Retour">
             ← Retour
           </button>
 
           <img
             src="/images/logolong.png"
-            alt="Evidenc’IA"
-            draggable={false}
-            style={styles.logoLong}
+            alt="Evidenc'IA"
+            style={styles.headerLogo}
+            onError={(e) => {
+              e.currentTarget.style.display = "none";
+            }}
           />
 
-          <div style={styles.topTitle}>Console administrateur</div>
+          <div style={styles.headerTitle}>Console administrateur</div>
         </div>
 
-        <div style={styles.topBarRight}>
-          <button style={styles.logoutBtn} onClick={handleLogout} title="Déconnexion">
+        <div style={styles.headerRight}>
+          <button style={styles.headerBtnDanger} onClick={logout}>
             Déconnexion
           </button>
         </div>
       </div>
 
       <div style={styles.wrap}>
-        {/* Colonne gauche : cartes client + users */}
         <aside style={styles.left}>
           <div style={styles.box}>
             <div style={styles.boxTitle}>Clients</div>
@@ -356,7 +345,6 @@ export default function Admin() {
           </div>
         </aside>
 
-        {/* Zone principale */}
         <section style={styles.right}>
           <div style={styles.box}>
             <div style={styles.boxTitle}>
@@ -368,17 +356,25 @@ export default function Admin() {
             </div>
 
             <div style={styles.diag}>
-              <div><b>Client</b>: {selectedClientId ? "oui" : "non"}</div>
-              <div><b>User</b>: {selectedUserId ? "oui" : "non"}</div>
-              <div><b>Agents</b>: {agents.length}</div>
-              <div><b>user_agents</b>: {userAgents.length}</div>
-              <div><b>configs</b>: {agentConfigs.length}</div>
+              <div>
+                <b>Client</b>: {selectedClientId ? "oui" : "non"}
+              </div>
+              <div>
+                <b>User</b>: {selectedUserId ? "oui" : "non"}
+              </div>
+              <div>
+                <b>Agents</b>: {agents.length}
+              </div>
+              <div>
+                <b>user_agents</b>: {userAgents.length}
+              </div>
+              <div>
+                <b>configs</b>: {agentConfigs.length}
+              </div>
             </div>
 
             {!selectedUserId ? (
-              <div style={styles.muted}>
-                Sélectionnez un utilisateur (dans une carte client à gauche) pour gérer les agents.
-              </div>
+              <div style={styles.muted}>Sélectionnez un utilisateur (dans une carte client à gauche) pour gérer les agents.</div>
             ) : agents.length === 0 ? (
               <div style={styles.alert}>
                 Aucun agent chargé depuis la table <b>agents</b> (table vide ou RLS).
@@ -395,14 +391,9 @@ export default function Admin() {
                   return (
                     <article key={a.id} style={styles.agentCard}>
                       <div style={styles.agentTop}>
-                        {/* Avatar rond + cadrage visage */}
-                        <div style={styles.avatarBubble}>
+                        <div style={styles.avatarWrap}>
                           {a.avatar_url ? (
-                            <img
-                              src={a.avatar_url}
-                              alt={a.name}
-                              style={styles.avatarImg}
-                            />
+                            <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
                           ) : (
                             <div style={styles.avatarFallback} />
                           )}
@@ -412,8 +403,8 @@ export default function Admin() {
                           <div style={styles.agentName}>{a.name}</div>
                           <div style={styles.agentRole}>{a.description || a.slug}</div>
                           <div style={styles.small}>
-                            {assigned ? "Assigné" : "Non assigné"} • Prompt:{" "}
-                            {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources: {srcCount}
+                            {assigned ? "Assigné" : "Non assigné"} • Prompt: {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources:{" "}
+                            {srcCount}
                           </div>
                         </div>
                       </div>
@@ -430,10 +421,7 @@ export default function Admin() {
                           Prompt & données
                         </button>
 
-                        <button
-                          style={styles.btnDangerGhost}
-                          onClick={() => deleteAgentConversations(a.slug, a.name)}
-                        >
+                        <button style={styles.btnDangerGhost} onClick={() => deleteAgentConversations(a.slug, a.name)}>
                           Supprimer conversations
                         </button>
                       </div>
@@ -448,7 +436,6 @@ export default function Admin() {
         </section>
       </div>
 
-      {/* Modal Prompt */}
       {modalOpen && modalAgent && (
         <div style={styles.modalOverlay} onClick={closePromptModal}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -466,12 +453,7 @@ export default function Admin() {
               <div style={{ flex: 1 }}>
                 <div style={styles.modalLabel}>Ajouter une URL</div>
                 <div style={styles.row}>
-                  <input
-                    value={urlToAdd}
-                    onChange={(e) => setUrlToAdd(e.target.value)}
-                    placeholder="https://…"
-                    style={styles.input}
-                  />
+                  <input value={urlToAdd} onChange={(e) => setUrlToAdd(e.target.value)} placeholder="https://…" style={styles.input} />
                   <button style={styles.btnAssign} onClick={addUrlSource}>
                     Ajouter
                   </button>
@@ -555,71 +537,41 @@ const styles = {
     fontFamily: '"Segoe UI", Arial, sans-serif',
   },
 
-  // ===== TOP BAR (conforme à ta capture) =====
-  topBar: {
-    position: "sticky",
-    top: 0,
-    zIndex: 50,
+  header: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    height: 64,
-    padding: "10px 18px",
-    background: "linear-gradient(180deg, rgba(0,0,0,0.70), rgba(0,0,0,0.35))",
-    backdropFilter: "blur(10px)",
-    borderBottom: "1px solid rgba(255,255,255,0.08)",
+    gap: 12,
+    padding: "14px 16px 0",
+    flexWrap: "wrap",
   },
-  topBarLeft: {
-    display: "flex",
-    alignItems: "center",
-    gap: 14,
-    minWidth: 0,
-  },
-  topBarRight: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-  },
-  backBtn: {
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(255,255,255,0.06)",
-    color: "rgba(255,255,255,0.92)",
-    padding: "8px 12px",
+  headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 280 },
+  headerRight: { display: "flex", alignItems: "center", gap: 10 },
+  headerLogo: { height: 26, width: "auto", opacity: 0.95, display: "block" },
+  headerTitle: { fontWeight: 900, opacity: 0.9 },
+
+  headerBtn: {
     borderRadius: 999,
-    fontSize: 14,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.25)",
+    color: "#fff",
     fontWeight: 900,
     cursor: "pointer",
-  },
-  logoLong: {
-    height: 34,
-    width: "auto",
-    objectFit: "contain",
-    display: "block",
-    filter: "drop-shadow(0 8px 18px rgba(0,0,0,0.45))",
-  },
-  topTitle: {
-    color: "rgba(255,255,255,0.95)",
-    fontSize: 16,
-    fontWeight: 900,
     whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    maxWidth: "52vw",
   },
-  logoutBtn: {
-    border: "1px solid rgba(255, 120, 120, 0.20)",
-    background: "rgba(255, 0, 0, 0.10)",
-    color: "rgba(255,255,255,0.92)",
-    padding: "8px 12px",
+  headerBtnDanger: {
     borderRadius: 999,
-    fontSize: 14,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
     fontWeight: 900,
     cursor: "pointer",
+    whiteSpace: "nowrap",
   },
 
   wrap: { display: "grid", gridTemplateColumns: "420px 1fr", gap: 16, padding: 18 },
-  left: {},
-  right: {},
 
   box: {
     border: "1px solid rgba(255,255,255,.12)",
@@ -630,6 +582,7 @@ const styles = {
     boxShadow: "0 18px 45px rgba(0,0,0,.55)",
   },
   boxTitle: { fontWeight: 900, marginBottom: 10 },
+
   search: {
     width: "100%",
     padding: "10px 12px",
@@ -642,7 +595,9 @@ const styles = {
     fontWeight: 800,
   },
 
-  // Left cards
+  left: {},
+  right: {},
+
   clientBlock: {
     borderRadius: 16,
     border: "1px solid rgba(255,255,255,.12)",
@@ -706,29 +661,23 @@ const styles = {
   },
   agentTop: { display: "flex", gap: 12, alignItems: "center", marginBottom: 12 },
 
-  // Avatar “bulle” : rond + on voit le visage
-  avatarBubble: {
-    width: 54,
-    height: 54,
+  // AVATAR: on veut voir la tête -> plus grand + position vers le haut
+  avatarWrap: {
+    width: 64,
+    height: 64,
     borderRadius: 999,
     overflow: "hidden",
     border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(255,255,255,.06)",
-    boxShadow: "0 12px 24px rgba(0,0,0,.35)",
     flex: "0 0 auto",
+    background: "rgba(255,255,255,.05)",
   },
-  avatarImg: {
+  avatar: {
     width: "100%",
     height: "100%",
-    display: "block",
     objectFit: "cover",
-    objectPosition: "center 18%", // remonte l’image => visage visible
+    objectPosition: "center 15%",
   },
-  avatarFallback: {
-    width: "100%",
-    height: "100%",
-    background: "rgba(255,255,255,.06)",
-  },
+  avatarFallback: { width: "100%", height: "100%", background: "rgba(255,255,255,.06)" },
 
   agentName: { fontWeight: 900, fontSize: 16 },
   agentRole: { fontWeight: 800, opacity: 0.8, fontSize: 12, marginTop: 2 },
@@ -771,7 +720,6 @@ const styles = {
     cursor: "pointer",
   },
 
-  // Modal
   modalOverlay: {
     position: "fixed",
     inset: 0,
@@ -808,7 +756,7 @@ const styles = {
   },
   modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 12 },
 
-  row: { display: "flex", gap: 10, alignItems: "center" },
+  row: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
   input: {
     width: "100%",
     padding: "10px 12px",
