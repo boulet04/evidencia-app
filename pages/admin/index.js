@@ -15,14 +15,17 @@ export default function Admin() {
 
   const [selectedClientId, setSelectedClientId] = useState("");
   const [selectedUserId, setSelectedUserId] = useState("");
-
   const [q, setQ] = useState("");
 
-  // Modal prompt
+  // Modal prompt & sources
   const [modalOpen, setModalOpen] = useState(false);
   const [modalAgent, setModalAgent] = useState(null);
   const [modalSystemPrompt, setModalSystemPrompt] = useState("");
-  const [modalContextJson, setModalContextJson] = useState("{}");
+
+  // sources UI
+  const [sources, setSources] = useState([]); // [{type:'pdf'|'url', name, path, url, mime, size}]
+  const [urlToAdd, setUrlToAdd] = useState("");
+  const [uploading, setUploading] = useState(false);
 
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
@@ -33,14 +36,7 @@ export default function Admin() {
     setLoading(true);
     setMsg("");
 
-    const [
-      cRes,
-      cuRes,
-      pRes,
-      aRes,
-      uaRes,
-      cfgRes,
-    ] = await Promise.all([
+    const [cRes, cuRes, pRes, aRes, uaRes, cfgRes] = await Promise.all([
       supabase.from("clients").select("id,name,created_at").order("created_at", { ascending: false }),
       supabase.from("client_users").select("client_id,user_id,created_at"),
       supabase.from("profiles").select("user_id,email,role"),
@@ -67,40 +63,46 @@ export default function Admin() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const filteredClients = useMemo(() => {
+  // Construire des cartes “client + utilisateurs”
+  const clientCards = useMemo(() => {
     const qq = (q || "").trim().toLowerCase();
-    if (!qq) return clients;
-    return clients.filter((c) => (c?.name || "").toLowerCase().includes(qq));
-  }, [clients, q]);
 
-  const usersForSelectedClient = useMemo(() => {
-    if (!selectedClientId) return [];
-    const links = clientUsers.filter((x) => x.client_id === selectedClientId);
+    const cards = clients.map((c) => {
+      const links = clientUsers.filter((x) => x.client_id === c.id);
+      const users = links.map((l) => {
+        const p = profiles.find((pp) => pp.user_id === l.user_id);
+        return {
+          user_id: l.user_id,
+          email: p?.email || "(email non renseigné)",
+          role: p?.role || "",
+        };
+      });
 
-    return links.map((l) => {
-      const p = profiles.find((pp) => pp.user_id === l.user_id);
-      return {
-        user_id: l.user_id,
-        email: p?.email || "(email non renseigné)",
-        role: p?.role || "",
-      };
+      return { ...c, users, userCount: users.length };
     });
-  }, [selectedClientId, clientUsers, profiles]);
 
-  // Si on change de client, on auto-sélectionne le 1er user (si dispo)
+    if (!qq) return cards;
+
+    // recherche: client name ou email user
+    return cards.filter((c) => {
+      const inName = (c.name || "").toLowerCase().includes(qq);
+      const inUsers = (c.users || []).some((u) => (u.email || "").toLowerCase().includes(qq));
+      return inName || inUsers;
+    });
+  }, [clients, clientUsers, profiles, q]);
+
+  // Auto-sélection: si client change, sélectionner son 1er user
   useEffect(() => {
     if (!selectedClientId) {
       setSelectedUserId("");
       return;
     }
-    // Si l'utilisateur sélectionné n'appartient plus au client -> reset puis auto-pick
-    const stillOk = usersForSelectedClient.some((u) => u.user_id === selectedUserId);
-    if (!stillOk) {
-      const first = usersForSelectedClient[0]?.user_id || "";
-      setSelectedUserId(first);
-    }
+    const card = clientCards.find((c) => c.id === selectedClientId);
+    const firstUser = card?.users?.[0]?.user_id || "";
+    if (selectedUserId && card?.users?.some((u) => u.user_id === selectedUserId)) return;
+    setSelectedUserId(firstUser);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedClientId, usersForSelectedClient.length]);
+  }, [selectedClientId, clientCards.length]);
 
   function isAssigned(agentId) {
     if (!selectedUserId) return false;
@@ -131,16 +133,86 @@ export default function Admin() {
 
   function openPromptModal(agent) {
     const cfg = getConfig(agent.id);
+    const ctx = cfg?.context || {};
+    const src = Array.isArray(ctx?.sources) ? ctx.sources : [];
     setModalAgent(agent);
     setModalSystemPrompt(cfg?.system_prompt || "");
-    setModalContextJson(JSON.stringify(cfg?.context || {}, null, 2));
+    setSources(src);
+    setUrlToAdd("");
     setModalOpen(true);
+  }
+
+  function closePromptModal() {
+    setModalOpen(false);
+    setModalAgent(null);
+    setModalSystemPrompt("");
+    setSources([]);
+    setUrlToAdd("");
+    setUploading(false);
+  }
+
+  function addUrlSource() {
+    const u = (urlToAdd || "").trim();
+    if (!u) return;
+    // validation basique
+    if (!/^https?:\/\//i.test(u)) return alert("URL invalide. Exemple: https://...");
+    const item = { type: "url", url: u, name: u };
+    setSources((prev) => [item, ...prev]);
+    setUrlToAdd("");
+  }
+
+  function removeSourceAt(idx) {
+    setSources((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  async function handlePdfUpload(file) {
+    if (!file) return;
+    if (file.type !== "application/pdf") return alert("Veuillez sélectionner un PDF.");
+    if (!selectedUserId || !modalAgent) return;
+
+    setUploading(true);
+    try {
+      const token = await getAccessToken();
+      if (!token) return alert("Non authentifié.");
+
+      const base64 = await fileToBase64(file);
+
+      const res = await fetch("/api/admin/upload-agent-source", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          userId: selectedUserId,
+          agentSlug: modalAgent.slug,
+          fileName: file.name,
+          mimeType: file.type,
+          base64,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return alert(`Erreur upload (${res.status}) : ${data?.error || "?"}`);
+
+      const item = {
+        type: "pdf",
+        mime: data.mime || "application/pdf",
+        name: data.name || file.name,
+        path: data.path,
+        size: data.size || file.size,
+      };
+
+      setSources((prev) => [item, ...prev]);
+    } finally {
+      setUploading(false);
+    }
   }
 
   async function savePromptModal() {
     const token = await getAccessToken();
     if (!token) return alert("Non authentifié.");
     if (!selectedUserId || !modalAgent) return;
+
+    // construire un context structuré (propre)
+    const context = { sources };
 
     const res = await fetch("/api/admin/save-agent-config", {
       method: "POST",
@@ -149,23 +221,20 @@ export default function Admin() {
         userId: selectedUserId,
         agentId: modalAgent.id,
         systemPrompt: modalSystemPrompt,
-        contextJson: modalContextJson,
+        context,
       }),
     });
 
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
-    setModalOpen(false);
-    setModalAgent(null);
+    closePromptModal();
     await refreshAll();
   }
 
   async function deleteAgentConversations(agentSlug, agentName) {
     if (!selectedUserId) return alert("Sélectionnez un utilisateur.");
-    const ok = window.confirm(
-      `Supprimer toutes les conversations de l'agent "${agentName}" pour cet utilisateur ?`
-    );
+    const ok = window.confirm(`Supprimer toutes les conversations de "${agentName}" pour cet utilisateur ?`);
     if (!ok) return;
 
     const token = await getAccessToken();
@@ -191,11 +260,10 @@ export default function Admin() {
       </div>
 
       <div style={styles.wrap}>
-        {/* Colonne gauche */}
+        {/* Colonne gauche : cartes client + users */}
         <aside style={styles.left}>
           <div style={styles.box}>
             <div style={styles.boxTitle}>Clients</div>
-
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -206,57 +274,47 @@ export default function Admin() {
             {loading ? (
               <div style={styles.muted}>Chargement…</div>
             ) : (
-              <div style={{ display: "grid", gap: 10 }}>
-                {filteredClients.map((c) => {
-                  const count = clientUsers.filter((x) => x.client_id === c.id).length;
-                  const active = c.id === selectedClientId;
+              <div style={{ display: "grid", gap: 12 }}>
+                {clientCards.map((c) => {
+                  const activeClient = c.id === selectedClientId;
                   return (
-                    <div
-                      key={c.id}
-                      style={{ ...styles.clientCard, ...(active ? styles.clientCardActive : {}) }}
-                      onClick={() => {
-                        setSelectedClientId(c.id);
-                        // on reset, le useEffect auto-pick fera le reste
-                        setSelectedUserId("");
-                      }}
-                    >
-                      <div style={styles.clientName}>{c.name}</div>
-                      <div style={styles.small}>{count} user(s)</div>
-                    </div>
-                  );
-                })}
-                {!filteredClients.length && <div style={styles.muted}>Aucun client.</div>}
-              </div>
-            )}
-          </div>
+                    <div key={c.id} style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}>
+                      <div
+                        style={styles.clientHeader}
+                        onClick={() => setSelectedClientId(c.id)}
+                        title="Sélectionner ce client"
+                      >
+                        <div style={styles.clientName}>{c.name}</div>
+                        <div style={styles.small}>{c.userCount} user(s)</div>
+                      </div>
 
-          <div style={{ height: 12 }} />
-
-          <div style={styles.box}>
-            <div style={styles.boxTitle}>Utilisateurs du client</div>
-            {!selectedClientId ? (
-              <div style={styles.muted}>Sélectionnez un client.</div>
-            ) : (
-              <div style={{ display: "grid", gap: 10 }}>
-                {usersForSelectedClient.map((u) => {
-                  const active = u.user_id === selectedUserId;
-                  return (
-                    <div
-                      key={u.user_id}
-                      style={{ ...styles.userPick, ...(active ? styles.userPickActive : {}) }}
-                      onClick={() => setSelectedUserId(u.user_id)}
-                    >
-                      <div style={{ fontWeight: 900 }}>{u.email}</div>
-                      <div style={styles.small}>
-                        {u.role ? `role: ${u.role}` : "role: (vide)"} — id:{" "}
-                        <span style={{ fontFamily: "monospace" }}>{u.user_id}</span>
+                      <div style={styles.userList}>
+                        {(c.users || []).map((u) => {
+                          const activeUser = activeClient && u.user_id === selectedUserId;
+                          return (
+                            <div
+                              key={u.user_id}
+                              style={{ ...styles.userItem, ...(activeUser ? styles.userItemActive : {}) }}
+                              onClick={() => {
+                                setSelectedClientId(c.id);
+                                setSelectedUserId(u.user_id);
+                              }}
+                            >
+                              <div style={{ fontWeight: 900 }}>{u.email}</div>
+                              <div style={styles.tiny}>
+                                {u.role ? `role: ${u.role}` : "role: (vide)"} —{" "}
+                                <span style={{ fontFamily: "monospace" }}>{u.user_id.slice(0, 8)}…</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {(c.users || []).length === 0 && <div style={styles.muted}>Aucun utilisateur.</div>}
                       </div>
                     </div>
                   );
                 })}
-                {usersForSelectedClient.length === 0 && (
-                  <div style={styles.muted}>Aucun utilisateur lié.</div>
-                )}
+
+                {clientCards.length === 0 && <div style={styles.muted}>Aucun client.</div>}
               </div>
             )}
           </div>
@@ -273,31 +331,29 @@ export default function Admin() {
                 : "Sélectionnez un client"}
             </div>
 
-            {/* Diagnostic rapide (utile tant que vous êtes en mise au point) */}
             <div style={styles.diag}>
-              <div><b>Client sélectionné</b>: {selectedClientId ? "oui" : "non"}</div>
-              <div><b>User sélectionné</b>: {selectedUserId ? "oui" : "non"}</div>
-              <div><b>Agents chargés</b>: {agents.length}</div>
-              <div><b>Liaisons user_agents</b>: {userAgents.length}</div>
-              <div><b>Configs prompt</b>: {agentConfigs.length}</div>
+              <div><b>Client</b>: {selectedClientId ? "oui" : "non"}</div>
+              <div><b>User</b>: {selectedUserId ? "oui" : "non"}</div>
+              <div><b>Agents</b>: {agents.length}</div>
+              <div><b>user_agents</b>: {userAgents.length}</div>
+              <div><b>configs</b>: {agentConfigs.length}</div>
             </div>
 
             {!selectedUserId ? (
               <div style={styles.muted}>
-                Choisissez un client puis un utilisateur pour gérer les agents, le prompt et les conversations.
+                Sélectionnez un utilisateur (dans une carte client à gauche) pour gérer les agents.
               </div>
             ) : agents.length === 0 ? (
               <div style={styles.alert}>
-                Aucun agent n’a été chargé depuis la table <b>agents</b>.
-                <div style={styles.small}>
-                  Cela arrive si la table est vide OU si une policy RLS bloque la lecture côté client.
-                </div>
+                Aucun agent chargé depuis la table <b>agents</b> (table vide ou RLS).
               </div>
             ) : (
               <div style={styles.grid}>
                 {agents.map((a) => {
                   const assigned = isAssigned(a.id);
                   const cfg = getConfig(a.id);
+                  const ctx = cfg?.context || {};
+                  const srcCount = Array.isArray(ctx?.sources) ? ctx.sources.length : 0;
                   const hasPrompt = !!(cfg?.system_prompt || "").trim();
 
                   return (
@@ -316,7 +372,7 @@ export default function Admin() {
                           <div style={styles.agentRole}>{a.description || a.slug}</div>
                           <div style={styles.small}>
                             {assigned ? "Assigné" : "Non assigné"} • Prompt:{" "}
-                            {hasPrompt ? "personnalisé" : "défaut / vide"}
+                            {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources: {srcCount}
                           </div>
                         </div>
                       </div>
@@ -353,7 +409,7 @@ export default function Admin() {
 
       {/* Modal Prompt */}
       {modalOpen && modalAgent && (
-        <div style={styles.modalOverlay} onClick={() => setModalOpen(false)}>
+        <div style={styles.modalOverlay} onClick={closePromptModal}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalTitle}>Prompt & données — {modalAgent.name}</div>
 
@@ -365,24 +421,75 @@ export default function Admin() {
               placeholder="Entrez ici le system prompt personnalisé…"
             />
 
-            <div style={styles.modalLabel}>Context (JSON)</div>
-            <textarea
-              value={modalContextJson}
-              onChange={(e) => setModalContextJson(e.target.value)}
-              style={styles.textarea}
-              placeholder='{"exemple":"valeur"}'
-            />
+            <div style={styles.row}>
+              <div style={{ flex: 1 }}>
+                <div style={styles.modalLabel}>Ajouter une URL</div>
+                <div style={styles.row}>
+                  <input
+                    value={urlToAdd}
+                    onChange={(e) => setUrlToAdd(e.target.value)}
+                    placeholder="https://…"
+                    style={styles.input}
+                  />
+                  <button style={styles.btnAssign} onClick={addUrlSource}>
+                    Ajouter
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ width: 18 }} />
+
+              <div style={{ width: 320 }}>
+                <div style={styles.modalLabel}>Uploader un PDF</div>
+                <label style={styles.uploadBox}>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    style={{ display: "none" }}
+                    onChange={(e) => handlePdfUpload(e.target.files?.[0] || null)}
+                    disabled={uploading}
+                  />
+                  {uploading ? "Upload en cours…" : "Choisir un PDF"}
+                </label>
+                <div style={styles.tiny}>Bucket: agent_sources</div>
+              </div>
+            </div>
+
+            <div style={styles.modalLabel}>Sources</div>
+            <div style={styles.sourcesBox}>
+              {sources.length === 0 ? (
+                <div style={styles.muted}>Aucune source.</div>
+              ) : (
+                sources.map((s, idx) => (
+                  <div key={idx} style={styles.sourceRow}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 900 }}>
+                        {s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}
+                      </div>
+                      <div style={styles.tiny}>
+                        {s.type === "pdf"
+                          ? `mime: ${s.mime || "application/pdf"} • size: ${s.size || "?"} • path: ${s.path}`
+                          : `url: ${s.url}`}
+                      </div>
+                    </div>
+                    <button style={styles.xBtn} onClick={() => removeSourceAt(idx)} title="Retirer">
+                      ✕
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
 
             <div style={styles.modalActions}>
-              <button style={styles.btnGhost} onClick={() => setModalOpen(false)}>
+              <button style={styles.btnGhost} onClick={closePromptModal}>
                 Annuler
               </button>
-              <button style={styles.btnAssign} onClick={savePromptModal}>
+              <button style={styles.btnAssign} onClick={savePromptModal} disabled={uploading}>
                 Enregistrer
               </button>
             </div>
 
-            <div style={styles.small}>Le JSON doit être valide.</div>
+            <div style={styles.small}>Les sources sont enregistrées dans context.sources (JSONB).</div>
           </div>
         </div>
       )}
@@ -390,17 +497,26 @@ export default function Admin() {
   );
 }
 
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
 const styles = {
   page: {
     minHeight: "100vh",
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
     color: "rgba(238,242,255,.92)",
-  fontFamily: "Segoe UI, Arial, sans-serif",
+    fontFamily: '"Segoe UI", Arial, sans-serif',
   },
   header: { display: "flex", gap: 12, padding: "18px 18px 0", alignItems: "baseline" },
   brand: { fontWeight: 900, fontSize: 18 },
   title: { opacity: 0.85, fontWeight: 800 },
-  wrap: { display: "grid", gridTemplateColumns: "380px 1fr", gap: 16, padding: 18 },
+  wrap: { display: "grid", gridTemplateColumns: "420px 1fr", gap: 16, padding: 18 },
   box: {
     border: "1px solid rgba(255,255,255,.12)",
     borderRadius: 16,
@@ -421,24 +537,37 @@ const styles = {
     marginBottom: 12,
     fontWeight: 800,
   },
-  clientCard: {
-    padding: 12,
-    borderRadius: 14,
+
+  // Left cards
+  clientBlock: {
+    borderRadius: 16,
     border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.03)",
+    overflow: "hidden",
+  },
+  clientBlockActive: { borderColor: "rgba(255,140,40,.35)" },
+  clientHeader: {
+    padding: 12,
+    display: "flex",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    gap: 10,
+    cursor: "pointer",
+    background: "rgba(0,0,0,.18)",
+  },
+  clientName: { fontWeight: 900, fontSize: 14 },
+  userList: { padding: 10, display: "grid", gap: 10 },
+  userItem: {
+    padding: 10,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(255,255,255,.03)",
     cursor: "pointer",
   },
-  clientCardActive: { borderColor: "rgba(255,140,40,.35)", background: "rgba(255,140,40,.08)" },
-  clientName: { fontWeight: 900 },
-  userPick: {
-    padding: 12,
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(255,255,255,.03)",
-    cursor: "pointer",
-  },
-  userPickActive: { borderColor: "rgba(80,120,255,.35)", background: "rgba(80,120,255,.08)" },
+  userItemActive: { borderColor: "rgba(80,120,255,.35)", background: "rgba(80,120,255,.08)" },
+
   small: { fontSize: 12, opacity: 0.75, fontWeight: 800 },
+  tiny: { fontSize: 11, opacity: 0.7, fontWeight: 800 },
   muted: { opacity: 0.75, fontWeight: 800, fontSize: 13 },
   alert: {
     marginTop: 12,
@@ -448,6 +577,7 @@ const styles = {
     background: "rgba(255,80,80,.10)",
     fontWeight: 900,
   },
+
   diag: {
     display: "grid",
     gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
@@ -461,6 +591,7 @@ const styles = {
     fontWeight: 800,
     opacity: 0.9,
   },
+
   grid: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 14 },
   agentCard: {
     borderRadius: 16,
@@ -476,6 +607,7 @@ const styles = {
   agentName: { fontWeight: 900, fontSize: 16 },
   agentRole: { fontWeight: 800, opacity: 0.8, fontSize: 12, marginTop: 2 },
   agentActions: { display: "grid", gap: 10 },
+
   btnAssign: {
     borderRadius: 999,
     padding: "10px 12px",
@@ -512,6 +644,8 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
   },
+
+  // Modal
   modalOverlay: {
     position: "fixed",
     inset: 0,
@@ -523,7 +657,7 @@ const styles = {
     zIndex: 9999,
   },
   modal: {
-    width: "min(900px, 95vw)",
+    width: "min(980px, 96vw)",
     borderRadius: 18,
     border: "1px solid rgba(255,255,255,.14)",
     background: "rgba(0,0,0,.70)",
@@ -547,4 +681,56 @@ const styles = {
     fontWeight: 700,
   },
   modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 12 },
+
+  row: { display: "flex", gap: 10, alignItems: "center" },
+  input: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.92)",
+    outline: "none",
+    fontWeight: 800,
+  },
+  uploadBox: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    height: 44,
+    borderRadius: 12,
+    border: "1px dashed rgba(255,255,255,.25)",
+    background: "rgba(255,255,255,.04)",
+    cursor: "pointer",
+    fontWeight: 900,
+  },
+  sourcesBox: {
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.03)",
+    padding: 10,
+    display: "grid",
+    gap: 10,
+    maxHeight: 260,
+    overflow: "auto",
+  },
+  sourceRow: {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    padding: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.15)",
+  },
+  xBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
 };
