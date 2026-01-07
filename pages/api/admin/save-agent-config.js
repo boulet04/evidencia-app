@@ -43,25 +43,29 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: "Accès interdit (admin requis)." });
     }
 
-    const { userId, agentId, systemPrompt, contextJson } = req.body || {};
+    const { userId, agentId, systemPrompt, context, contextJson } = req.body || {};
     const uid = (userId || "").toString().trim();
     const aid = (agentId || "").toString().trim();
+
     if (!uid) return res.status(400).json({ error: "userId manquant." });
     if (!aid) return res.status(400).json({ error: "agentId manquant." });
 
-    let context = {};
-    try {
-      context = contextJson ? JSON.parse(contextJson) : {};
-    } catch {
-      return res.status(400).json({ error: "contextJson invalide (JSON requis)." });
+    let ctx = {};
+    if (context && typeof context === "object") {
+      ctx = context;
+    } else if (typeof contextJson === "string") {
+      try {
+        ctx = contextJson ? JSON.parse(contextJson) : {};
+      } catch {
+        return res.status(400).json({ error: "contextJson invalide (JSON requis)." });
+      }
     }
 
-    // upsert par (user_id, agent_id) — assurez-vous d’avoir une contrainte unique si possible
     const payload = {
       user_id: uid,
       agent_id: aid,
       system_prompt: safeStr(systemPrompt || "").trim(),
-      context,
+      context: ctx,
     };
 
     const { error } = await supabaseAdmin
