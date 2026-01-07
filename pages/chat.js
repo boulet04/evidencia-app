@@ -11,7 +11,6 @@ export default function Chat() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [errorMsg, setErrorMsg] = useState("");
 
   const threadRef = useRef(null);
   const canSend = useMemo(() => input.trim().length > 0 && !sending, [input, sending]);
@@ -25,33 +24,31 @@ export default function Chat() {
     });
   }
 
-  function getAgentAvatar() {
-    if (!agent) return "/images/logopc.png";
-    return `/images/${agent.slug}.png`;
-  }
-
-  // ---------- Database Calls ----------
-  async function fetchMessages(uid, convId) {
+  // ---------- Database (Strictement calqué sur tes screens) ----------
+  async function loadMessages(convId) {
     const { data, error } = await supabase
-      .from("conversation_messages")
+      .from("messages") 
       .select("*")
-      .eq("user_id", uid)
       .eq("conversation_id", convId)
       .order("created_at", { ascending: true });
-    return error ? [] : data;
+    
+    if (error) console.error("Erreur messages:", error);
+    return data || [];
   }
 
-  async function fetchHistory(uid, slug) {
+  async function loadHistory(uid, slug) {
     const { data, error } = await supabase
       .from("conversations")
       .select("*")
       .eq("user_id", uid)
       .eq("agent_slug", slug)
       .order("updated_at", { ascending: false });
-    return error ? [] : data;
+    
+    if (error) console.error("Erreur historique:", error);
+    return data || [];
   }
 
-  // ---------- Core Logic ----------
+  // ---------- Initialisation ----------
   useEffect(() => {
     async function init() {
       const { data: { session } } = await supabase.auth.getSession();
@@ -63,7 +60,7 @@ export default function Chat() {
 
       const url = new URL(window.location.href);
       const slug = safeDecode(url.searchParams.get("agent"));
-      const convId = url.searchParams.get("c");
+      const cId = url.searchParams.get("c");
 
       // Charger l'agent
       const { data: ag } = await supabase.from("agents").select("*").eq("slug", slug).single();
@@ -71,32 +68,34 @@ export default function Chat() {
       setAgent(ag);
 
       // Charger l'historique
-      const h = await fetchHistory(uid, slug);
+      const h = await loadHistory(uid, slug);
       setHistory(h);
 
-      if (convId) {
-        setConversationId(convId);
-        const msgs = await fetchMessages(uid, convId);
+      // Charger la conversation
+      if (cId) {
+        setConversationId(cId);
+        const msgs = await loadMessages(cId);
         setMessages(msgs.length > 0 ? msgs : [{ role: "assistant", content: `Bonjour, je suis ${ag.name}.` }]);
       } else if (h.length > 0) {
-        // Rediriger vers la dernière conv si aucune n'est sélectionnée
         window.location.href = `/chat?agent=${slug}&c=${h[0].id}`;
-      } else {
-        setMessages([{ role: "assistant", content: `Bonjour, je suis ${ag.name}.` }]);
+        return;
       }
+      
       setLoading(false);
-      scrollToBottom();
+      setTimeout(scrollToBottom, 100);
     }
     init();
   }, []);
 
-  // REPARATION HISTORIQUE : Cette fonction change maintenant l'URL pour forcer le rechargement
-  async function openConversation(id) {
+  // ---------- Actions ----------
+  
+  function openConversation(id) {
+    if (id === conversationId) return;
     window.location.href = `/chat?agent=${agent.slug}&c=${id}`;
   }
 
   async function newConversation() {
-    const { data, error } = await supabase.from("conversations").insert({
+    const { data } = await supabase.from("conversations").insert({
       user_id: userId,
       agent_slug: agent.slug,
       title: "Nouvelle conversation"
@@ -110,13 +109,12 @@ export default function Chat() {
     setInput("");
     setSending(true);
 
-    const newMsgs = [...messages, { role: "user", content: text }];
-    setMessages(newMsgs);
+    // 1. Ajout local
+    setMessages(prev => [...prev, { role: "user", content: text }]);
     scrollToBottom();
 
-    // Sauvegarde Supabase
-    await supabase.from("conversation_messages").insert({
-      user_id: userId,
+    // 2. Insertion dans table "messages" (Pas de user_id ici selon tes screens)
+    await supabase.from("messages").insert({
       conversation_id: conversationId,
       role: "user",
       content: text
@@ -126,22 +124,33 @@ export default function Chat() {
       const { data: { session } } = await supabase.auth.getSession();
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
         body: JSON.stringify({ message: text, agentSlug: agent.slug })
       });
+      
       const json = await res.json();
-      const reply = json.reply || "Désolé, j'ai rencontré une erreur.";
+      const reply = json.reply || "Une erreur est survenue.";
 
-      setMessages([...newMsgs, { role: "assistant", content: reply }]);
-      await supabase.from("conversation_messages").insert({
-        user_id: userId,
+      setMessages(prev => [...prev, { role: "assistant", content: reply }]);
+
+      // 3. Insertion réponse IA
+      await supabase.from("messages").insert({
         conversation_id: conversationId,
         role: "assistant",
         content: reply
       });
-      await supabase.from("conversations").update({ updated_at: new Date(), title: text.slice(0, 30) }).eq("id", conversationId);
+
+      // 4. Update conversations
+      await supabase.from("conversations").update({ 
+        updated_at: new Date().toISOString(),
+        title: text.length > 25 ? text.slice(0, 25) + "..." : text 
+      }).eq("id", conversationId);
+
+      const h = await loadHistory(userId, agent.slug);
+      setHistory(h);
+
     } catch (e) {
-      console.error(e);
+      console.error("Erreur envoi:", e);
     } finally {
       setSending(false);
       scrollToBottom();
@@ -152,25 +161,27 @@ export default function Chat() {
 
   return (
     <main style={styles.page}>
-      <div style={styles.bg}><div style={styles.bgLogo} /><div style={styles.bgVeils} /></div>
+      <div style={styles.bg}><div style={styles.bgLogo} /></div>
 
       <header style={styles.topbar}>
         <div style={styles.topLeft}>
           <button onClick={() => window.location.href="/agents"} style={styles.backBtn}>← Retour</button>
           <img src="/images/logolong.png" alt="logo" style={{ height: 25 }} />
           
-          {/* BULLE AGENT (Ta flèche rouge) */}
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: 20 }}>
+          {/* AVATAR DE L'AGENT - EXACTEMENT SOUS TA FLÈCHE ROUGE */}
+          <div style={styles.agentInfo}>
             <img 
-              src={getAgentAvatar()} 
-              style={{ width: 45, height: 45, borderRadius: "50%", border: "2px solid #ff8c28", objectFit: "cover", objectPosition: "center 20%" }} 
+              src={`/images/${agent.slug}.png`} 
+              alt="avatar"
+              style={styles.agentAvatar} 
             />
             <div>
-              <div style={{ fontWeight: 900, fontSize: 14 }}>{agent.name}</div>
-              <div style={{ fontSize: 11, opacity: 0.7 }}>Agent disponible</div>
+              <div style={styles.agentName}>{agent.name}</div>
+              <div style={styles.agentStatus}>Agent disponible</div>
             </div>
           </div>
         </div>
+
         <div style={styles.topRight}>
           <span style={styles.userChip}>{email}</span>
           <button onClick={() => supabase.auth.signOut()} style={styles.btnGhost}>Déconnexion</button>
@@ -180,16 +191,18 @@ export default function Chat() {
       <section style={styles.layout}>
         <aside style={styles.sidebar}>
           <div style={styles.sidebarTop}>
-            <span style={{ fontWeight: 900 }}>Historique</span>
+            <span style={{ fontWeight: 900, fontSize: 12 }}>HISTORIQUE</span>
             <button onClick={newConversation} style={styles.newBtn}>+ Nouvelle</button>
           </div>
           <div style={styles.sidebarList}>
             {history.map(c => (
               <button key={c.id} onClick={() => openConversation(c.id)} style={{
                 ...styles.histItem,
-                backgroundColor: c.id === conversationId ? "rgba(255,140,40,0.2)" : "transparent"
+                backgroundColor: c.id === conversationId ? "rgba(255,140,40,0.1)" : "transparent",
+                border: c.id === conversationId ? "1px solid rgba(255,140,40,0.3)" : "1px solid transparent"
               }}>
-                {c.title || "Sans titre"}
+                <div style={styles.histTitle}>{c.title || "Conversation"}</div>
+                <div style={styles.histDate}>{new Date(c.updated_at).toLocaleDateString()}</div>
               </button>
             ))}
           </div>
@@ -198,12 +211,17 @@ export default function Chat() {
         <div style={styles.chatCard}>
           <div style={styles.thread} ref={threadRef}>
             {messages.map((m, i) => (
-              <div key={i} style={{ ...styles.bubble, alignSelf: m.role === "user" ? "flex-end" : "flex-start", backgroundColor: m.role === "user" ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.3)" }}>
-                <div style={{ fontSize: 10, opacity: 0.5, marginBottom: 4 }}>{m.role === "user" ? "Vous" : agent.name}</div>
-                <div>{m.content}</div>
+              <div key={i} style={{ 
+                ...styles.bubble, 
+                alignSelf: m.role === "user" ? "flex-end" : "flex-start", 
+                backgroundColor: m.role === "user" ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.5)" 
+              }}>
+                <div style={styles.bubbleRole}>{m.role === "user" ? "VOUS" : agent.name.toUpperCase()}</div>
+                <div style={styles.bubbleText}>{m.content}</div>
               </div>
             ))}
           </div>
+
           <div style={styles.composer}>
             <textarea 
               value={input} 
@@ -223,27 +241,34 @@ export default function Chat() {
 }
 
 const styles = {
-  page: { minHeight: "100vh", position: "relative", background: "#05060a", color: "#fff", fontFamily: "Segoe UI, sans-serif", overflow: "hidden" },
+  page: { minHeight: "100vh", background: "#05060a", color: "#fff", fontFamily: "sans-serif", overflow: "hidden" },
   bg: { position: "absolute", inset: 0, zIndex: 0 },
-  bgLogo: { position: "absolute", inset: 0, backgroundImage: "url('/images/logopc.png')", backgroundSize: "contain", backgroundPosition: "center", backgroundRepeat: "no-repeat", opacity: 0.05 },
-  bgVeils: { position: "absolute", inset: 0, background: "linear-gradient(to bottom, rgba(0,0,0,0.4), transparent)" },
-  topbar: { position: "relative", zIndex: 2, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 20px", background: "rgba(0,0,0,0.5)", borderBottom: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(10px)" },
-  topLeft: { display: "flex", alignItems: "center", gap: 15 },
+  bgLogo: { position: "absolute", inset: 0, backgroundImage: "url('/images/logopc.png')", backgroundSize: "contain", backgroundPosition: "center", backgroundRepeat: "no-repeat", opacity: 0.03 },
+  topbar: { position: "relative", zIndex: 2, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 20px", background: "rgba(0,0,0,0.8)", borderBottom: "1px solid rgba(255,255,255,0.1)" },
+  topLeft: { display: "flex", alignItems: "center", gap: 20 },
   topRight: { display: "flex", alignItems: "center", gap: 15 },
-  backBtn: { background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", padding: "8px 15px", borderRadius: 20, cursor: "pointer", fontWeight: 700 },
-  userChip: { background: "rgba(255,255,255,0.05)", padding: "5px 12px", borderRadius: 15, fontSize: 12 },
-  btnGhost: { background: "transparent", border: "1px solid rgba(255,255,255,0.2)", color: "#fff", padding: "5px 12px", borderRadius: 15, cursor: "pointer" },
-  layout: { position: "relative", zIndex: 2, display: "grid", gridTemplateColumns: "260px 1fr", gap: 20, padding: 20, height: "calc(100vh - 70px)" },
-  sidebar: { background: "rgba(0,0,0,0.3)", borderRadius: 20, border: "1px solid rgba(255,255,255,0.05)", display: "flex", flexDirection: "column" },
-  sidebarTop: { padding: 20, display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid rgba(255,255,255,0.05)" },
-  newBtn: { background: "#fff", color: "#000", border: "none", padding: "5px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer" },
+  agentInfo: { display: "flex", alignItems: "center", gap: 12, marginLeft: 15 },
+  agentAvatar: { width: 45, height: 45, borderRadius: "50%", border: "2px solid #ff8c28", objectFit: "cover", objectPosition: "center 20%" },
+  agentName: { fontWeight: 800, fontSize: 14 },
+  agentStatus: { fontSize: 10, color: "#aaa" },
+  backBtn: { background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", padding: "8px 15px", borderRadius: 20, cursor: "pointer", fontWeight: 700, fontSize: 12 },
+  userChip: { background: "rgba(255,255,255,0.05)", padding: "5px 12px", borderRadius: 15, fontSize: 11 },
+  btnGhost: { background: "transparent", border: "1px solid rgba(255,255,255,0.2)", color: "#fff", padding: "5px 12px", borderRadius: 15, cursor: "pointer", fontSize: 11 },
+  layout: { position: "relative", zIndex: 2, display: "grid", gridTemplateColumns: "280px 1fr", gap: 20, padding: 20, height: "calc(100vh - 70px)" },
+  sidebar: { background: "rgba(0,0,0,0.4)", borderRadius: 20, border: "1px solid rgba(255,255,255,0.05)", display: "flex", flexDirection: "column" },
+  sidebarTop: { padding: "20px", display: "flex", justifyContent: "space-between", alignItems: "center" },
+  newBtn: { background: "#fff", color: "#000", border: "none", padding: "6px 12px", borderRadius: 10, fontSize: 11, fontWeight: 800, cursor: "pointer" },
   sidebarList: { flex: 1, overflowY: "auto", padding: 10 },
-  histItem: { width: "100%", textAlign: "left", padding: "12px", borderRadius: 12, border: "none", color: "#fff", cursor: "pointer", marginBottom: 5, fontSize: 13 },
+  histItem: { width: "100%", textAlign: "left", padding: "12px", borderRadius: 15, color: "#fff", cursor: "pointer", marginBottom: 8 },
+  histTitle: { fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  histDate: { fontSize: 9, opacity: 0.4, marginTop: 4 },
   chatCard: { background: "rgba(0,0,0,0.2)", borderRadius: 25, border: "1px solid rgba(255,255,255,0.05)", display: "flex", flexDirection: "column", overflow: "hidden" },
-  thread: { flex: 1, overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 15 },
-  bubble: { maxWidth: "75%", padding: "12px 18px", borderRadius: 20, fontSize: 14, lineHeight: 1.5 },
-  composer: { padding: 20, background: "rgba(0,0,0,0.3)", display: "flex", gap: 10 },
-  textarea: { flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 15, padding: 12, color: "#fff", resize: "none" },
-  sendBtn: { background: "linear-gradient(135deg, #ff8c28, #5078ff)", border: "none", color: "#fff", padding: "0 20px", borderRadius: 15, fontWeight: 900, cursor: "pointer" },
-  sendBtnDisabled: { background: "#333", color: "#666", border: "none", padding: "0 20px", borderRadius: 15, cursor: "not-allowed" }
+  thread: { flex: 1, overflowY: "auto", padding: "25px", display: "flex", flexDirection: "column", gap: 20 },
+  bubble: { maxWidth: "80%", padding: "15px 20px", borderRadius: 20, border: "1px solid rgba(255,255,255,0.03)" },
+  bubbleRole: { fontSize: 9, opacity: 0.5, marginBottom: 5, fontWeight: 800 },
+  bubbleText: { fontSize: 14, lineHeight: 1.5 },
+  composer: { padding: "20px", background: "rgba(0,0,0,0.4)", display: "flex", gap: 12 },
+  textarea: { flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 15, padding: 15, color: "#fff", resize: "none", fontSize: 14 },
+  sendBtn: { background: "#ff8c28", border: "none", color: "#fff", padding: "0 25px", borderRadius: 15, fontWeight: 800, cursor: "pointer" },
+  sendBtnDisabled: { background: "#222", color: "#555", border: "none", padding: "0 25px", borderRadius: 15, cursor: "not-allowed" }
 };
