@@ -51,11 +51,7 @@ export default function Chat() {
   }
 
   async function fetchHistory({ uid, agentSlug }) {
-    const { data, error } = await supabase.from("conversations")
-      .select("id, title, updated_at")
-      .eq("user_id", uid)
-      .eq("agent_slug", agentSlug)
-      .order("updated_at", { ascending: false });
+    const { data, error } = await supabase.from("conversations").select("id, title, updated_at").eq("user_id", uid).eq("agent_slug", agentSlug).order("updated_at", { ascending: false });
     return error ? [] : data || [];
   }
 
@@ -94,7 +90,6 @@ export default function Chat() {
       const url = new URL(window.location.href);
       const raw = url.searchParams.get("agent");
       const slug = safeDecode(raw).trim().toLowerCase();
-
       if (!slug) { window.location.href = "/agents"; return; }
 
       const a = await fetchAgent(slug);
@@ -182,7 +177,6 @@ export default function Chat() {
     scrollToBottom();
 
     await insertMessage({ uid: userId, convId: conversationId, role: "user", content: userText });
-
     const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
     const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
 
@@ -209,7 +203,6 @@ export default function Chat() {
   }
 
   if (loading || !agent) return null;
-
   const agentAvatar = getAgentAvatar();
 
   return (
@@ -230,7 +223,6 @@ export default function Chat() {
           <button onClick={() => supabase.auth.signOut()} style={styles.btnGhost}>Déconnexion</button>
         </div>
       </header>
-
       <section style={styles.layout}>
         <aside style={styles.sidebar}>
           <div style={styles.sidebarTop}>
@@ -248,7 +240,6 @@ export default function Chat() {
             ))}
           </div>
         </aside>
-
         <div style={styles.chatCard}>
           {errorMsg && <div style={styles.alert}>{errorMsg}</div>}
           <div style={styles.thread} ref={threadRef}>
