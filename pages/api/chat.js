@@ -31,12 +31,6 @@ function parseMaybeJson(v) {
   return null;
 }
 
-/**
- * Normalise les URL saisies dans l'admin:
- * - "www.site.fr" => "https://www.site.fr"
- * - "site.fr" => "https://site.fr"
- * - garde https:// et http://
- */
 function normalizeUrlMaybe(u) {
   const s = safeStr(u).trim();
   if (!s) return "";
@@ -80,13 +74,6 @@ function truncate(text, maxChars) {
   return t.slice(0, maxChars) + "\n\n[...contenu tronqué...]";
 }
 
-/**
- * Convertit un HTML en texte utile:
- * - supprime scripts/styles/noscript/svg
- * - enlève tags
- * - décode quelques entités HTML courantes
- * - compacte les espaces
- */
 function htmlToText(html) {
   let s = safeStr(html);
   if (!s) return "";
@@ -116,7 +103,6 @@ function htmlToText(html) {
   return s;
 }
 
-/** Supabase Admin client (Service Role) */
 function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -140,8 +126,6 @@ async function mistralOcrFromUrl({ apiKey, url }) {
       type: "document_url",
       document_url: url,
     },
-    // table_format: null, // optionnel
-    // include_image_base64: false, // optionnel
   };
 
   const r = await fetch("https://api.mistral.ai/v1/ocr", {
@@ -179,12 +163,6 @@ async function mistralOcrFromUrl({ apiKey, url }) {
   return merged.trim();
 }
 
-/**
- * Fetch URL robuste:
- * - User-Agent / Accept
- * - support HTML/TXT/JSON
- * - si HTML => on renvoie du texte nettoyé
- */
 async function fetchUrlAsUsefulText(url) {
   const r = await fetch(url, {
     method: "GET",
@@ -216,28 +194,17 @@ async function fetchUrlAsUsefulText(url) {
   return `Contenu non texte (${ct}).`;
 }
 
-/**
- * Sources admin compatibles:
- * - url : { type:"url", url:"https://..." } (ou {value:"https://..."})
- * - pdf : { type:"pdf", path:"..." , bucket?:"agent_sources" }
- * - file (ancien) : { type:"file", bucket:"...", path:"..." }
- *
- * Retourne { text, debug }
- */
 async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
   const ctxObj = parseMaybeJson(cfg?.context) || {};
   const sources = Array.isArray(ctxObj?.sources) ? ctxObj.sources : [];
 
-  // Limite stricte pour éviter timeouts serverless
   const limited = sources.slice(0, 3);
-
   const parts = [];
 
   for (const s of limited) {
     const type = safeStr(s?.type).trim().toLowerCase();
 
     try {
-      // ---- URL ----
       if (type === "url") {
         const rawUrl = safeStr(s?.url || s?.value).trim();
         const url = normalizeUrlMaybe(rawUrl);
@@ -252,7 +219,6 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
         }
       }
 
-      // ---- FICHIER (ancien) ----
       if (type === "file") {
         const bucket = safeStr(s?.bucket).trim();
         const path = safeStr(s?.path).trim();
@@ -277,7 +243,6 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
         }
       }
 
-      // ---- PDF (nouveau admin) ----
       if (type === "pdf") {
         const bucket = safeStr(s?.bucket).trim() || "agent_sources";
         const path = safeStr(s?.path).trim();
@@ -306,7 +271,6 @@ async function buildSourcesContext({ apiKey, supabaseAdmin, cfg }) {
         parts.map((p, i) => `\n[Source ${i + 1}]\n${p}\n`).join("\n");
 
   const debug = parts.join("\n\n---\n\n").slice(0, 4000);
-
   return { text, debug };
 }
 
@@ -377,12 +341,14 @@ export default async function handler(req, res) {
       `Tu es ${agent.name}${agent.description ? `, ${agent.description}` : ""}.`;
 
     const behavioral =
-      `\n\nRÈGLES DE STYLE :\n` +
-      `- Ne répète pas “bonjour” à chaque réponse. Salue au maximum une fois au début d’une nouvelle conversation.\n` +
-      `- Réponds directement, de manière professionnelle, sans te représenter (“je suis …”) sauf si on te le demande.\n` +
-      `- Si une documentation est fournie (sources), utilise-la en priorité et explique ce que tu en déduis.\n` +
+      `\n\nRÈGLES DE STYLE (OBLIGATOIRES) :\n` +
+      `- Ne répète pas “bonjour” à chaque réponse.\n` +
+      `- Réponds directement, de manière professionnelle.\n` +
+      `- Si une documentation est fournie (sources), utilise-la en priorité.\n` +
       `- Ne jamais inventer de faits. Si tu ne sais pas, dis-le.\n` +
-      `- Format de sortie obligatoire : texte simple, paragraphes courts, listes à puces avec retours à la ligne. Pas de Markdown (pas de ###, pas de **).\n`;
+      `- FORMAT : texte simple uniquement. Pas de Markdown (interdit : ###, **, tableaux, code).\n` +
+      `- Fais des paragraphes courts séparés par une ligne vide.\n` +
+      `- Pour les listes : 1 ligne par point, commence par "- " (pas de puces dans une phrase).\n`;
 
     const { text: sourcesContext, debug: sourcesDebug } = await buildSourcesContext({
       apiKey,
