@@ -1,388 +1,368 @@
+// pages/chat.js
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 
-export default function Chat() {
+export default function ChatPage() {
+  const [sessionEmail, setSessionEmail] = useState("");
+  const [agentSlug, setAgentSlug] = useState(""); // si vous utilisez un agent choisi avant, vous pouvez hydrater via localStorage
+  const [agentName, setAgentName] = useState("");
+  const [agentRole, setAgentRole] = useState("");
+  const [agentAvatar, setAgentAvatar] = useState("");
+
+  const [isMobile, setIsMobile] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
   const [loading, setLoading] = useState(true);
-  const [email, setEmail] = useState("");
-  const [userId, setUserId] = useState("");
-  const [agent, setAgent] = useState(null);
-  const [conversationId, setConversationId] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [errorMsg, setErrorMsg] = useState("");
 
-  const threadRef = useRef(null);
-  const canSend = useMemo(() => input.trim().length > 0 && !sending, [input, sending]);
+  const [conversations, setConversations] = useState([]);
+  const [selectedConvId, setSelectedConvId] = useState("");
+  const [messages, setMessages] = useState([]);
 
-  function safeDecode(v) {
-    try {
-      return decodeURIComponent(v || "");
-    } catch {
-      return v || "";
-    }
+  const [input, setInput] = useState("");
+  const endRef = useRef(null);
+
+  async function getAccessToken() {
+    const { data } = await supabase.auth.getSession();
+    return data?.session?.access_token || "";
   }
 
-  function formatTitleFromFirstUserMessage(text) {
-    const t = (text || "").trim().replace(/\s+/g, " ");
-    if (!t) return "Nouvelle conversation";
-    return t.length > 42 ? t.slice(0, 42) + "…" : t;
+  async function logout() {
+    await supabase.auth.signOut();
+    window.location.href = "/";
   }
 
-  function scrollToBottom() {
-    requestAnimationFrame(() => {
-      const el = threadRef.current;
-      if (!el) return;
-      el.scrollTop = el.scrollHeight;
-    });
+  function goBack() {
+    window.location.href = "/agents";
   }
 
-  function normalizeImgSrc(src) {
-    const s = (src || "").toString().trim();
-    if (!s) return "";
-    if (s.startsWith("http://") || s.startsWith("https://")) return s;
-    if (s.startsWith("/")) return s;
-    return "/" + s;
+  function openAdmin() {
+    window.location.href = "/admin";
   }
 
-  function getAgentAvatar() {
-    if (!agent) return "/images/logopc.png";
-    return normalizeImgSrc(agent.avatar_url) || `/images/${agent.slug}.png` || "/images/logopc.png";
-  }
-
-  async function fetchAgent(slug) {
-    const { data: a, error } = await supabase
-      .from("agents")
-      .select("slug, name, description, avatar_url")
-      .eq("slug", slug)
-      .maybeSingle();
-    return error || !a ? null : a;
-  }
-
-  async function fetchHistory({ uid, agentSlug }) {
-    const { data, error } = await supabase
-      .from("conversations")
-      .select("id, title, updated_at")
-      .eq("user_id", uid)
-      .eq("agent_slug", agentSlug)
-      .order("updated_at", { ascending: false });
-
-    return error ? [] : data || [];
-  }
-
-  // ✅ messages table: id, conversation_id, role, content, created_at
-  async function fetchMessages({ convId }) {
-    const { data, error } = await supabase
-      .from("messages")
-      .select("id, role, content, created_at")
-      .eq("conversation_id", convId)
-      .order("created_at", { ascending: true });
-
-    return error ? [] : data || [];
-  }
-
-  async function createConversation({ uid, agentSlug, title }) {
-    const { data, error } = await supabase
-      .from("conversations")
-      .insert({ user_id: uid, agent_slug: agentSlug, title: title || "Nouvelle conversation" })
-      .select("id")
-      .single();
-    return error ? null : data?.id || null;
-  }
-
-  async function touchConversation({ uid, convId, titleMaybe }) {
-    const patch = { updated_at: new Date().toISOString() };
-    if (titleMaybe) patch.title = titleMaybe;
-    await supabase.from("conversations").update(patch).eq("user_id", uid).eq("id", convId);
-  }
-
-  // ✅ insert into messages (not conversation_messages, no user_id col)
-  async function insertMessage({ convId, role, content }) {
-    await supabase.from("messages").insert({ conversation_id: convId, role, content });
-  }
-
+  // Responsive
   useEffect(() => {
-    let mounted = true;
-
-    async function boot() {
-      setErrorMsg("");
-
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
-      if (!session) {
-        window.location.href = "/login";
-        return;
-      }
-      if (!mounted) return;
-
-      const uid = session.user.id;
-      setUserId(uid);
-      setEmail(session.user.email || "");
-
-      const url = new URL(window.location.href);
-      const raw = url.searchParams.get("agent");
-      const slug = safeDecode(raw).trim().toLowerCase();
-      if (!slug) {
-        window.location.href = "/agents";
-        return;
-      }
-
-      const a = await fetchAgent(slug);
-      if (!a) {
-        window.location.href = "/agents";
-        return;
-      }
-      if (!mounted) return;
-
-      setAgent(a);
-
-      const h = await fetchHistory({ uid, agentSlug: a.slug });
-      if (mounted) setHistory(h);
-
-      const convParam = url.searchParams.get("c");
-      const convIdFromUrl = convParam ? safeDecode(convParam).trim() : "";
-
-      let chosenConvId = null;
-
-      // Si l’URL contient une conversation valide, on l’ouvre
-      if (convIdFromUrl) {
-        const msgs = await fetchMessages({ convId: convIdFromUrl });
-        if (msgs.length > 0) {
-          chosenConvId = convIdFromUrl;
-          setConversationId(chosenConvId);
-          setMessages(msgs);
-          setLoading(false);
-          scrollToBottom();
-          return;
-        }
-      }
-
-      // Sinon, on ouvre la dernière conversation s’il y en a
-      if (h && h.length > 0) {
-        chosenConvId = h[0].id;
-        setConversationId(chosenConvId);
-        const msgs = await fetchMessages({ convId: chosenConvId });
-        if (!mounted) return;
-
-        setMessages(
-          msgs.length > 0 ? msgs : [{ role: "assistant", content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?` }]
-        );
-        setLoading(false);
-        scrollToBottom();
-        return;
-      }
-
-      // Sinon on crée une nouvelle conversation
-      const newConvId = await createConversation({ uid, agentSlug: a.slug, title: "Nouvelle conversation" });
-      if (!mounted) return;
-
-      setConversationId(newConvId);
-      setMessages([{ role: "assistant", content: `Bonjour, je suis ${a.name}. Comment puis-je vous aider ?` }]);
-      const h2 = await fetchHistory({ uid, agentSlug: a.slug });
-      if (mounted) setHistory(h2);
-
-      setLoading(false);
-      scrollToBottom();
-    }
-
-    boot();
-
-    const { data } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      if (!newSession) window.location.href = "/login";
-    });
-
-    return () => {
-      mounted = false;
-      data?.subscription?.unsubscribe?.();
-    };
+    const mql = window.matchMedia("(max-width: 980px)");
+    const apply = () => setIsMobile(!!mql.matches);
+    apply();
+    mql.addEventListener?.("change", apply);
+    return () => mql.removeEventListener?.("change", apply);
   }, []);
 
-  async function openConversation(convId) {
-    if (!userId || !agent || !convId) return;
-    setConversationId(convId);
+  // Boot: session + agent + conversations/messages
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
 
-    const url = new URL(window.location.href);
-    url.searchParams.set("agent", agent.slug);
-    url.searchParams.set("c", convId);
-    window.history.replaceState({}, "", url.toString());
+      const { data: sess } = await supabase.auth.getSession();
+      const email = sess?.session?.user?.email || "";
+      setSessionEmail(email);
 
-    const msgs = await fetchMessages({ convId });
-    setMessages(
-      msgs.length > 0 ? msgs : [{ role: "assistant", content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?` }]
-    );
-    scrollToBottom();
+      // Agent choisi: on le récupère depuis localStorage si dispo, sinon valeur par défaut
+      const stored = window.localStorage.getItem("selected_agent_slug") || "";
+      const slug = (stored || "emma").trim().toLowerCase();
+      setAgentSlug(slug);
+
+      // Charger infos agent (table agents)
+      const { data: agent } = await supabase
+        .from("agents")
+        .select("slug,name,description,avatar_url")
+        .eq("slug", slug)
+        .maybeSingle();
+
+      setAgentName(agent?.name || slug);
+      setAgentRole(agent?.description || "");
+      setAgentAvatar(agent?.avatar_url || "");
+
+      // Charger conversations
+      const { data: convs } = await supabase
+        .from("conversations")
+        .select("id,user_id,created_at,agent_slug,title,archived")
+        .eq("agent_slug", slug)
+        .order("created_at", { ascending: false });
+
+      const list = convs || [];
+      setConversations(list);
+
+      const firstId = list?.[0]?.id || "";
+      setSelectedConvId(firstId);
+
+      // Charger messages
+      if (firstId) {
+        const { data: msgs } = await supabase
+          .from("messages")
+          .select("id,conversation_id,role,content,created_at")
+          .eq("conversation_id", firstId)
+          .order("created_at", { ascending: true });
+
+        setMessages(msgs || []);
+      } else {
+        setMessages([]);
+      }
+
+      setLoading(false);
+    })();
+  }, []);
+
+  // Scroll to bottom on messages change
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+
+  const selectedConversation = useMemo(() => {
+    return conversations.find((c) => c.id === selectedConvId) || null;
+  }, [conversations, selectedConvId]);
+
+  async function selectConversation(id) {
+    setSelectedConvId(id);
+    setDrawerOpen(false);
+
+    const { data: msgs } = await supabase
+      .from("messages")
+      .select("id,conversation_id,role,content,created_at")
+      .eq("conversation_id", id)
+      .order("created_at", { ascending: true });
+
+    setMessages(msgs || []);
   }
 
   async function newConversation() {
-    if (!userId || !agent) return;
+    const { data: sess } = await supabase.auth.getSession();
+    const userId = sess?.session?.user?.id;
+    if (!userId) return alert("Non authentifié.");
 
-    const convId = await createConversation({ uid: userId, agentSlug: agent.slug });
-    if (!convId) return;
+    const { data: conv, error } = await supabase
+      .from("conversations")
+      .insert([{ user_id: userId, agent_slug: agentSlug, title: "Nouvelle conversation", archived: false }])
+      .select("id,user_id,created_at,agent_slug,title,archived")
+      .maybeSingle();
 
-    setConversationId(convId);
-    setMessages([{ role: "assistant", content: `Bonjour, je suis ${agent.name}. Comment puis-je vous aider ?` }]);
+    if (error) return alert(error.message);
 
-    const url = new URL(window.location.href);
-    url.searchParams.set("agent", agent.slug);
-    url.searchParams.set("c", convId);
-    window.history.replaceState({}, "", url.toString());
-
-    const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
-    setHistory(h);
-    scrollToBottom();
+    const next = [conv, ...conversations];
+    setConversations(next);
+    setSelectedConvId(conv.id);
+    setMessages([]);
+    setDrawerOpen(false);
   }
 
   async function sendMessage() {
-    if (!agent || !conversationId || !canSend) return;
+    const text = (input || "").trim();
+    if (!text) return;
+    if (!selectedConvId) return alert("Aucune conversation sélectionnée.");
 
-    const userText = input.trim();
-    setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: userText }]);
     setSending(true);
-    scrollToBottom();
+    setInput("");
 
-    // ✅ écrit dans messages
-    await insertMessage({ convId: conversationId, role: "user", content: userText });
+    // 1) Sauvegarde message user
+    await supabase.from("messages").insert([{ conversation_id: selectedConvId, role: "user", content: text }]);
 
-    const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
-    const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
+    // 2) Refresh messages (optimiste simple)
+    const { data: msgs1 } = await supabase
+      .from("messages")
+      .select("id,conversation_id,role,content,created_at")
+      .eq("conversation_id", selectedConvId)
+      .order("created_at", { ascending: true });
 
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
+    setMessages(msgs1 || []);
 
     try {
-      const resp = await fetch("/api/chat", {
+      const token = await getAccessToken();
+      if (!token) throw new Error("Non authentifié.");
+
+      const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
-        body: JSON.stringify({ message: userText, agentSlug: agent.slug, conversationId }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ message: text, agentSlug }),
       });
 
-      const data = await resp.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
 
-      // ✅ compat: reply | answer | content
-      const reply = data.reply || data.answer || data.content || "Désolé, je ne peux pas répondre.";
+      const reply = (data.reply || data.answer || data.content || "").toString();
 
-      setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+      // 3) Sauvegarde message assistant
+      await supabase.from("messages").insert([{ conversation_id: selectedConvId, role: "assistant", content: reply }]);
 
-      await insertMessage({ convId: conversationId, role: "assistant", content: reply });
-      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
+      const { data: msgs2 } = await supabase
+        .from("messages")
+        .select("id,conversation_id,role,content,created_at")
+        .eq("conversation_id", selectedConvId)
+        .order("created_at", { ascending: true });
 
-      const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
-      setHistory(h);
-
-      scrollToBottom();
+      setMessages(msgs2 || []);
     } catch (e) {
-      setErrorMsg("Erreur de connexion.");
+      await supabase.from("messages").insert([
+        { conversation_id: selectedConvId, role: "assistant", content: `Erreur: ${String(e?.message || e)}` },
+      ]);
+      const { data: msgs2 } = await supabase
+        .from("messages")
+        .select("id,conversation_id,role,content,created_at")
+        .eq("conversation_id", selectedConvId)
+        .order("created_at", { ascending: true });
+      setMessages(msgs2 || []);
     } finally {
       setSending(false);
     }
   }
 
-  if (loading || !agent) return null;
-  const agentAvatar = getAgentAvatar();
-
   return (
     <main style={styles.page}>
-      <div style={styles.bg} aria-hidden="true">
-        <div style={styles.bgLogo} />
-        <div style={styles.bgVeils} />
-      </div>
-
-      <header style={styles.topbar}>
-        <div style={styles.topLeft}>
-          <button style={styles.backBtn} onClick={() => (window.location.href = "/agents")}>
+      {/* HEADER */}
+      <div style={styles.header}>
+        <div style={styles.headerLeft}>
+          <button style={styles.headerBtn} onClick={goBack}>
             ← Retour
           </button>
 
-          <div style={styles.agentInfo}>
-            <div style={styles.agentName}>{agent.name}</div>
-            <div style={styles.agentDesc}>{agent.description}</div>
+          <div style={styles.agentBlock}>
+            <div style={styles.agentAvatarWrap}>
+              {agentAvatar ? (
+                <img src={agentAvatar} alt={agentName} style={styles.agentAvatar} />
+              ) : (
+                <div style={styles.agentAvatarFallback} />
+              )}
+            </div>
+            <div style={{ lineHeight: 1.1 }}>
+              <div style={styles.agentName}>{agentName || "Agent"}</div>
+              <div style={styles.agentRole}>{agentRole || "Assistant"}</div>
+            </div>
           </div>
-
-          <img
-            src={agentAvatar}
-            alt={agent.name}
-            style={styles.topAvatar}
-            onError={(e) => (e.target.src = "/images/logopc.png")}
-          />
-          <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
         </div>
 
-        <div style={styles.topRight}>
-          <span style={styles.userChip}>{email}</span>
-          <button onClick={() => supabase.auth.signOut()} style={styles.btnGhost}>
+        <div style={styles.headerCenter}>
+          <img
+            src="/images/logolong.png"
+            alt="Evidenc'IA"
+            style={styles.logo}
+            onError={(e) => {
+              e.currentTarget.style.display = "none";
+            }}
+          />
+        </div>
+
+        <div style={styles.headerRight}>
+          <div style={styles.emailPill}>{sessionEmail || ""}</div>
+          <button style={styles.headerBtn} onClick={openAdmin}>
+            Console administrateur
+          </button>
+          <button style={styles.headerBtnDanger} onClick={logout}>
             Déconnexion
           </button>
-        </div>
-      </header>
 
-      <section style={styles.layout}>
-        <aside style={styles.sidebar}>
-          <div style={styles.sidebarTop}>
-            <div style={styles.sidebarTitle}>Historique</div>
-            <button onClick={newConversation} style={styles.newBtn}>
-              + Nouvelle
+          {isMobile && (
+            <button style={styles.headerBtn} onClick={() => setDrawerOpen((v) => !v)}>
+              Historique
             </button>
-          </div>
+          )}
+        </div>
+      </div>
 
-          <div style={styles.sidebarList}>
-            {history.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => openConversation(c.id)}
-                style={{ ...styles.histItem, ...(c.id === conversationId ? styles.histItemActive : null) }}
-              >
-                <div style={styles.histRow}>
-                  <img
-                    src={agentAvatar}
-                    style={styles.histAvatar}
-                    onError={(e) => (e.target.src = "/images/logopc.png")}
-                  />
-                  <div style={styles.histTitle}>{c.title || "Conversation"}</div>
-                </div>
+      {/* LAYOUT */}
+      <div style={styles.layout}>
+        {/* SIDEBAR desktop */}
+        {!isMobile && (
+          <aside style={styles.sidebar}>
+            <div style={styles.sidebarHead}>
+              <div style={styles.sidebarTitle}>Historique</div>
+              <button style={styles.newBtn} onClick={newConversation}>
+                + Nouvelle
               </button>
-            ))}
-          </div>
-        </aside>
+            </div>
 
-        <div style={styles.chatCard}>
-          {errorMsg && <div style={styles.alert}>{errorMsg}</div>}
+            <div style={styles.sidebarList}>
+              {conversations.map((c) => {
+                const active = c.id === selectedConvId;
+                return (
+                  <button
+                    key={c.id}
+                    style={{ ...styles.convItem, ...(active ? styles.convItemActive : {}) }}
+                    onClick={() => selectConversation(c.id)}
+                    title={c.title || "Conversation"}
+                  >
+                    {c.title || "Conversation"}
+                  </button>
+                );
+              })}
+              {conversations.length === 0 && <div style={styles.muted}>Aucune conversation.</div>}
+            </div>
+          </aside>
+        )}
 
-          <div style={styles.thread} ref={threadRef}>
-            {messages.map((m, idx) => (
-              <div key={idx} style={{ ...styles.bubbleRow, justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
-                <div style={{ ...styles.bubble, ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot) }}>
-                  <div style={styles.bubbleHeader}>
-                    {m.role !== "user" && <img src={agentAvatar} style={styles.bubbleAvatar} />}
-                    <div style={styles.role}>{m.role === "user" ? "Vous" : agent.name}</div>
-                  </div>
-                  <div style={styles.text}>{m.content}</div>
-                </div>
+        {/* Drawer mobile */}
+        {isMobile && drawerOpen && (
+          <div style={styles.drawerOverlay} onClick={() => setDrawerOpen(false)}>
+            <div style={styles.drawer} onClick={(e) => e.stopPropagation()}>
+              <div style={styles.sidebarHead}>
+                <div style={styles.sidebarTitle}>Historique</div>
+                <button style={styles.newBtn} onClick={newConversation}>
+                  + Nouvelle
+                </button>
               </div>
-            ))}
+              <div style={styles.sidebarList}>
+                {conversations.map((c) => {
+                  const active = c.id === selectedConvId;
+                  return (
+                    <button
+                      key={c.id}
+                      style={{ ...styles.convItem, ...(active ? styles.convItemActive : {}) }}
+                      onClick={() => selectConversation(c.id)}
+                    >
+                      {c.title || "Conversation"}
+                    </button>
+                  );
+                })}
+                {conversations.length === 0 && <div style={styles.muted}>Aucune conversation.</div>}
+              </div>
+            </div>
           </div>
+        )}
 
-          <div style={styles.composer}>
-            <textarea
-              style={styles.textarea}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) =>
-                e.key === "Enter" && !e.shiftKey && (e.preventDefault(), sendMessage())
-              }
-              placeholder={`Écrire à ${agent.name}...`}
-              rows={2}
-            />
-            <button style={canSend ? styles.btn : styles.btnDisabled} onClick={sendMessage} disabled={!canSend}>
-              {sending ? "..." : "Envoyer"}
-            </button>
+        {/* CHAT */}
+        <section style={styles.chat}>
+          <div style={styles.chatInner}>
+            {loading ? (
+              <div style={styles.muted}>Chargement…</div>
+            ) : (
+              <>
+                <div style={styles.msgList}>
+                  {messages.map((m) => {
+                    const isUser = m.role === "user";
+                    return (
+                      <div key={m.id} style={{ ...styles.msgRow, justifyContent: isUser ? "flex-end" : "flex-start" }}>
+                        <div style={{ ...styles.bubble, ...(isUser ? styles.bubbleUser : styles.bubbleAssistant) }}>
+                          {/* IMPORTANT: pre-wrap => retours ligne visibles */}
+                          <div style={styles.bubbleText}>{m.content}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div ref={endRef} />
+                </div>
+
+                <div style={styles.composer}>
+                  <textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="Écrire…"
+                    style={styles.input}
+                    rows={isMobile ? 2 : 3}
+                  />
+                  <button style={styles.sendBtn} onClick={sendMessage} disabled={sending}>
+                    {sending ? "…" : "Envoyer"}
+                  </button>
+                </div>
+
+                {!!selectedConversation && (
+                  <div style={styles.tinyNote}>
+                    Conversation: <span style={{ fontFamily: "monospace" }}>{selectedConversation.id.slice(0, 8)}…</span>
+                  </div>
+                )}
+              </>
+            )}
           </div>
-        </div>
-      </section>
+        </section>
+      </div>
     </main>
   );
 }
@@ -390,137 +370,196 @@ export default function Chat() {
 const styles = {
   page: {
     minHeight: "100vh",
-    position: "relative",
+    background: "linear-gradient(135deg,#05060a,#0a0d16)",
+    color: "rgba(238,242,255,.92)",
+    fontFamily: '"Segoe UI", Arial, sans-serif',
     overflow: "hidden",
-    fontFamily: "Segoe UI, sans-serif",
-    color: "#eef2ff",
-    background: "#05060a",
   },
-  bg: { position: "absolute", inset: 0, zIndex: 0 },
-  bgLogo: {
-    position: "absolute",
-    inset: 0,
-    backgroundImage: "url('/images/logopc.png')",
-    backgroundRepeat: "no-repeat",
-    backgroundSize: "contain",
-    backgroundPosition: "center",
-    opacity: 0.08,
-  },
-  bgVeils: {
-    position: "absolute",
-    inset: 0,
-    background: "radial-gradient(circle at 50% 50%, rgba(255,140,40,0.1), transparent)",
-  },
-  topbar: {
-    position: "relative",
-    zIndex: 2,
-    padding: "10px 16px",
+
+  header: {
     display: "flex",
+    gap: 12,
     alignItems: "center",
     justifyContent: "space-between",
-    background: "rgba(0,0,0,.3)",
-    backdropFilter: "blur(10px)",
-    borderBottom: "1px solid rgba(255,255,255,.1)",
+    padding: "12px 12px 0",
+    flexWrap: "wrap",
   },
-  topLeft: { display: "flex", alignItems: "center", gap: 15 },
-  topRight: { display: "flex", alignItems: "center", gap: 10 },
-  backBtn: {
-    padding: "8px 12px",
-    borderRadius: 20,
-    border: "1px solid rgba(255,255,255,.1)",
-    background: "rgba(0,0,0,.3)",
+  headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 280 },
+  headerCenter: { display: "flex", alignItems: "center", justifyContent: "center", flex: 1, minWidth: 140 },
+  headerRight: { display: "flex", alignItems: "center", gap: 10, justifyContent: "flex-end", minWidth: 280, flexWrap: "wrap" },
+
+  headerBtn: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.25)",
     color: "#fff",
+    fontWeight: 900,
     cursor: "pointer",
+    whiteSpace: "nowrap",
   },
-  topAvatar: {
-    width: 45,
-    height: 45,
-    borderRadius: "50%",
-    objectFit: "cover",
-    objectPosition: "center 20%",
-    border: "2px solid rgba(255,140,40,0.3)",
+  headerBtnDanger: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
   },
-  brandLogo: { height: 20, marginLeft: 15, opacity: 0.8 },
-  agentInfo: { display: "grid" },
-  agentName: { fontWeight: 900, fontSize: 14, color: "#fff" },
-  agentDesc: { fontSize: 11, opacity: 0.6 },
-  userChip: {
-    fontSize: 11,
-    padding: "6px 12px",
-    borderRadius: 20,
-    background: "rgba(0,0,0,.3)",
-    border: "1px solid rgba(255,255,255,.1)",
+  emailPill: {
+    padding: "8px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.06)",
+    fontWeight: 800,
+    fontSize: 12,
+    opacity: 0.9,
+    maxWidth: 240,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
-  btnGhost: { background: "none", border: "none", color: "#ff4d4d", fontSize: 11, cursor: "pointer" },
+
+  logo: { height: 28, width: "auto", opacity: 0.95, display: "block" },
+
+  agentBlock: { display: "flex", alignItems: "center", gap: 10 },
+  agentAvatarWrap: { width: 44, height: 44, borderRadius: 999, overflow: "hidden", border: "1px solid rgba(255,255,255,.12)" },
+  agentAvatar: { width: "100%", height: "100%", objectFit: "cover", objectPosition: "center 15%" },
+  agentAvatarFallback: { width: "100%", height: "100%", background: "rgba(255,255,255,.06)" },
+  agentName: { fontWeight: 900, fontSize: 16 },
+  agentRole: { fontWeight: 800, opacity: 0.75, fontSize: 12 },
+
   layout: {
-    position: "relative",
-    zIndex: 1,
     display: "grid",
-    gridTemplateColumns: "280px 1fr",
+    gridTemplateColumns: "360px 1fr",
     gap: 14,
-    padding: 14,
-    height: "calc(100vh - 65px)",
-  },
-  sidebar: {
-    borderRadius: 22,
-    background: "rgba(0,0,0,.4)",
-    backdropFilter: "blur(14px)",
-    display: "flex",
-    flexDirection: "column",
-    overflow: "hidden",
-  },
-  sidebarTop: {
-    padding: 15,
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    borderBottom: "1px solid rgba(255,255,255,0.05)",
-  },
-  sidebarTitle: { fontWeight: 900, fontSize: 12 },
-  newBtn: { background: "#fff", color: "#000", border: "none", padding: "5px 10px", borderRadius: 8, fontSize: 11, fontWeight: 900, cursor: "pointer" },
-  sidebarList: { padding: 10, overflowY: "auto" },
-  histItem: {
-    width: "100%",
     padding: 12,
-    borderRadius: 15,
-    border: "1px solid transparent",
-    background: "none",
-    color: "#fff",
-    cursor: "pointer",
-    textAlign: "left",
-    marginBottom: 5,
+    height: "calc(100vh - 64px)",
   },
-  histItemActive: { background: "rgba(255,140,40,0.1)", border: "1px solid rgba(255,140,40,0.2)" },
-  histRow: { display: "flex", alignItems: "center", gap: 10 },
-  histAvatar: {
-    width: 24,
-    height: 24,
-    borderRadius: "50%",
-    objectFit: "cover",
-    objectPosition: "center 20%",
-    border: "1px solid rgba(255,255,255,0.1)",
-  },
-  histTitle: { fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-  chatCard: {
-    borderRadius: 22,
-    background: "rgba(0,0,0,.4)",
-    backdropFilter: "blur(14px)",
+
+  sidebar: {
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: 16,
+    background: "rgba(0,0,0,.35)",
+    backdropFilter: "blur(10px)",
+    boxShadow: "0 18px 45px rgba(0,0,0,.55)",
+    overflow: "hidden",
     display: "flex",
     flexDirection: "column",
-    overflow: "hidden",
   },
-  thread: { flex: 1, overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 15 },
-  bubbleRow: { display: "flex" },
-  bubble: { maxWidth: "80%", padding: "12px 16px", borderRadius: 18, border: "1px solid rgba(255,255,255,0.05)" },
-  bubbleUser: { background: "rgba(255,255,255,0.05)" },
-  bubbleBot: { background: "rgba(0,0,0,0.3)" },
-  bubbleHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 5 },
-  bubbleAvatar: { width: 20, height: 20, borderRadius: "50%", objectFit: "cover", objectPosition: "center 20%" },
-  role: { fontSize: 10, fontWeight: 900, opacity: 0.5 },
-  text: { fontSize: 14, lineHeight: 1.5 },
-  composer: { padding: 15, display: "flex", gap: 10, background: "rgba(0,0,0,0.2)" },
-  textarea: { flex: 1, background: "#000", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, padding: 12, color: "#fff", resize: "none" },
-  btn: { background: "#ff8c28", color: "#fff", border: "none", borderRadius: 12, padding: "0 20px", fontWeight: 900, cursor: "pointer" },
-  btnDisabled: { background: "#222", color: "#555", borderRadius: 12, padding: "0 20px" },
-  alert: { background: "rgba(255,0,0,0.1)", padding: 10, color: "#ff4d4d", fontSize: 12, textAlign: "center" },
+  sidebarHead: {
+    padding: 12,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    borderBottom: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.12)",
+  },
+  sidebarTitle: { fontWeight: 900 },
+  newBtn: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  sidebarList: { padding: 12, display: "grid", gap: 10, overflow: "auto" },
+
+  convItem: {
+    textAlign: "left",
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(255,255,255,.03)",
+    color: "rgba(238,242,255,.92)",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  convItemActive: { borderColor: "rgba(255,140,40,.35)", background: "rgba(255,140,40,.10)" },
+
+  chat: {
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: 16,
+    background: "rgba(0,0,0,.35)",
+    backdropFilter: "blur(10px)",
+    boxShadow: "0 18px 45px rgba(0,0,0,.55)",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+  },
+  chatInner: { display: "flex", flexDirection: "column", height: "100%" },
+  msgList: { padding: 12, overflow: "auto", flex: 1 },
+
+  msgRow: { display: "flex", marginBottom: 10 },
+  bubble: {
+    maxWidth: "min(820px, 92%)",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.12)",
+    padding: 12,
+    boxShadow: "0 10px 24px rgba(0,0,0,.35)",
+  },
+  bubbleUser: { background: "rgba(255,255,255,.08)" },
+  bubbleAssistant: { background: "rgba(0,0,0,.20)" },
+  bubbleText: {
+    whiteSpace: "pre-wrap",
+    lineHeight: 1.35,
+    fontWeight: 650,
+    fontSize: 14,
+  },
+
+  composer: {
+    display: "flex",
+    gap: 10,
+    padding: 12,
+    borderTop: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.12)",
+    alignItems: "flex-end",
+  },
+  input: {
+    flex: 1,
+    resize: "none",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.92)",
+    padding: 12,
+    outline: "none",
+    fontWeight: 800,
+    lineHeight: 1.3,
+  },
+  sendBtn: {
+    borderRadius: 14,
+    padding: "12px 14px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    minWidth: 96,
+  },
+
+  tinyNote: { padding: "0 12px 10px", opacity: 0.7, fontWeight: 800, fontSize: 12 },
+  muted: { opacity: 0.75, fontWeight: 800 },
+
+  drawerOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,.65)",
+    zIndex: 9999,
+    display: "flex",
+  },
+  drawer: {
+    width: "min(420px, 86vw)",
+    height: "100%",
+    background: "rgba(0,0,0,.85)",
+    borderRight: "1px solid rgba(255,255,255,.12)",
+    padding: 12,
+    display: "flex",
+    flexDirection: "column",
+  },
 };
