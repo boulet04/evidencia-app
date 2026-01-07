@@ -8,10 +8,10 @@ export default function Chat() {
   const [email, setEmail] = useState("");
   const [userId, setUserId] = useState("");
 
-  const [agent, setAgent] = useState(null);
+  const [agent, setAgent] = useState(null); // { slug, name, description, avatar_url }
   const [conversationId, setConversationId] = useState(null);
 
-  const [history, setHistory] = useState([]);
+  const [history, setHistory] = useState([]); // 10 dernières conversations
   const [messages, setMessages] = useState([]);
 
   const [input, setInput] = useState("");
@@ -19,12 +19,12 @@ export default function Chat() {
   const [errorMsg, setErrorMsg] = useState("");
 
   const threadRef = useRef(null);
-
   const canSend = useMemo(
     () => input.trim().length > 0 && !sending,
     [input, sending]
   );
 
+  // ---------- Helpers ----------
   function safeDecode(v) {
     try {
       return decodeURIComponent(v || "");
@@ -45,6 +45,23 @@ export default function Chat() {
       if (!el) return;
       el.scrollTop = el.scrollHeight;
     });
+  }
+
+  function normalizeImgSrc(src) {
+    const s = (src || "").toString().trim();
+    if (!s) return "";
+    if (s.startsWith("http://") || s.startsWith("https://")) return s;
+    if (s.startsWith("/")) return s;
+    return "/" + s;
+  }
+
+  function getAgentAvatar() {
+    if (!agent) return "/images/logopc.png";
+    return (
+      normalizeImgSrc(agent.avatar_url) ||
+      `/images/${agent.slug}.png` ||
+      "/images/logopc.png"
+    );
   }
 
   async function fetchAgent(slug) {
@@ -71,11 +88,11 @@ export default function Chat() {
     return data || [];
   }
 
-  // IMPORTANT : ta table s'appelle "messages"
-  async function fetchMessages({ convId }) {
+  async function fetchMessages({ uid, convId }) {
     const { data, error } = await supabase
-      .from("messages")
-      .select("id, role, content, created_at, conversation_id")
+      .from("conversation_messages")
+      .select("id, role, content, created_at")
+      .eq("user_id", uid)
       .eq("conversation_id", convId)
       .order("created_at", { ascending: true });
 
@@ -102,18 +119,23 @@ export default function Chat() {
     const patch = { updated_at: new Date().toISOString() };
     if (titleMaybe) patch.title = titleMaybe;
 
-    await supabase.from("conversations").update(patch).eq("user_id", uid).eq("id", convId);
+    await supabase
+      .from("conversations")
+      .update(patch)
+      .eq("user_id", uid)
+      .eq("id", convId);
   }
 
-  // IMPORTANT : insert dans "messages"
-  async function insertMessage({ convId, role, content }) {
-    await supabase.from("messages").insert({
+  async function insertMessage({ uid, convId, role, content }) {
+    await supabase.from("conversation_messages").insert({
+      user_id: uid,
       conversation_id: convId,
       role,
       content,
     });
   }
 
+  // ---------- Boot ----------
   useEffect(() => {
     let mounted = true;
 
@@ -163,7 +185,7 @@ export default function Chat() {
       let chosenConvId = null;
 
       if (convIdFromUrl) {
-        const msgs = await fetchMessages({ convId: convIdFromUrl });
+        const msgs = await fetchMessages({ uid, convId: convIdFromUrl });
         if (msgs.length > 0) {
           chosenConvId = convIdFromUrl;
           setConversationId(chosenConvId);
@@ -178,7 +200,7 @@ export default function Chat() {
         chosenConvId = h[0].id;
         setConversationId(chosenConvId);
 
-        const msgs = await fetchMessages({ convId: chosenConvId });
+        const msgs = await fetchMessages({ uid, convId: chosenConvId });
         if (!mounted) return;
 
         if (msgs.length > 0) {
@@ -233,6 +255,7 @@ export default function Chat() {
     };
   }, []);
 
+  // ---------- Actions ----------
   async function logout() {
     await supabase.auth.signOut();
     window.location.href = "/login";
@@ -251,7 +274,7 @@ export default function Chat() {
       window.history.replaceState({}, "", url.toString());
     } catch (_) {}
 
-    const msgs = await fetchMessages({ convId });
+    const msgs = await fetchMessages({ uid: userId, convId });
     setMessages(
       msgs.length > 0
         ? msgs
@@ -277,7 +300,7 @@ export default function Chat() {
     });
 
     if (!convId) {
-      setErrorMsg("Impossible de créer une conversation (policies Supabase ?).");
+      setErrorMsg("Impossible de créer une conversation.");
       return;
     }
 
@@ -314,13 +337,16 @@ export default function Chat() {
     scrollToBottom();
 
     await insertMessage({
+      uid: userId,
       convId: conversationId,
       role: "user",
       content: userText,
     });
 
     const isFirstUser = messages.filter((m) => m.role === "user").length === 0;
-    const titleMaybe = isFirstUser ? formatTitleFromFirstUserMessage(userText) : null;
+    const titleMaybe = isFirstUser
+      ? formatTitleFromFirstUserMessage(userText)
+      : null;
 
     const {
       data: { session },
@@ -353,24 +379,33 @@ export default function Chat() {
 
       setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
       await insertMessage({
+        uid: userId,
         convId: conversationId,
         role: "assistant",
         content: reply,
       });
 
-      await touchConversation({ uid: userId, convId: conversationId, titleMaybe });
+      await touchConversation({
+        uid: userId,
+        convId: conversationId,
+        titleMaybe,
+      });
+
       const h = await fetchHistory({ uid: userId, agentSlug: agent.slug });
       setHistory(h);
 
       scrollToBottom();
     } catch (e) {
-      setErrorMsg(e?.message || "Erreur interne. Réessayez plus tard.");
+      const errText = e?.message || "Erreur interne. Réessayez plus tard.";
+      setErrorMsg(errText);
+
       setMessages((prev) => [
         ...prev,
         { role: "assistant", content: "Erreur interne. Réessayez plus tard." },
       ]);
 
       await insertMessage({
+        uid: userId,
         convId: conversationId,
         role: "assistant",
         content: "Erreur interne. Réessayez plus tard.",
@@ -393,6 +428,7 @@ export default function Chat() {
     }
   }
 
+  // ---------- UI ----------
   if (loading || !agent) {
     return (
       <main style={styles.page}>
@@ -410,6 +446,8 @@ export default function Chat() {
     );
   }
 
+  const agentAvatar = getAgentAvatar();
+
   return (
     <main style={styles.page}>
       <div style={styles.bg} aria-hidden="true">
@@ -419,11 +457,19 @@ export default function Chat() {
 
       <header style={styles.topbar}>
         <div style={styles.topLeft}>
-          <button style={styles.backBtn} onClick={() => (window.location.href = "/agents")}>
+          <button
+            type="button"
+            style={styles.backBtn}
+            onClick={() => (window.location.href = "/agents")}
+          >
             ← Retour
           </button>
 
-          <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
+          <img
+            src="/images/logolong.png"
+            alt="Evidenc’IA"
+            style={styles.brandLogo}
+          />
 
           <div style={styles.agentInfo}>
             <div style={styles.agentName}>{agent.name}</div>
@@ -433,35 +479,58 @@ export default function Chat() {
 
         <div style={styles.topRight}>
           <span style={styles.userChip}>{email || "Connecté"}</span>
-          <button onClick={logout} style={styles.btnGhost}>
+          <button type="button" onClick={logout} style={styles.btnGhost}>
             Déconnexion
           </button>
         </div>
       </header>
 
       <section style={styles.layout}>
+        {/* Sidebar */}
         <aside style={styles.sidebar}>
           <div style={styles.sidebarTop}>
             <div style={styles.sidebarTitle}>Historique</div>
-            <button onClick={newConversation} style={styles.newBtn}>
+            <button type="button" onClick={newConversation} style={styles.newBtn}>
               + Nouvelle
             </button>
           </div>
 
           <div style={styles.sidebarList}>
             {history.length === 0 ? (
-              <div style={styles.sidebarEmpty}>Aucune conversation pour cet agent.</div>
+              <div style={styles.sidebarEmpty}>
+                Aucune conversation pour cet agent.
+              </div>
             ) : (
               history.map((c) => {
                 const active = c.id === conversationId;
                 return (
                   <button
+                    type="button"
                     key={c.id}
                     onClick={() => openConversation(c.id)}
-                    style={{ ...styles.histItem, ...(active ? styles.histItemActive : null) }}
+                    style={{
+                      ...styles.histItem,
+                      ...(active ? styles.histItemActive : null),
+                    }}
                     title={c.title || "Conversation"}
                   >
-                    <div style={styles.histTitle}>{c.title || "Conversation"}</div>
+                    {/* ✅ Avatar “bulle” + titre */}
+                    <div style={styles.histRow}>
+                      <img
+                        src={agentAvatar}
+                        alt={agent.name}
+                        style={styles.histAvatar}
+                        loading="lazy"
+                        onError={(e) => {
+                          e.currentTarget.onerror = null;
+                          e.currentTarget.src = "/images/logopc.png";
+                        }}
+                      />
+                      <div style={styles.histTitle}>
+                        {c.title || "Conversation"}
+                      </div>
+                    </div>
+
                     <div style={styles.histDate}>
                       {c.updated_at
                         ? new Date(c.updated_at).toLocaleString("fr-FR", {
@@ -479,29 +548,52 @@ export default function Chat() {
           </div>
         </aside>
 
+        {/* Chat */}
         <div style={styles.chatCard}>
           {errorMsg ? <div style={styles.alert}>{errorMsg}</div> : null}
 
           <div style={styles.thread} ref={threadRef}>
-            {messages.map((m, idx) => (
-              <div
-                key={idx}
-                style={{
-                  ...styles.bubbleRow,
-                  justifyContent: m.role === "user" ? "flex-end" : "flex-start",
-                }}
-              >
+            {messages.map((m, idx) => {
+              const isUser = m.role === "user";
+              return (
                 <div
+                  key={idx}
                   style={{
-                    ...styles.bubble,
-                    ...(m.role === "user" ? styles.bubbleUser : styles.bubbleBot),
+                    ...styles.bubbleRow,
+                    justifyContent: isUser ? "flex-end" : "flex-start",
                   }}
                 >
-                  <div style={styles.role}>{m.role === "user" ? "Vous" : agent.name}</div>
-                  <div style={styles.text}>{m.content}</div>
+                  <div
+                    style={{
+                      ...styles.bubble,
+                      ...(isUser ? styles.bubbleUser : styles.bubbleBot),
+                    }}
+                  >
+                    {/* ✅ Header bulle : avatar agent + nom (seulement côté assistant) */}
+                    <div style={styles.bubbleHeader}>
+                      {!isUser ? (
+                        <img
+                          src={agentAvatar}
+                          alt={agent.name}
+                          style={styles.bubbleAvatar}
+                          loading="lazy"
+                          onError={(e) => {
+                            e.currentTarget.onerror = null;
+                            e.currentTarget.src = "/images/logopc.png";
+                          }}
+                        />
+                      ) : null}
+
+                      <div style={styles.role}>
+                        {isUser ? "Vous" : agent.name}
+                      </div>
+                    </div>
+
+                    <div style={styles.text}>{m.content}</div>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div style={styles.composer}>
@@ -514,7 +606,12 @@ export default function Chat() {
               rows={2}
               autoComplete="off"
             />
-            <button style={canSend ? styles.btn : styles.btnDisabled} onClick={sendMessage} disabled={!canSend}>
+            <button
+              type="button"
+              style={canSend ? styles.btn : styles.btnDisabled}
+              onClick={sendMessage}
+              disabled={!canSend}
+            >
               {sending ? "Envoi…" : "Envoyer"}
             </button>
           </div>
@@ -524,6 +621,7 @@ export default function Chat() {
   );
 }
 
+/* ================== STYLES (charte Evidencia) ================== */
 const styles = {
   page: {
     minHeight: "100vh",
@@ -533,7 +631,9 @@ const styles = {
     color: "#eef2ff",
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
   },
+
   bg: { position: "absolute", inset: 0, zIndex: 0 },
+
   bgLogo: {
     position: "absolute",
     inset: 0,
@@ -545,6 +645,7 @@ const styles = {
     filter: "contrast(1.05) saturate(1.05) brightness(.80)",
     transform: "scale(1.02)",
   },
+
   bgVeils: {
     position: "absolute",
     inset: 0,
@@ -553,6 +654,7 @@ const styles = {
       "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), rgba(0,0,0,0) 62%)," +
       "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22) 30%, rgba(0,0,0,.22) 70%, rgba(0,0,0,.66))",
   },
+
   topbar: {
     position: "relative",
     zIndex: 2,
@@ -565,8 +667,16 @@ const styles = {
     backdropFilter: "blur(10px)",
     borderBottom: "1px solid rgba(255,255,255,.10)",
   },
-  topLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
+
+  topLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    minWidth: 0,
+  },
+
   topRight: { display: "flex", alignItems: "center", gap: 10 },
+
   backBtn: {
     padding: "10px 12px",
     borderRadius: 999,
@@ -577,13 +687,20 @@ const styles = {
     cursor: "pointer",
     whiteSpace: "nowrap",
   },
+
   brandLogo: {
     height: 24,
     width: "auto",
     display: "block",
     filter: "drop-shadow(0 10px 26px rgba(0,0,0,.55))",
   },
-  agentInfo: { display: "grid", gap: 2, minWidth: 0 },
+
+  agentInfo: {
+    display: "grid",
+    gap: 2,
+    minWidth: 0,
+  },
+
   agentName: {
     fontWeight: 900,
     fontSize: 13,
@@ -593,6 +710,7 @@ const styles = {
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
+
   agentDesc: {
     fontWeight: 800,
     fontSize: 12,
@@ -601,6 +719,7 @@ const styles = {
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
+
   userChip: {
     fontSize: 12,
     fontWeight: 900,
@@ -614,6 +733,7 @@ const styles = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
+
   btnGhost: {
     padding: "10px 14px",
     borderRadius: 999,
@@ -623,6 +743,7 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
   },
+
   layout: {
     position: "relative",
     zIndex: 1,
@@ -633,6 +754,8 @@ const styles = {
     height: "calc(100vh - 64px)",
     boxSizing: "border-box",
   },
+
+  /* Sidebar */
   sidebar: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -643,6 +766,7 @@ const styles = {
     flexDirection: "column",
     minHeight: 0,
   },
+
   sidebarTop: {
     padding: 14,
     display: "flex",
@@ -652,7 +776,14 @@ const styles = {
     borderBottom: "1px solid rgba(255,255,255,.08)",
     background: "rgba(0,0,0,.18)",
   },
-  sidebarTitle: { fontWeight: 900, color: "#eef2ff", fontSize: 13, letterSpacing: 0.2 },
+
+  sidebarTitle: {
+    fontWeight: 900,
+    color: "#eef2ff",
+    fontSize: 13,
+    letterSpacing: 0.2,
+  },
+
   newBtn: {
     padding: "10px 12px",
     borderRadius: 999,
@@ -663,6 +794,7 @@ const styles = {
     cursor: "pointer",
     whiteSpace: "nowrap",
   },
+
   sidebarList: {
     padding: 10,
     overflowY: "auto",
@@ -670,6 +802,7 @@ const styles = {
     gap: 10,
     minHeight: 0,
   },
+
   sidebarEmpty: {
     padding: 12,
     borderRadius: 16,
@@ -679,6 +812,7 @@ const styles = {
     fontSize: 12,
     lineHeight: 1.35,
   },
+
   histItem: {
     textAlign: "left",
     width: "100%",
@@ -691,10 +825,30 @@ const styles = {
     display: "grid",
     gap: 6,
   },
+
   histItemActive: {
-    background: "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
+    background:
+      "linear-gradient(135deg, rgba(255,140,40,.14), rgba(80,120,255,.10))",
     border: "1px solid rgba(255,140,40,.18)",
   },
+
+  histRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    minWidth: 0,
+  },
+
+  histAvatar: {
+    width: 22,
+    height: 22,
+    borderRadius: "50%",
+    objectFit: "cover",
+    objectPosition: "center 20%",
+    border: "1px solid rgba(255,255,255,.14)",
+    flex: "0 0 auto",
+  },
+
   histTitle: {
     fontWeight: 900,
     fontSize: 13,
@@ -702,8 +856,16 @@ const styles = {
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
+    minWidth: 0,
   },
-  histDate: { fontWeight: 800, fontSize: 11, color: "rgba(238,242,255,.65)" },
+
+  histDate: {
+    fontWeight: 800,
+    fontSize: 11,
+    color: "rgba(238,242,255,.65)",
+  },
+
+  /* Chat card */
   chatCard: {
     borderRadius: 22,
     background: "linear-gradient(135deg, rgba(0,0,0,.58), rgba(0,0,0,.36))",
@@ -714,6 +876,7 @@ const styles = {
     flexDirection: "column",
     minHeight: 0,
   },
+
   alert: {
     margin: 12,
     padding: 12,
@@ -724,8 +887,18 @@ const styles = {
     fontWeight: 900,
     fontSize: 13,
   },
-  thread: { flex: 1, overflowY: "auto", padding: 14, display: "grid", gap: 12, minHeight: 0 },
+
+  thread: {
+    flex: 1,
+    overflowY: "auto",
+    padding: 14,
+    display: "grid",
+    gap: 12,
+    minHeight: 0,
+  },
+
   bubbleRow: { display: "flex" },
+
   bubble: {
     maxWidth: 760,
     borderRadius: 18,
@@ -735,10 +908,44 @@ const styles = {
     lineHeight: 1.45,
     border: "1px solid rgba(255,255,255,.10)",
   },
-  bubbleUser: { background: "rgba(255,255,255,.10)" },
-  bubbleBot: { background: "rgba(0,0,0,.35)" },
-  role: { fontSize: 11, fontWeight: 900, color: "rgba(238,242,255,.72)", marginBottom: 6 },
-  text: { fontSize: 14, fontWeight: 700, color: "rgba(238,242,255,.92)" },
+
+  bubbleUser: {
+    background: "rgba(255,255,255,.10)",
+  },
+
+  bubbleBot: {
+    background: "rgba(0,0,0,.35)",
+  },
+
+  bubbleHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 6,
+  },
+
+  bubbleAvatar: {
+    width: 18,
+    height: 18,
+    borderRadius: "50%",
+    objectFit: "cover",
+    objectPosition: "center 20%",
+    border: "1px solid rgba(255,255,255,.14)",
+    flex: "0 0 auto",
+  },
+
+  role: {
+    fontSize: 11,
+    fontWeight: 900,
+    color: "rgba(238,242,255,.72)",
+  },
+
+  text: {
+    fontSize: 14,
+    fontWeight: 700,
+    color: "rgba(238,242,255,.92)",
+  },
+
   composer: {
     display: "flex",
     gap: 10,
@@ -747,6 +954,7 @@ const styles = {
     background: "rgba(0,0,0,.22)",
     backdropFilter: "blur(10px)",
   },
+
   textarea: {
     flex: 1,
     resize: "none",
@@ -760,17 +968,20 @@ const styles = {
     fontSize: 14,
     lineHeight: 1.4,
   },
+
   btn: {
     padding: "12px 16px",
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,.12)",
-    background: "linear-gradient(135deg, rgba(255,140,40,.18), rgba(80,120,255,.12))",
+    background:
+      "linear-gradient(135deg, rgba(255,140,40,.18), rgba(80,120,255,.12))",
     color: "#eef2ff",
     fontWeight: 900,
     cursor: "pointer",
     minWidth: 110,
     boxShadow: "0 18px 45px rgba(0,0,0,.45)",
   },
+
   btnDisabled: {
     padding: "12px 16px",
     borderRadius: 999,
@@ -781,6 +992,8 @@ const styles = {
     cursor: "not-allowed",
     minWidth: 110,
   },
+
+  /* Loading */
   center: {
     position: "relative",
     zIndex: 1,
@@ -789,6 +1002,7 @@ const styles = {
     placeItems: "center",
     padding: 24,
   },
+
   loadingCard: {
     width: "100%",
     maxWidth: 520,
@@ -798,5 +1012,11 @@ const styles = {
     boxShadow: "0 24px 70px rgba(0,0,0,.60)",
     backdropFilter: "blur(14px)",
   },
-  loadingSub: { marginTop: 6, color: "rgba(255,255,255,.78)", fontWeight: 800, fontSize: 12 },
+
+  loadingSub: {
+    marginTop: 6,
+    color: "rgba(255,255,255,.78)",
+    fontWeight: 800,
+    fontSize: 12,
+  },
 };
