@@ -4,7 +4,10 @@ import { supabase } from "../lib/supabaseClient";
 
 export default function ChatPage() {
   const [sessionEmail, setSessionEmail] = useState("");
-  const [agentSlug, setAgentSlug] = useState(""); // si vous utilisez un agent choisi avant, vous pouvez hydrater via localStorage
+  const [sessionUserId, setSessionUserId] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  const [agentSlug, setAgentSlug] = useState("");
   const [agentName, setAgentName] = useState("");
   const [agentRole, setAgentRole] = useState("");
   const [agentAvatar, setAgentAvatar] = useState("");
@@ -27,9 +30,16 @@ export default function ChatPage() {
     return data?.session?.access_token || "";
   }
 
+  function redirectToLogin() {
+    window.location.href = "/login";
+  }
+
   async function logout() {
-    await supabase.auth.signOut();
-    window.location.href = "/";
+    try {
+      await supabase.auth.signOut();
+    } finally {
+      redirectToLogin();
+    }
   }
 
   function goBack() {
@@ -37,6 +47,7 @@ export default function ChatPage() {
   }
 
   function openAdmin() {
+    if (!isAdmin) return;
     window.location.href = "/admin";
   }
 
@@ -49,21 +60,47 @@ export default function ChatPage() {
     return () => mql.removeEventListener?.("change", apply);
   }, []);
 
-  // Boot: session + agent + conversations/messages
+  // Boot: session + role + agent + conversations/messages
   useEffect(() => {
     (async () => {
       setLoading(true);
 
       const { data: sess } = await supabase.auth.getSession();
-      const email = sess?.session?.user?.email || "";
+      const session = sess?.session || null;
+
+      if (!session?.user?.id) {
+        redirectToLogin();
+        return;
+      }
+
+      const userId = session.user.id;
+      const email = session.user.email || "";
+
+      setSessionUserId(userId);
       setSessionEmail(email);
 
-      // Agent choisi: on le récupère depuis localStorage si dispo, sinon valeur par défaut
-      const stored = window.localStorage.getItem("selected_agent_slug") || "";
-      const slug = (stored || "emma").trim().toLowerCase();
+      // Charger rôle admin depuis profiles (source of truth)
+      try {
+        const { data: prof } = await supabase
+          .from("profiles")
+          .select("role")
+          .eq("user_id", userId)
+          .maybeSingle();
+
+        setIsAdmin((prof?.role || "").toLowerCase() === "admin");
+      } catch {
+        setIsAdmin(false);
+      }
+
+      // Agent: priorité à l'URL ?agent=..., puis localStorage, sinon emma
+      const params = new URLSearchParams(window.location.search || "");
+      const fromQuery = (params.get("agent") || "").trim().toLowerCase();
+      const stored = (window.localStorage.getItem("selected_agent_slug") || "").trim().toLowerCase();
+      const slug = (fromQuery || stored || "emma").trim().toLowerCase();
+
       setAgentSlug(slug);
 
-      // Charger infos agent (table agents)
+      // Charger infos agent
       const { data: agent } = await supabase
         .from("agents")
         .select("slug,name,description,avatar_url")
@@ -74,16 +111,18 @@ export default function ChatPage() {
       setAgentRole(agent?.description || "");
       setAgentAvatar(agent?.avatar_url || "");
 
-      // Charger conversations
+      // Charger conversations (filtrées user + agent)
       const { data: convs } = await supabase
         .from("conversations")
         .select("id,user_id,created_at,agent_slug,title,archived")
+        .eq("user_id", userId)
         .eq("agent_slug", slug)
         .order("created_at", { ascending: false });
 
       const list = convs || [];
       setConversations(list);
 
+      // Auto-sélection de la plus récente si existe
       const firstId = list?.[0]?.id || "";
       setSelectedConvId(firstId);
 
@@ -114,6 +153,7 @@ export default function ChatPage() {
   }, [conversations, selectedConvId]);
 
   async function selectConversation(id) {
+    if (!id) return;
     setSelectedConvId(id);
     setDrawerOpen(false);
 
@@ -126,47 +166,75 @@ export default function ChatPage() {
     setMessages(msgs || []);
   }
 
-  async function newConversation() {
+  async function createConversationAndSelect() {
     const { data: sess } = await supabase.auth.getSession();
     const userId = sess?.session?.user?.id;
-    if (!userId) return alert("Non authentifié.");
+
+    if (!userId) {
+      redirectToLogin();
+      return null;
+    }
 
     const { data: conv, error } = await supabase
       .from("conversations")
-      .insert([{ user_id: userId, agent_slug: agentSlug, title: "Nouvelle conversation", archived: false }])
+      .insert([
+        {
+          user_id: userId,
+          agent_slug: agentSlug || "emma",
+          title: "Nouvelle conversation",
+          archived: false,
+        },
+      ])
       .select("id,user_id,created_at,agent_slug,title,archived")
       .maybeSingle();
 
-    if (error) return alert(error.message);
+    if (error) {
+      alert(error.message);
+      return null;
+    }
 
-    const next = [conv, ...conversations];
-    setConversations(next);
+    // Mettre à jour l'état
+    setConversations((prev) => [conv, ...(prev || [])]);
     setSelectedConvId(conv.id);
     setMessages([]);
     setDrawerOpen(false);
+
+    return conv.id;
+  }
+
+  async function newConversation() {
+    await createConversationAndSelect();
   }
 
   async function sendMessage() {
     const text = (input || "").trim();
     if (!text) return;
-    if (!selectedConvId) return alert("Aucune conversation sélectionnée.");
 
     setSending(true);
     setInput("");
 
-    // 1) Sauvegarde message user
-    await supabase.from("messages").insert([{ conversation_id: selectedConvId, role: "user", content: text }]);
-
-    // 2) Refresh messages (optimiste simple)
-    const { data: msgs1 } = await supabase
-      .from("messages")
-      .select("id,conversation_id,role,content,created_at")
-      .eq("conversation_id", selectedConvId)
-      .order("created_at", { ascending: true });
-
-    setMessages(msgs1 || []);
-
     try {
+      // S'il n'y a pas de conversation sélectionnée, on la crée automatiquement
+      let convId = selectedConvId;
+      if (!convId) {
+        const createdId = await createConversationAndSelect();
+        if (!createdId) return;
+        convId = createdId;
+      }
+
+      // 1) Sauvegarde message user
+      await supabase.from("messages").insert([{ conversation_id: convId, role: "user", content: text }]);
+
+      // Refresh messages (optimiste simple)
+      const { data: msgs1 } = await supabase
+        .from("messages")
+        .select("id,conversation_id,role,content,created_at")
+        .eq("conversation_id", convId)
+        .order("created_at", { ascending: true });
+
+      setMessages(msgs1 || []);
+
+      // 2) Appel API agent
       const token = await getAccessToken();
       if (!token) throw new Error("Non authentifié.");
 
@@ -179,28 +247,37 @@ export default function ChatPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
 
-      const reply = (data.reply || data.answer || data.content || "").toString();
+      const reply = (data.reply || data.answer || data.content || "").toString().trim();
 
       // 3) Sauvegarde message assistant
-      await supabase.from("messages").insert([{ conversation_id: selectedConvId, role: "assistant", content: reply }]);
+      await supabase.from("messages").insert([
+        { conversation_id: convId, role: "assistant", content: reply || "Réponse vide." },
+      ]);
 
       const { data: msgs2 } = await supabase
         .from("messages")
         .select("id,conversation_id,role,content,created_at")
-        .eq("conversation_id", selectedConvId)
+        .eq("conversation_id", convId)
         .order("created_at", { ascending: true });
 
       setMessages(msgs2 || []);
     } catch (e) {
-      await supabase.from("messages").insert([
-        { conversation_id: selectedConvId, role: "assistant", content: `Erreur: ${String(e?.message || e)}` },
-      ]);
-      const { data: msgs2 } = await supabase
-        .from("messages")
-        .select("id,conversation_id,role,content,created_at")
-        .eq("conversation_id", selectedConvId)
-        .order("created_at", { ascending: true });
-      setMessages(msgs2 || []);
+      const convId = selectedConvId || "";
+      if (convId) {
+        await supabase.from("messages").insert([
+          { conversation_id: convId, role: "assistant", content: `Erreur: ${String(e?.message || e)}` },
+        ]);
+
+        const { data: msgs2 } = await supabase
+          .from("messages")
+          .select("id,conversation_id,role,content,created_at")
+          .eq("conversation_id", convId)
+          .order("created_at", { ascending: true });
+
+        setMessages(msgs2 || []);
+      } else {
+        alert(String(e?.message || e));
+      }
     } finally {
       setSending(false);
     }
@@ -242,10 +319,17 @@ export default function ChatPage() {
         </div>
 
         <div style={styles.headerRight}>
-          <div style={styles.emailPill}>{sessionEmail || ""}</div>
-          <button style={styles.headerBtn} onClick={openAdmin}>
-            Console administrateur
-          </button>
+          <div style={styles.emailPill} title={sessionEmail || ""}>
+            {sessionEmail || ""}
+          </div>
+
+          {/* Bouton admin uniquement si admin */}
+          {isAdmin && (
+            <button style={styles.headerBtn} onClick={openAdmin}>
+              Console administrateur
+            </button>
+          )}
+
           <button style={styles.headerBtnDanger} onClick={logout}>
             Déconnexion
           </button>
@@ -259,7 +343,7 @@ export default function ChatPage() {
       </div>
 
       {/* LAYOUT */}
-      <div style={styles.layout}>
+      <div style={{ ...styles.layout, ...(isMobile ? styles.layoutMobile : {}) }}>
         {/* SIDEBAR desktop */}
         {!isMobile && (
           <aside style={styles.sidebar}>
@@ -331,7 +415,6 @@ export default function ChatPage() {
                     return (
                       <div key={m.id} style={{ ...styles.msgRow, justifyContent: isUser ? "flex-end" : "flex-start" }}>
                         <div style={{ ...styles.bubble, ...(isUser ? styles.bubbleUser : styles.bubbleAssistant) }}>
-                          {/* IMPORTANT: pre-wrap => retours ligne visibles */}
                           <div style={styles.bubbleText}>{m.content}</div>
                         </div>
                       </div>
@@ -355,7 +438,8 @@ export default function ChatPage() {
 
                 {!!selectedConversation && (
                   <div style={styles.tinyNote}>
-                    Conversation: <span style={{ fontFamily: "monospace" }}>{selectedConversation.id.slice(0, 8)}…</span>
+                    Conversation:{" "}
+                    <span style={{ fontFamily: "monospace" }}>{selectedConversation.id.slice(0, 8)}…</span>
                   </div>
                 )}
               </>
@@ -369,7 +453,9 @@ export default function ChatPage() {
 
 const styles = {
   page: {
-    minHeight: "100vh",
+    height: "100vh",
+    display: "flex",
+    flexDirection: "column",
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
     color: "rgba(238,242,255,.92)",
     fontFamily: '"Segoe UI", Arial, sans-serif',
@@ -381,12 +467,23 @@ const styles = {
     gap: 12,
     alignItems: "center",
     justifyContent: "space-between",
-    padding: "12px 12px 0",
+    padding: "12px 12px 10px",
+    flexWrap: "wrap",
+    borderBottom: "1px solid rgba(255,255,255,.08)",
+    background: "rgba(0,0,0,.10)",
+    backdropFilter: "blur(10px)",
+    flex: "0 0 auto",
+  },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 260 },
+  headerCenter: { display: "flex", alignItems: "center", justifyContent: "center", flex: 1, minWidth: 140 },
+  headerRight: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    justifyContent: "flex-end",
+    minWidth: 260,
     flexWrap: "wrap",
   },
-  headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 280 },
-  headerCenter: { display: "flex", alignItems: "center", justifyContent: "center", flex: 1, minWidth: 140 },
-  headerRight: { display: "flex", alignItems: "center", gap: 10, justifyContent: "flex-end", minWidth: 280, flexWrap: "wrap" },
 
   headerBtn: {
     borderRadius: 999,
@@ -425,18 +522,30 @@ const styles = {
   logo: { height: 28, width: "auto", opacity: 0.95, display: "block" },
 
   agentBlock: { display: "flex", alignItems: "center", gap: 10 },
-  agentAvatarWrap: { width: 44, height: 44, borderRadius: 999, overflow: "hidden", border: "1px solid rgba(255,255,255,.12)" },
+  agentAvatarWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 999,
+    overflow: "hidden",
+    border: "1px solid rgba(255,255,255,.12)",
+  },
   agentAvatar: { width: "100%", height: "100%", objectFit: "cover", objectPosition: "center 15%" },
   agentAvatarFallback: { width: "100%", height: "100%", background: "rgba(255,255,255,.06)" },
   agentName: { fontWeight: 900, fontSize: 16 },
   agentRole: { fontWeight: 800, opacity: 0.75, fontSize: 12 },
 
   layout: {
+    flex: "1 1 auto",
+    minHeight: 0,
     display: "grid",
     gridTemplateColumns: "360px 1fr",
     gap: 14,
     padding: 12,
-    height: "calc(100vh - 64px)",
+    overflow: "hidden",
+  },
+  layoutMobile: {
+    gridTemplateColumns: "1fr",
+    padding: 10,
   },
 
   sidebar: {
@@ -448,6 +557,7 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
+    minHeight: 0,
   },
   sidebarHead: {
     padding: 12,
@@ -491,9 +601,10 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
+    minHeight: 0,
   },
-  chatInner: { display: "flex", flexDirection: "column", height: "100%" },
-  msgList: { padding: 12, overflow: "auto", flex: 1 },
+  chatInner: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 },
+  msgList: { padding: 12, overflow: "auto", flex: 1, minHeight: 0 },
 
   msgRow: { display: "flex", marginBottom: 10 },
   bubble: {
@@ -519,6 +630,7 @@ const styles = {
     borderTop: "1px solid rgba(255,255,255,.10)",
     background: "rgba(0,0,0,.12)",
     alignItems: "flex-end",
+    flex: "0 0 auto",
   },
   input: {
     flex: 1,
