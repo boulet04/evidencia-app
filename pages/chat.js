@@ -211,9 +211,19 @@ export default function Chat() {
   return (
     <main style={styles.page}>
       <div style={styles.bg} aria-hidden="true"><div style={styles.bgLogo} /><div style={styles.bgVeils} /></div>
+      
       <header style={styles.topbar}>
         <div style={styles.topLeft}>
+          {/* Bouton retour avec l'avatar ajouté juste après */}
           <button style={styles.backBtn} onClick={() => (window.location.href = "/agents")}>← Retour</button>
+          
+          <img 
+            src={agentAvatar} 
+            alt={agent.name} 
+            style={styles.topAvatar} 
+            onError={(e) => e.target.src="/images/logopc.png"} 
+          />
+
           <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
           <div style={styles.agentInfo}>
             <div style={styles.agentName}>{agent.name}</div>
@@ -278,6 +288,7 @@ const styles = {
   topLeft: { display: "flex", alignItems: "center", gap: 12 },
   topRight: { display: "flex", alignItems: "center", gap: 10 },
   backBtn: { padding: "8px 12px", borderRadius: 20, border: "1px solid rgba(255,255,255,.1)", background: "rgba(0,0,0,.3)", color: "#fff", cursor: "pointer" },
+  topAvatar: { width: 32, height: 32, borderRadius: "50%", objectFit: "cover", objectPosition: "center 20%", border: "1px solid rgba(255,255,255,0.2)" }, // Style ajouté pour l'avatar du haut
   brandLogo: { height: 24 },
   agentInfo: { display: "grid" },
   agentName: { fontWeight: 900, fontSize: 13 },
