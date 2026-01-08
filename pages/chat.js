@@ -1,32 +1,29 @@
-// pages/admin/index.js
-import { useEffect, useMemo, useState } from "react";
-import { supabase } from "../lib/supabaseClient.js";
+// pages/chat.js
+import { useEffect, useMemo, useRef, useState } from "react";
+import { supabase } from "../lib/supabaseClient";
 
-export default function Admin() {
+export default function ChatPage() {
+  const [sessionEmail, setSessionEmail] = useState("");
+  const [sessionUserId, setSessionUserId] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  const [agentSlug, setAgentSlug] = useState("");
+  const [agentName, setAgentName] = useState("");
+  const [agentRole, setAgentRole] = useState("");
+  const [agentAvatar, setAgentAvatar] = useState("");
+
+  const [isMobile, setIsMobile] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
   const [loading, setLoading] = useState(true);
-  const [msg, setMsg] = useState("");
+  const [sending, setSending] = useState(false);
 
-  const [clients, setClients] = useState([]);
-  const [clientUsers, setClientUsers] = useState([]);
-  const [profiles, setProfiles] = useState([]);
+  const [conversations, setConversations] = useState([]);
+  const [selectedConvId, setSelectedConvId] = useState("");
+  const [messages, setMessages] = useState([]);
 
-  const [agents, setAgents] = useState([]);
-  const [userAgents, setUserAgents] = useState([]);
-  const [agentConfigs, setAgentConfigs] = useState([]);
-
-  const [selectedClientId, setSelectedClientId] = useState("");
-  const [selectedUserId, setSelectedUserId] = useState("");
-  const [q, setQ] = useState("");
-
-  // Modal prompt & sources
-  const [modalOpen, setModalOpen] = useState(false);
-  const [modalAgent, setModalAgent] = useState(null);
-  const [modalSystemPrompt, setModalSystemPrompt] = useState("");
-
-  // sources UI
-  const [sources, setSources] = useState([]); // [{type:'pdf'|'url', name, path, url, mime, size}]
-  const [urlToAdd, setUrlToAdd] = useState("");
-  const [uploading, setUploading] = useState(false);
+  const [input, setInput] = useState("");
+  const endRef = useRef(null);
 
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
@@ -35,498 +32,427 @@ export default function Admin() {
 
   async function logout() {
     await supabase.auth.signOut();
-    window.location.href = "/"; // ou /login si vous avez une page dédiée
+    window.location.href = "/login";
   }
 
   function goBack() {
     window.location.href = "/agents";
   }
 
-  async function refreshAll() {
-    setLoading(true);
-    setMsg("");
-
-    const [cRes, cuRes, pRes, aRes, uaRes, cfgRes] = await Promise.all([
-      supabase.from("clients").select("id,name,created_at").order("created_at", { ascending: false }),
-      supabase.from("client_users").select("client_id,user_id,created_at"),
-      supabase.from("profiles").select("user_id,email,role"),
-      supabase.from("agents").select("id,slug,name,description,avatar_url").order("name", { ascending: true }),
-      supabase.from("user_agents").select("user_id,agent_id,created_at"),
-      supabase.from("client_agent_configs").select("user_id,agent_id,system_prompt,context"),
-    ]);
-
-    const errors = [cRes.error, cuRes.error, pRes.error, aRes.error, uaRes.error, cfgRes.error].filter(Boolean);
-    if (errors.length) setMsg(errors.map((e) => e.message).join(" | "));
-
-    setClients(cRes.data || []);
-    setClientUsers(cuRes.data || []);
-    setProfiles(pRes.data || []);
-    setAgents(aRes.data || []);
-    setUserAgents(uaRes.data || []);
-    setAgentConfigs(cfgRes.data || []);
-
-    setLoading(false);
+  function openAdmin() {
+    window.location.href = "/admin";
   }
 
+  function getAgentSlugFromUrlOrStorage() {
+    // 1) URL param (?agent=emma)
+    try {
+      const u = new URL(window.location.href);
+      const qp = (u.searchParams.get("agent") || "").trim().toLowerCase();
+      if (qp) return qp;
+    } catch {
+      // ignore
+    }
+
+    // 2) localStorage
+    const stored = (window.localStorage.getItem("selected_agent_slug") || "").trim().toLowerCase();
+    if (stored) return stored;
+
+    // 3) default
+    return "emma";
+  }
+
+  // Responsive
   useEffect(() => {
-    refreshAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const mql = window.matchMedia("(max-width: 980px)");
+    const apply = () => setIsMobile(!!mql.matches);
+    apply();
+    mql.addEventListener?.("change", apply);
+    return () => mql.removeEventListener?.("change", apply);
   }, []);
 
-  const clientCards = useMemo(() => {
-    const qq = (q || "").trim().toLowerCase();
-
-    const cards = clients.map((c) => {
-      const links = clientUsers.filter((x) => x.client_id === c.id);
-      const users = links.map((l) => {
-        const p = profiles.find((pp) => pp.user_id === l.user_id);
-        return {
-          user_id: l.user_id,
-          email: p?.email || "(email non renseigné)",
-          role: p?.role || "",
-        };
-      });
-
-      return { ...c, users, userCount: users.length };
-    });
-
-    if (!qq) return cards;
-
-    return cards.filter((c) => {
-      const inName = (c.name || "").toLowerCase().includes(qq);
-      const inUsers = (c.users || []).some((u) => (u.email || "").toLowerCase().includes(qq));
-      return inName || inUsers;
-    });
-  }, [clients, clientUsers, profiles, q]);
-
+  // Boot
   useEffect(() => {
-    if (!selectedClientId) {
-      setSelectedUserId("");
-      return;
+    (async () => {
+      setLoading(true);
+
+      const { data: sess } = await supabase.auth.getSession();
+      const email = sess?.session?.user?.email || "";
+      const userId = sess?.session?.user?.id || "";
+
+      if (!userId) {
+        // pas authentifié => login
+        window.location.href = "/login";
+        return;
+      }
+
+      setSessionEmail(email);
+      setSessionUserId(userId);
+
+      // Admin ?
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      setIsAdmin((prof?.role || "") === "admin");
+
+      // Agent slug (URL > storage > default)
+      const slug = getAgentSlugFromUrlOrStorage();
+      setAgentSlug(slug);
+
+      // stocker pour cohérence navigation
+      try {
+        window.localStorage.setItem("selected_agent_slug", slug);
+      } catch {
+        // ignore
+      }
+
+      // Charger infos agent
+      const { data: agent } = await supabase
+        .from("agents")
+        .select("id,slug,name,description,avatar_url")
+        .eq("slug", slug)
+        .maybeSingle();
+
+      setAgentName(agent?.name || slug);
+      setAgentRole(agent?.description || "");
+      setAgentAvatar(agent?.avatar_url || "");
+
+      // Conversations: IMPORTANT => filtrer par user_id (sinon tu vois celles des autres)
+      const { data: convs, error: convErr } = await supabase
+        .from("conversations")
+        .select("id,user_id,created_at,agent_slug,title")
+        .eq("user_id", userId)
+        .eq("agent_slug", slug)
+        .order("created_at", { ascending: false });
+
+      if (convErr) {
+        // Si une erreur SQL/RLS, on affiche proprement et on laisse page utilisable
+        setConversations([]);
+        setSelectedConvId("");
+        setMessages([]);
+        setLoading(false);
+        return;
+      }
+
+      const list = convs || [];
+      setConversations(list);
+
+      const firstId = list?.[0]?.id || "";
+      setSelectedConvId(firstId);
+
+      // Charger messages
+      if (firstId) {
+        const { data: msgs } = await supabase
+          .from("messages")
+          .select("id,conversation_id,role,content,created_at")
+          .eq("conversation_id", firstId)
+          .order("created_at", { ascending: true });
+
+        setMessages(msgs || []);
+      } else {
+        setMessages([]);
+      }
+
+      setLoading(false);
+    })();
+  }, []);
+
+  // Scroll
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+
+  const selectedConversation = useMemo(() => {
+    return conversations.find((c) => c.id === selectedConvId) || null;
+  }, [conversations, selectedConvId]);
+
+  async function selectConversation(id) {
+    setSelectedConvId(id);
+    setDrawerOpen(false);
+
+    const { data: msgs } = await supabase
+      .from("messages")
+      .select("id,conversation_id,role,content,created_at")
+      .eq("conversation_id", id)
+      .order("created_at", { ascending: true });
+
+    setMessages(msgs || []);
+  }
+
+  async function newConversation() {
+    const { data: sess } = await supabase.auth.getSession();
+    const userId = sess?.session?.user?.id;
+    if (!userId) {
+      window.location.href = "/login";
+      return null;
     }
-    const card = clientCards.find((c) => c.id === selectedClientId);
-    const firstUser = card?.users?.[0]?.user_id || "";
-    if (selectedUserId && card?.users?.some((u) => u.user_id === selectedUserId)) return;
-    setSelectedUserId(firstUser);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedClientId, clientCards.length]);
 
-  function isAssigned(agentId) {
-    if (!selectedUserId) return false;
-    return userAgents.some((ua) => ua.user_id === selectedUserId && ua.agent_id === agentId);
+    const { data: conv, error } = await supabase
+      .from("conversations")
+      .insert([{ user_id: userId, agent_slug: agentSlug, title: "Nouvelle conversation" }])
+      .select("id,user_id,created_at,agent_slug,title")
+      .maybeSingle();
+
+    if (error) {
+      alert(error.message);
+      return null;
+    }
+
+    const next = [conv, ...conversations];
+    setConversations(next);
+    setSelectedConvId(conv.id);
+    setMessages([]);
+    setDrawerOpen(false);
+    return conv.id;
   }
 
-  function getConfig(agentId) {
-    if (!selectedUserId) return null;
-    return agentConfigs.find((c) => c.user_id === selectedUserId && c.agent_id === agentId) || null;
+  async function ensureConversationId() {
+    if (selectedConvId) return selectedConvId;
+    // Si aucune conversation, on en crée une automatiquement
+    const id = await newConversation();
+    return id || "";
   }
 
-  async function toggleAssign(agentId, assign) {
-    if (!selectedUserId) return alert("Sélectionnez un utilisateur.");
-    const token = await getAccessToken();
-    if (!token) return alert("Non authentifié.");
+  async function sendMessage() {
+    const text = (input || "").trim();
+    if (!text) return;
 
-    const res = await fetch("/api/admin/toggle-user-agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ userId: selectedUserId, agentId, assign }),
-    });
+    setSending(true);
+    setInput("");
 
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
-
-    await refreshAll();
-  }
-
-  function openPromptModal(agent) {
-    const cfg = getConfig(agent.id);
-    const ctx = cfg?.context || {};
-    const src = Array.isArray(ctx?.sources) ? ctx.sources : [];
-    setModalAgent(agent);
-    setModalSystemPrompt(cfg?.system_prompt || "");
-    setSources(src);
-    setUrlToAdd("");
-    setModalOpen(true);
-  }
-
-  function closePromptModal() {
-    setModalOpen(false);
-    setModalAgent(null);
-    setModalSystemPrompt("");
-    setSources([]);
-    setUrlToAdd("");
-    setUploading(false);
-  }
-
-  function addUrlSource() {
-    const u = (urlToAdd || "").trim();
-    if (!u) return;
-    if (!/^https?:\/\//i.test(u)) return alert("URL invalide. Exemple: https://...");
-    const item = { type: "url", url: u, name: u };
-    setSources((prev) => [item, ...prev]);
-    setUrlToAdd("");
-  }
-
-  function removeSourceAt(idx) {
-    setSources((prev) => prev.filter((_, i) => i !== idx));
-  }
-
-  async function handlePdfUpload(file) {
-    if (!file) return;
-    if (file.type !== "application/pdf") return alert("Veuillez sélectionner un PDF.");
-    if (!selectedUserId || !modalAgent) return;
-
-    setUploading(true);
     try {
+      const convId = await ensureConversationId();
+      if (!convId) {
+        alert("Impossible de créer une conversation.");
+        return;
+      }
+
+      // 1) Save user message
+      await supabase.from("messages").insert([{ conversation_id: convId, role: "user", content: text }]);
+
+      // 2) Refresh messages
+      const { data: msgs1 } = await supabase
+        .from("messages")
+        .select("id,conversation_id,role,content,created_at")
+        .eq("conversation_id", convId)
+        .order("created_at", { ascending: true });
+
+      setMessages(msgs1 || []);
+
+      // 3) Call API
       const token = await getAccessToken();
-      if (!token) return alert("Non authentifié.");
+      if (!token) {
+        window.location.href = "/login";
+        return;
+      }
 
-      const base64 = await fileToBase64(file);
-
-      const res = await fetch("/api/admin/upload-agent-source", {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          userId: selectedUserId,
-          agentSlug: modalAgent.slug,
-          fileName: file.name,
-          mimeType: file.type,
-          base64,
-        }),
+        body: JSON.stringify({ message: text, agentSlug }),
       });
 
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) return alert(`Erreur upload (${res.status}) : ${data?.error || "?"}`);
+      if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
 
-      const item = {
-        type: "pdf",
-        bucket: data.bucket || "agent_sources",
-        mime: data.mime || "application/pdf",
-        name: data.name || file.name,
-        path: data.path,
-        size: data.size || file.size,
-      };
+      const reply = (data.reply || data.answer || data.content || "").toString();
 
-      setSources((prev) => [item, ...prev]);
+      // 4) Save assistant message
+      await supabase.from("messages").insert([{ conversation_id: convId, role: "assistant", content: reply }]);
+
+      const { data: msgs2 } = await supabase
+        .from("messages")
+        .select("id,conversation_id,role,content,created_at")
+        .eq("conversation_id", convId)
+        .order("created_at", { ascending: true });
+
+      setMessages(msgs2 || []);
+    } catch (e) {
+      const convId = selectedConvId || "";
+      if (convId) {
+        await supabase.from("messages").insert([
+          { conversation_id: convId, role: "assistant", content: `Erreur: ${String(e?.message || e)}` },
+        ]);
+        const { data: msgs2 } = await supabase
+          .from("messages")
+          .select("id,conversation_id,role,content,created_at")
+          .eq("conversation_id", convId)
+          .order("created_at", { ascending: true });
+        setMessages(msgs2 || []);
+      } else {
+        alert(String(e?.message || e));
+      }
     } finally {
-      setUploading(false);
+      setSending(false);
     }
-  }
-
-  async function savePromptModal() {
-    const token = await getAccessToken();
-    if (!token) return alert("Non authentifié.");
-    if (!selectedUserId || !modalAgent) return;
-
-    const context = { sources };
-
-    const res = await fetch("/api/admin/save-agent-config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({
-        userId: selectedUserId,
-        agentId: modalAgent.id,
-        systemPrompt: modalSystemPrompt,
-        context,
-      }),
-    });
-
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
-
-    closePromptModal();
-    await refreshAll();
-  }
-
-  async function deleteAgentConversations(agentSlug, agentName) {
-    if (!selectedUserId) return alert("Sélectionnez un utilisateur.");
-    const ok = window.confirm(`Supprimer toutes les conversations de "${agentName}" pour cet utilisateur ?`);
-    if (!ok) return;
-
-    const token = await getAccessToken();
-    if (!token) return alert("Non authentifié.");
-
-    const res = await fetch("/api/admin/delete-agent-conversations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ userId: selectedUserId, agentSlug }),
-    });
-
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
-
-    alert(`OK. Conversations supprimées: ${data?.deleted ?? 0}`);
   }
 
   return (
     <main style={styles.page}>
+      {/* HEADER */}
       <div style={styles.header}>
         <div style={styles.headerLeft}>
-          <button style={styles.headerBtn} onClick={goBack} title="Retour">
+          <button style={styles.headerBtn} onClick={goBack}>
             ← Retour
           </button>
 
+          <div style={styles.agentBlock}>
+            <div style={styles.agentAvatarWrap}>
+              {agentAvatar ? (
+                <img src={agentAvatar} alt={agentName} style={styles.agentAvatar} />
+              ) : (
+                <div style={styles.agentAvatarFallback} />
+              )}
+            </div>
+            <div style={{ lineHeight: 1.1 }}>
+              <div style={styles.agentName}>{agentName || "Agent"}</div>
+              <div style={styles.agentRole}>{agentRole || "Assistant"}</div>
+            </div>
+          </div>
+        </div>
+
+        <div style={styles.headerCenter}>
           <img
             src="/images/logolong.png"
             alt="Evidenc'IA"
-            style={styles.headerLogo}
+            style={styles.logo}
             onError={(e) => {
               e.currentTarget.style.display = "none";
             }}
           />
-
-          <div style={styles.headerTitle}>Console administrateur</div>
         </div>
 
         <div style={styles.headerRight}>
+          {!isMobile && <div style={styles.emailPill}>{sessionEmail || ""}</div>}
+
+          {/* IMPORTANT: admin-only */}
+          {isAdmin && (
+            <button style={styles.headerBtn} onClick={openAdmin}>
+              Console administrateur
+            </button>
+          )}
+
           <button style={styles.headerBtnDanger} onClick={logout}>
             Déconnexion
           </button>
+
+          {isMobile && (
+            <button style={styles.headerBtn} onClick={() => setDrawerOpen((v) => !v)}>
+              Historique
+            </button>
+          )}
         </div>
       </div>
 
-      <div style={styles.wrap}>
-        <aside style={styles.left}>
-          <div style={styles.box}>
-            <div style={styles.boxTitle}>Clients</div>
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Rechercher client / email"
-              style={styles.search}
-            />
+      {/* LAYOUT */}
+      <div style={{ ...styles.layout, gridTemplateColumns: isMobile ? "1fr" : "360px 1fr" }}>
+        {/* SIDEBAR desktop */}
+        {!isMobile && (
+          <aside style={styles.sidebar}>
+            <div style={styles.sidebarHead}>
+              <div style={styles.sidebarTitle}>Historique</div>
+              <button style={styles.newBtn} onClick={newConversation}>
+                + Nouvelle
+              </button>
+            </div>
 
+            <div style={styles.sidebarList}>
+              {conversations.map((c) => {
+                const active = c.id === selectedConvId;
+                return (
+                  <button
+                    key={c.id}
+                    style={{ ...styles.convItem, ...(active ? styles.convItemActive : {}) }}
+                    onClick={() => selectConversation(c.id)}
+                    title={c.title || "Conversation"}
+                  >
+                    {c.title || "Conversation"}
+                  </button>
+                );
+              })}
+              {conversations.length === 0 && <div style={styles.muted}>Aucune conversation.</div>}
+            </div>
+          </aside>
+        )}
+
+        {/* Drawer mobile */}
+        {isMobile && drawerOpen && (
+          <div style={styles.drawerOverlay} onClick={() => setDrawerOpen(false)}>
+            <div style={styles.drawer} onClick={(e) => e.stopPropagation()}>
+              <div style={styles.sidebarHead}>
+                <div style={styles.sidebarTitle}>Historique</div>
+                <button style={styles.newBtn} onClick={newConversation}>
+                  + Nouvelle
+                </button>
+              </div>
+              <div style={styles.sidebarList}>
+                {conversations.map((c) => {
+                  const active = c.id === selectedConvId;
+                  return (
+                    <button
+                      key={c.id}
+                      style={{ ...styles.convItem, ...(active ? styles.convItemActive : {}) }}
+                      onClick={() => selectConversation(c.id)}
+                    >
+                      {c.title || "Conversation"}
+                    </button>
+                  );
+                })}
+                {conversations.length === 0 && <div style={styles.muted}>Aucune conversation.</div>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* CHAT */}
+        <section style={styles.chat}>
+          <div style={styles.chatInner}>
             {loading ? (
               <div style={styles.muted}>Chargement…</div>
             ) : (
-              <div style={{ display: "grid", gap: 12 }}>
-                {clientCards.map((c) => {
-                  const activeClient = c.id === selectedClientId;
-                  return (
-                    <div key={c.id} style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}>
-                      <div
-                        style={styles.clientHeader}
-                        onClick={() => setSelectedClientId(c.id)}
-                        title="Sélectionner ce client"
-                      >
-                        <div style={styles.clientName}>{c.name}</div>
-                        <div style={styles.small}>{c.userCount} user(s)</div>
-                      </div>
-
-                      <div style={styles.userList}>
-                        {(c.users || []).map((u) => {
-                          const activeUser = activeClient && u.user_id === selectedUserId;
-                          return (
-                            <div
-                              key={u.user_id}
-                              style={{ ...styles.userItem, ...(activeUser ? styles.userItemActive : {}) }}
-                              onClick={() => {
-                                setSelectedClientId(c.id);
-                                setSelectedUserId(u.user_id);
-                              }}
-                            >
-                              <div style={{ fontWeight: 900 }}>{u.email}</div>
-                              <div style={styles.tiny}>
-                                {u.role ? `role: ${u.role}` : "role: (vide)"} —{" "}
-                                <span style={{ fontFamily: "monospace" }}>{u.user_id.slice(0, 8)}…</span>
-                              </div>
-                            </div>
-                          );
-                        })}
-                        {(c.users || []).length === 0 && <div style={styles.muted}>Aucun utilisateur.</div>}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {clientCards.length === 0 && <div style={styles.muted}>Aucun client.</div>}
-              </div>
-            )}
-          </div>
-        </aside>
-
-        <section style={styles.right}>
-          <div style={styles.box}>
-            <div style={styles.boxTitle}>
-              {selectedClientId
-                ? selectedUserId
-                  ? "Assignation agents"
-                  : "Sélectionnez un utilisateur"
-                : "Sélectionnez un client"}
-            </div>
-
-            <div style={styles.diag}>
-              <div>
-                <b>Client</b>: {selectedClientId ? "oui" : "non"}
-              </div>
-              <div>
-                <b>User</b>: {selectedUserId ? "oui" : "non"}
-              </div>
-              <div>
-                <b>Agents</b>: {agents.length}
-              </div>
-              <div>
-                <b>user_agents</b>: {userAgents.length}
-              </div>
-              <div>
-                <b>configs</b>: {agentConfigs.length}
-              </div>
-            </div>
-
-            {!selectedUserId ? (
-              <div style={styles.muted}>Sélectionnez un utilisateur (dans une carte client à gauche) pour gérer les agents.</div>
-            ) : agents.length === 0 ? (
-              <div style={styles.alert}>
-                Aucun agent chargé depuis la table <b>agents</b> (table vide ou RLS).
-              </div>
-            ) : (
-              <div style={styles.grid}>
-                {agents.map((a) => {
-                  const assigned = isAssigned(a.id);
-                  const cfg = getConfig(a.id);
-                  const ctx = cfg?.context || {};
-                  const srcCount = Array.isArray(ctx?.sources) ? ctx.sources.length : 0;
-                  const hasPrompt = !!(cfg?.system_prompt || "").trim();
-
-                  return (
-                    <article key={a.id} style={styles.agentCard}>
-                      <div style={styles.agentTop}>
-                        <div style={styles.avatarWrap}>
-                          {a.avatar_url ? (
-                            <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
-                          ) : (
-                            <div style={styles.avatarFallback} />
-                          )}
-                        </div>
-
-                        <div style={{ flex: 1 }}>
-                          <div style={styles.agentName}>{a.name}</div>
-                          <div style={styles.agentRole}>{a.description || a.slug}</div>
-                          <div style={styles.small}>
-                            {assigned ? "Assigné" : "Non assigné"} • Prompt: {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources:{" "}
-                            {srcCount}
-                          </div>
+              <>
+                <div style={styles.msgList}>
+                  {messages.map((m) => {
+                    const isUser = m.role === "user";
+                    return (
+                      <div key={m.id} style={{ ...styles.msgRow, justifyContent: isUser ? "flex-end" : "flex-start" }}>
+                        <div style={{ ...styles.bubble, ...(isUser ? styles.bubbleUser : styles.bubbleAssistant) }}>
+                          <div style={styles.bubbleText}>{m.content}</div>
                         </div>
                       </div>
+                    );
+                  })}
+                  <div ref={endRef} />
+                </div>
 
-                      <div style={styles.agentActions}>
-                        <button
-                          style={assigned ? styles.btnAssigned : styles.btnAssign}
-                          onClick={() => toggleAssign(a.id, !assigned)}
-                        >
-                          {assigned ? "Assigné" : "Assigner"}
-                        </button>
+                <div style={styles.composer}>
+                  <textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="Écrire…"
+                    style={styles.input}
+                    rows={isMobile ? 2 : 3}
+                  />
+                  <button style={styles.sendBtn} onClick={sendMessage} disabled={sending}>
+                    {sending ? "…" : "Envoyer"}
+                  </button>
+                </div>
 
-                        <button style={styles.btnGhost} onClick={() => openPromptModal(a)}>
-                          Prompt & données
-                        </button>
-
-                        <button style={styles.btnDangerGhost} onClick={() => deleteAgentConversations(a.slug, a.name)}>
-                          Supprimer conversations
-                        </button>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
+                {!!selectedConversation && (
+                  <div style={styles.tinyNote}>
+                    Conversation:{" "}
+                    <span style={{ fontFamily: "monospace" }}>{selectedConversation.id.slice(0, 8)}…</span>
+                  </div>
+                )}
+              </>
             )}
-
-            {!!msg && <div style={styles.alert}>{msg}</div>}
           </div>
         </section>
       </div>
-
-      {modalOpen && modalAgent && (
-        <div style={styles.modalOverlay} onClick={closePromptModal}>
-          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.modalTitle}>Prompt & données — {modalAgent.name}</div>
-
-            <div style={styles.modalLabel}>System prompt</div>
-            <textarea
-              value={modalSystemPrompt}
-              onChange={(e) => setModalSystemPrompt(e.target.value)}
-              style={styles.textarea}
-              placeholder="Entrez ici le system prompt personnalisé…"
-            />
-
-            <div style={styles.row}>
-              <div style={{ flex: 1 }}>
-                <div style={styles.modalLabel}>Ajouter une URL</div>
-                <div style={styles.row}>
-                  <input value={urlToAdd} onChange={(e) => setUrlToAdd(e.target.value)} placeholder="https://…" style={styles.input} />
-                  <button style={styles.btnAssign} onClick={addUrlSource}>
-                    Ajouter
-                  </button>
-                </div>
-              </div>
-
-              <div style={{ width: 18 }} />
-
-              <div style={{ width: 320 }}>
-                <div style={styles.modalLabel}>Uploader un PDF</div>
-                <label style={styles.uploadBox}>
-                  <input
-                    type="file"
-                    accept="application/pdf"
-                    style={{ display: "none" }}
-                    onChange={(e) => handlePdfUpload(e.target.files?.[0] || null)}
-                    disabled={uploading}
-                  />
-                  {uploading ? "Upload en cours…" : "Choisir un PDF"}
-                </label>
-                <div style={styles.tiny}>Bucket: agent_sources</div>
-              </div>
-            </div>
-
-            <div style={styles.modalLabel}>Sources</div>
-            <div style={styles.sourcesBox}>
-              {sources.length === 0 ? (
-                <div style={styles.muted}>Aucune source.</div>
-              ) : (
-                sources.map((s, idx) => (
-                  <div key={idx} style={styles.sourceRow}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 900 }}>
-                        {s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}
-                      </div>
-                      <div style={styles.tiny}>
-                        {s.type === "pdf"
-                          ? `mime: ${s.mime || "application/pdf"} • size: ${s.size || "?"} • path: ${s.path}`
-                          : `url: ${s.url}`}
-                      </div>
-                    </div>
-                    <button style={styles.xBtn} onClick={() => removeSourceAt(idx)} title="Retirer">
-                      ✕
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-
-            <div style={styles.modalActions}>
-              <button style={styles.btnGhost} onClick={closePromptModal}>
-                Annuler
-              </button>
-              <button style={styles.btnAssign} onClick={savePromptModal} disabled={uploading}>
-                Enregistrer
-              </button>
-            </div>
-
-            <div style={styles.small}>Les sources sont enregistrées dans context.sources (JSONB).</div>
-          </div>
-        </div>
-      )}
     </main>
   );
-}
-
-function fileToBase64(file) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
 }
 
 const styles = {
@@ -535,20 +461,28 @@ const styles = {
     background: "linear-gradient(135deg,#05060a,#0a0d16)",
     color: "rgba(238,242,255,.92)",
     fontFamily: '"Segoe UI", Arial, sans-serif',
+    // IMPORTANT: sur mobile, overflow hidden coupe l’écran
+    overflow: "auto",
   },
 
   header: {
     display: "flex",
+    gap: 12,
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
-    padding: "14px 16px 0",
+    padding: "12px 12px 0",
     flexWrap: "wrap",
   },
   headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 280 },
-  headerRight: { display: "flex", alignItems: "center", gap: 10 },
-  headerLogo: { height: 26, width: "auto", opacity: 0.95, display: "block" },
-  headerTitle: { fontWeight: 900, opacity: 0.9 },
+  headerCenter: { display: "flex", alignItems: "center", justifyContent: "center", flex: 1, minWidth: 140 },
+  headerRight: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    justifyContent: "flex-end",
+    minWidth: 280,
+    flexWrap: "wrap",
+  },
 
   headerBtn: {
     borderRadius: 999,
@@ -570,120 +504,66 @@ const styles = {
     cursor: "pointer",
     whiteSpace: "nowrap",
   },
+  emailPill: {
+    padding: "8px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.06)",
+    fontWeight: 800,
+    fontSize: 12,
+    opacity: 0.9,
+    maxWidth: 240,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
 
-  wrap: { display: "grid", gridTemplateColumns: "420px 1fr", gap: 16, padding: 18 },
+  logo: { height: 28, width: "auto", opacity: 0.95, display: "block" },
 
-  box: {
+  agentBlock: { display: "flex", alignItems: "center", gap: 10 },
+  agentAvatarWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 999,
+    overflow: "hidden",
+    border: "1px solid rgba(255,255,255,.12)",
+  },
+  agentAvatar: { width: "100%", height: "100%", objectFit: "cover", objectPosition: "center 15%" },
+  agentAvatarFallback: { width: "100%", height: "100%", background: "rgba(255,255,255,.06)" },
+  agentName: { fontWeight: 900, fontSize: 16 },
+  agentRole: { fontWeight: 800, opacity: 0.75, fontSize: 12 },
+
+  layout: {
+    display: "grid",
+    gap: 14,
+    padding: 12,
+    // IMPORTANT: calc fixe + header qui wrap = bugs mobile
+    // On garde une hauteur confortable sans bloquer le scroll
+    minHeight: "calc(100vh - 64px)",
+  },
+
+  sidebar: {
     border: "1px solid rgba(255,255,255,.12)",
     borderRadius: 16,
     background: "rgba(0,0,0,.35)",
     backdropFilter: "blur(10px)",
-    padding: 14,
     boxShadow: "0 18px 45px rgba(0,0,0,.55)",
-  },
-  boxTitle: { fontWeight: 900, marginBottom: 10 },
-
-  search: {
-    width: "100%",
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(255,255,255,.06)",
-    color: "rgba(238,242,255,.92)",
-    outline: "none",
-    marginBottom: 12,
-    fontWeight: 800,
-  },
-
-  left: {},
-  right: {},
-
-  clientBlock: {
-    borderRadius: 16,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(255,255,255,.03)",
     overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+    minHeight: "70vh",
   },
-  clientBlockActive: { borderColor: "rgba(255,140,40,.35)" },
-  clientHeader: {
+  sidebarHead: {
     padding: 12,
     display: "flex",
-    alignItems: "baseline",
+    alignItems: "center",
     justifyContent: "space-between",
     gap: 10,
-    cursor: "pointer",
-    background: "rgba(0,0,0,.18)",
+    borderBottom: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.12)",
   },
-  clientName: { fontWeight: 900, fontSize: 14 },
-  userList: { padding: 10, display: "grid", gap: 10 },
-  userItem: {
-    padding: 10,
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(255,255,255,.03)",
-    cursor: "pointer",
-  },
-  userItemActive: { borderColor: "rgba(80,120,255,.35)", background: "rgba(80,120,255,.08)" },
-
-  small: { fontSize: 12, opacity: 0.75, fontWeight: 800 },
-  tiny: { fontSize: 11, opacity: 0.7, fontWeight: 800 },
-  muted: { opacity: 0.75, fontWeight: 800, fontSize: 13 },
-  alert: {
-    marginTop: 12,
-    padding: 12,
-    borderRadius: 14,
-    border: "1px solid rgba(255,80,80,.35)",
-    background: "rgba(255,80,80,.10)",
-    fontWeight: 900,
-  },
-
-  diag: {
-    display: "grid",
-    gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
-    gap: 10,
-    padding: 10,
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(255,255,255,.03)",
-    marginBottom: 12,
-    fontSize: 12,
-    fontWeight: 800,
-    opacity: 0.9,
-  },
-
-  grid: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 14 },
-  agentCard: {
-    borderRadius: 16,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(255,255,255,.03)",
-    padding: 14,
-    boxShadow: "0 14px 40px rgba(0,0,0,.45)",
-  },
-  agentTop: { display: "flex", gap: 12, alignItems: "center", marginBottom: 12 },
-
-  // AVATAR: on veut voir la tête -> plus grand + position vers le haut
-  avatarWrap: {
-    width: 64,
-    height: 64,
-    borderRadius: 999,
-    overflow: "hidden",
-    border: "1px solid rgba(255,255,255,.12)",
-    flex: "0 0 auto",
-    background: "rgba(255,255,255,.05)",
-  },
-  avatar: {
-    width: "100%",
-    height: "100%",
-    objectFit: "cover",
-    objectPosition: "center 15%",
-  },
-  avatarFallback: { width: "100%", height: "100%", background: "rgba(255,255,255,.06)" },
-
-  agentName: { fontWeight: 900, fontSize: 16 },
-  agentRole: { fontWeight: 800, opacity: 0.8, fontSize: 12, marginTop: 2 },
-  agentActions: { display: "grid", gap: 10 },
-
-  btnAssign: {
+  sidebarTitle: { fontWeight: 900 },
+  newBtn: {
     borderRadius: 999,
     padding: "10px 12px",
     border: "1px solid rgba(255,255,255,.14)",
@@ -692,119 +572,99 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
   },
-  btnAssigned: {
-    borderRadius: 999,
-    padding: "10px 12px",
-    border: "1px solid rgba(255,140,40,.35)",
-    background: "rgba(255,140,40,.12)",
-    color: "#fff",
+  sidebarList: { padding: 12, display: "grid", gap: 10, overflow: "auto" },
+
+  convItem: {
+    textAlign: "left",
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(255,255,255,.03)",
+    color: "rgba(238,242,255,.92)",
     fontWeight: 900,
     cursor: "pointer",
   },
-  btnGhost: {
-    borderRadius: 999,
-    padding: "10px 12px",
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(0,0,0,.20)",
-    color: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
+  convItemActive: { borderColor: "rgba(255,140,40,.35)", background: "rgba(255,140,40,.10)" },
+
+  chat: {
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: 16,
+    background: "rgba(0,0,0,.35)",
+    backdropFilter: "blur(10px)",
+    boxShadow: "0 18px 45px rgba(0,0,0,.55)",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+    minHeight: "70vh",
   },
-  btnDangerGhost: {
-    borderRadius: 999,
-    padding: "10px 12px",
-    border: "1px solid rgba(255,80,80,.35)",
-    background: "rgba(255,80,80,.10)",
-    color: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
+  chatInner: { display: "flex", flexDirection: "column", height: "100%" },
+  msgList: { padding: 12, overflow: "auto", flex: 1 },
+
+  msgRow: { display: "flex", marginBottom: 10 },
+  bubble: {
+    maxWidth: "min(820px, 92%)",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.12)",
+    padding: 12,
+    boxShadow: "0 10px 24px rgba(0,0,0,.35)",
+  },
+  bubbleUser: { background: "rgba(255,255,255,.08)" },
+  bubbleAssistant: { background: "rgba(0,0,0,.20)" },
+  bubbleText: {
+    whiteSpace: "pre-wrap",
+    lineHeight: 1.35,
+    fontWeight: 650,
+    fontSize: 14,
   },
 
-  modalOverlay: {
-    position: "fixed",
-    inset: 0,
-    background: "rgba(0,0,0,.65)",
+  composer: {
     display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 16,
-    zIndex: 9999,
+    gap: 10,
+    padding: 12,
+    borderTop: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.12)",
+    alignItems: "flex-end",
   },
-  modal: {
-    width: "min(980px, 96vw)",
-    borderRadius: 18,
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(0,0,0,.70)",
-    boxShadow: "0 34px 90px rgba(0,0,0,.62)",
-    padding: 16,
-    backdropFilter: "blur(12px)",
-  },
-  modalTitle: { fontWeight: 900, fontSize: 16, marginBottom: 10 },
-  modalLabel: { fontWeight: 900, marginTop: 10, marginBottom: 6, opacity: 0.9 },
-  textarea: {
-    width: "100%",
-    minHeight: 120,
+  input: {
+    flex: 1,
+    resize: "none",
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,.14)",
     background: "rgba(255,255,255,.06)",
     color: "rgba(238,242,255,.92)",
     padding: 12,
     outline: "none",
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-    fontSize: 13,
-    fontWeight: 700,
-  },
-  modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 12 },
-
-  row: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
-  input: {
-    width: "100%",
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(255,255,255,.06)",
-    color: "rgba(238,242,255,.92)",
-    outline: "none",
     fontWeight: 800,
+    lineHeight: 1.3,
   },
-  uploadBox: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    height: 44,
-    borderRadius: 12,
-    border: "1px dashed rgba(255,255,255,.25)",
-    background: "rgba(255,255,255,.04)",
-    cursor: "pointer",
-    fontWeight: 900,
-  },
-  sourcesBox: {
+  sendBtn: {
     borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(255,255,255,.03)",
-    padding: 10,
-    display: "grid",
-    gap: 10,
-    maxHeight: 260,
-    overflow: "auto",
-  },
-  sourceRow: {
-    display: "flex",
-    gap: 10,
-    alignItems: "center",
-    padding: 10,
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(0,0,0,.15)",
-  },
-  xBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    border: "1px solid rgba(255,80,80,.35)",
-    background: "rgba(255,80,80,.10)",
+    padding: "12px 14px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.10)",
     color: "#fff",
     fontWeight: 900,
     cursor: "pointer",
+    minWidth: 96,
+  },
+
+  tinyNote: { padding: "0 12px 10px", opacity: 0.7, fontWeight: 800, fontSize: 12 },
+  muted: { opacity: 0.75, fontWeight: 800 },
+
+  drawerOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,.65)",
+    zIndex: 9999,
+    display: "flex",
+  },
+  drawer: {
+    width: "min(420px, 86vw)",
+    height: "100%",
+    background: "rgba(0,0,0,.85)",
+    borderRight: "1px solid rgba(255,255,255,.12)",
+    padding: 12,
+    display: "flex",
+    flexDirection: "column",
   },
 };
