@@ -65,8 +65,8 @@ export default function ChatPage() {
     setMicSupported(true);
     const rec = new SR();
     rec.lang = "fr-FR";
-    rec.continuous = false; // évite les répétitions / doublons
-    rec.interimResults = false; // évite "bonjour bonjour..." en incrémental
+    rec.continuous = false; // évite répétitions
+    rec.interimResults = false; // évite doublons incrémentaux
     rec.maxAlternatives = 1;
 
     rec.onstart = () => setListening(true);
@@ -78,7 +78,6 @@ export default function ChatPage() {
         const transcript = (event?.results?.[0]?.[0]?.transcript || "").trim();
         if (!transcript) return;
 
-        // Ajoute proprement au champ de saisie
         setInput((prev) => {
           const p = (prev || "").trim();
           return p ? `${p} ${transcript}` : transcript;
@@ -113,7 +112,7 @@ export default function ChatPage() {
       if (listening) recognitionRef.current.stop();
       else recognitionRef.current.start();
     } catch {
-      // Sur certains navigateurs, start() peut throw si appelé trop vite
+      // start() peut throw si appelé trop vite
     }
   }
 
@@ -146,12 +145,16 @@ export default function ChatPage() {
       setAgentRole(agent?.description || "");
       setAgentAvatar(agent?.avatar_url || "");
 
-      // Charger conversations
-      const { data: convs } = await supabase
+      // Charger conversations (SANS archived)
+      const { data: convs, error: convErr } = await supabase
         .from("conversations")
-        .select("id,user_id,created_at,agent_slug,title,archived")
+        .select("id,user_id,created_at,agent_slug,title")
         .eq("agent_slug", slug)
         .order("created_at", { ascending: false });
+
+      if (convErr) {
+        console.error("Erreur fetch conversations:", convErr);
+      }
 
       const list = convs || [];
       setConversations(list);
@@ -203,10 +206,11 @@ export default function ChatPage() {
     const userId = sess?.session?.user?.id;
     if (!userId) throw new Error("Non authentifié.");
 
+    // INSERT SANS archived
     const { data: conv, error } = await supabase
       .from("conversations")
-      .insert([{ user_id: userId, agent_slug: agentSlug, title, archived: false }])
-      .select("id,user_id,created_at,agent_slug,title,archived")
+      .insert([{ user_id: userId, agent_slug: agentSlug, title }])
+      .select("id,user_id,created_at,agent_slug,title")
       .maybeSingle();
 
     if (error) throw new Error(error.message);
@@ -250,18 +254,13 @@ export default function ChatPage() {
     const conv = conversations.find((c) => c.id === convId) || null;
     const currentTitle = (conv?.title || "").trim();
 
-    // Si déjà nommé autre chose, on ne touche pas
     if (currentTitle && currentTitle !== "Nouvelle conversation") return;
 
     const newTitle = buildAutoTitleFromFirstMessage(firstUserText);
 
-    // Update DB
     await supabase.from("conversations").update({ title: newTitle }).eq("id", convId);
 
-    // Update state
-    setConversations((prev) =>
-      prev.map((c) => (c.id === convId ? { ...c, title: newTitle } : c))
-    );
+    setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, title: newTitle } : c)));
   }
 
   async function sendMessage() {
@@ -277,7 +276,7 @@ export default function ChatPage() {
       // 1) Sauvegarde message user
       await supabase.from("messages").insert([{ conversation_id: convId, role: "user", content: text }]);
 
-      // 1b) Auto-titre si première interaction / titre par défaut
+      // 1b) Auto-titre si première interaction
       if ((messages || []).length === 0) {
         await maybeUpdateConversationTitleIfDefault(convId, text);
       }
@@ -307,7 +306,9 @@ export default function ChatPage() {
       const reply = (data.reply || data.answer || data.content || "").toString().trim();
 
       // 4) Sauvegarde message assistant
-      await supabase.from("messages").insert([{ conversation_id: convId, role: "assistant", content: reply || "Réponse vide." }]);
+      await supabase
+        .from("messages")
+        .insert([{ conversation_id: convId, role: "assistant", content: reply || "Réponse vide." }]);
 
       const { data: msgs2 } = await supabase
         .from("messages")
@@ -346,11 +347,7 @@ export default function ChatPage() {
 
           <div style={styles.agentBlock}>
             <div style={styles.agentAvatarWrap}>
-              {agentAvatar ? (
-                <img src={agentAvatar} alt={agentName} style={styles.agentAvatar} />
-              ) : (
-                <div style={styles.agentAvatarFallback} />
-              )}
+              {agentAvatar ? <img src={agentAvatar} alt={agentName} style={styles.agentAvatar} /> : <div style={styles.agentAvatarFallback} />}
             </div>
             <div style={{ lineHeight: 1.1 }}>
               <div style={styles.agentName}>{agentName || "Agent"}</div>
