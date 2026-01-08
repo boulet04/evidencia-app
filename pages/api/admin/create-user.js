@@ -1,132 +1,54 @@
-// pages/api/admin/create-user.js
-import { createClient } from "@supabase/supabase-js";
-
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-}
-
-function getBearerToken(req) {
-  const h = req.headers?.authorization || "";
-  const m = h.match(/^Bearer\s+(.+)$/i);
-  return m ? m[1] : "";
-}
-
-function safeStr(v) {
-  return (v ?? "").toString().trim();
-}
-
-function isUuid(v) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
-}
-
-function isEmail(v) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-}
-
-function randomPassword(len = 14) {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
-  let out = "";
-  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
-}
-
-function isDuplicateError(msg) {
-  const s = String(msg || "").toLowerCase();
-  return s.includes("duplicate") || s.includes("already exists") || s.includes("already been registered");
-}
-
-function getSupabaseAdmin() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url) throw new Error("NEXT_PUBLIC_SUPABASE_URL manquant.");
-  if (!serviceKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY manquant.");
-
-  return createClient(url, serviceKey, { auth: { persistSession: false } });
-}
-
-async function requireAdmin(supabaseAdmin, token) {
-  const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-  if (userErr || !userData?.user) {
-    const e = new Error(userErr?.message || "Session invalide.");
-    e.status = 401;
-    throw e;
-  }
-
-  const adminId = userData.user.id;
-
-  const { data: profile, error: profErr } = await supabaseAdmin
-    .from("profiles")
-    .select("role")
-    .eq("user_id", adminId)
-    .maybeSingle();
-
-  if (profErr) {
-    const e = new Error(profErr.message);
-    e.status = 500;
-    throw e;
-  }
-  if (!profile || profile.role !== "admin") {
-    const e = new Error("Accès interdit (admin requis).");
-    e.status = 403;
-    throw e;
-  }
-
-  return { adminId };
-}
-
-/**
- * Trouver un userId Auth existant par email.
- * Supabase Auth n’a pas “getUserByEmail” direct, donc on itère listUsers.
- * C’est OK tant que tu n’as pas des milliers d’utilisateurs.
- */
-async function findAuthUserIdByEmail(supabaseAdmin, emailLower) {
-  const perPage = 200;
-  for (let page = 1; page <= 20; page++) {
-    const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage });
-    if (error) throw new Error(error.message);
-
-    const users = data?.users || [];
-    const found = users.find((u) => (u?.email || "").toLowerCase() === emailLower);
-    if (found?.id) return found.id;
-
-    // si moins que perPage, on est à la fin
-    if (users.length < perPage) break;
-  }
-  return "";
-}
-
-export default async function handler(req, res) {
-  setCors(res);
-
-  try {
-    if (req.method === "OPTIONS") return res.status(200).end();
-    if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
-
-    const supabaseAdmin = getSupabaseAdmin();
-    const token = getBearerToken(req);
-    if (!token) return res.status(401).json({ error: "Token manquant." });
-
-    await requireAdmin(supabaseAdmin, token);
-
-    const clientId = safeStr(req.body?.clientId);
-    const email = safeStr(req.body?.email).toLowerCase();
-    const role = safeStr(req.body?.role || "user") || "user";
-    const passwordFromUI = safeStr(req.body?.password || ""); // optionnel
-
-    if (!clientId) return res.status(400).json({ error: "clientId manquant." });
-    if (!isUuid(clientId)) return res.status(400).json({ error: "clientId invalide (UUID attendu)." });
-
-    if (!email) return res.status(400).json({ error: "Email manquant." });
-    if (!isEmail(email)) return res.status(400).json({ error: "Email invalide." });
-
-    // Mot de passe optionnel : si pas fourni -> random.
-    // Si fourni, on accepte (min 8) sinon on refuse (évite des mdp trop faibles).
-    let password = passwordFromUI;
-    if (password && password.length < 8) {
-      return res.status(400).json({ error: "Mot de passe trop court (8 caractères minimum)." });
-    }
-    if (!password) pass
+12:02:33.412 Running build in Washington, D.C., USA (East) – iad1
+12:02:33.413 Build machine configuration: 2 cores, 8 GB
+12:02:33.543 Cloning github.com/boulet04/evidencia-app (Branch: main, Commit: 3f37270)
+12:02:34.680 Cloning completed: 1.137s
+12:02:34.775 Restored build cache from previous deployment (EjgcJccCNZ8xhUAG2DWyEDT8AsNk)
+12:02:35.172 Running "vercel build"
+12:02:35.571 Vercel CLI 50.1.6
+12:02:35.888 Installing dependencies...
+12:02:38.829 
+12:02:38.830 up to date in 3s
+12:02:38.830 
+12:02:38.830 5 packages are looking for funding
+12:02:38.830   run `npm fund` for details
+12:02:38.863 Detected Next.js version: 14.2.35
+12:02:38.866 Running "npm run build"
+12:02:38.960 
+12:02:38.960 > build
+12:02:38.960 > next build
+12:02:38.960 
+12:02:39.582   ▲ Next.js 14.2.35
+12:02:39.582 
+12:02:39.583    Linting and checking validity of types ...
+12:02:39.687    Creating an optimized production build ...
+12:02:41.243 Failed to compile.
+12:02:41.244 
+12:02:41.244 ./pages/api/admin/create-user.js
+12:02:41.244 Error: 
+12:02:41.244   [31mx[0m Expected '}', got '<eof>'
+12:02:41.245      ,-[[36;1;4m/vercel/path0/pages/api/admin/create-user.js[0m:129:1]
+12:02:41.245  [2m129[0m |     if (password && password.length < 8) {
+12:02:41.245  [2m130[0m |       return res.status(400).json({ error: "Mot de passe trop court (8 caractères minimum)." });
+12:02:41.245  [2m131[0m |     }
+12:02:41.245  [2m132[0m |     if (!password) pass
+12:02:41.245      : [31;1m                   ^^^^[0m
+12:02:41.246      `----
+12:02:41.246 
+12:02:41.246   [31mx[0m Expected a semicolon
+12:02:41.246      ,-[[36;1;4m/vercel/path0/pages/api/admin/create-user.js[0m:129:1]
+12:02:41.246  [2m129[0m |     if (password && password.length < 8) {
+12:02:41.246  [2m130[0m |       return res.status(400).json({ error: "Mot de passe trop court (8 caractères minimum)." });
+12:02:41.247  [2m131[0m |     }
+12:02:41.247  [2m132[0m |     if (!password) pass
+12:02:41.247      : [31;1m                       ^[0m
+12:02:41.247      `----
+12:02:41.247 
+12:02:41.247 Caused by:
+12:02:41.247     Syntax Error
+12:02:41.248 
+12:02:41.248 Import trace for requested module:
+12:02:41.248 ./pages/api/admin/create-user.js
+12:02:41.248 
+12:02:41.258 
+12:02:41.258 > Build failed because of webpack errors
+12:02:41.281 Error: Command "npm run build" exited with 1
