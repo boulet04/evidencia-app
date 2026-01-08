@@ -55,6 +55,7 @@ export default function Admin() {
     window.location.href = "/agents";
   }
 
+  // FIX: refreshAll retourne la liste de clients (utile pour sélectionner le dernier créé)
   async function refreshAll() {
     setLoading(true);
     setMsg("");
@@ -83,6 +84,7 @@ export default function Admin() {
     if (!selectedClientId && firstClient) setSelectedClientId(firstClient);
 
     setLoading(false);
+    return cRes.data || [];
   }
 
   useEffect(() => {
@@ -116,7 +118,7 @@ export default function Admin() {
     });
   }, [clients, clientUsers, profiles, q]);
 
-  // FIX: dépendance correcte sur clientCards (pas seulement length)
+  // FIX: dépendre de clientCards (pas seulement length) pour recalculer correctement l'utilisateur sélectionné
   useEffect(() => {
     if (!selectedClientId) {
       setSelectedUserId("");
@@ -303,15 +305,15 @@ export default function Admin() {
 
     closeCreateClient();
 
-    // FIX: si un filtre est actif, le client créé peut ne pas être cliquable/visible dans la liste
+    // FIX: si vous aviez une recherche active, elle peut masquer le nouveau client
     if (q) setQ("");
 
-    // FIX: sélectionner immédiatement le nouveau client (même sans utilisateur)
-    const newId = data?.client?.id || data?.id || "";
-    await refreshAll();
-    if (newId) {
-      setSelectedClientId(newId);
-      setSelectedUserId(""); // client vide -> pas d'user sélectionné
+    // FIX: sélectionner automatiquement le dernier client créé
+    const list = await refreshAll();
+    const newestId = (list || [])[0]?.id || "";
+    if (newestId) {
+      setSelectedClientId(newestId);
+      setSelectedUserId(""); // client vide -> pas de user
     }
   }
 
@@ -457,7 +459,6 @@ export default function Admin() {
               onChange={(e) => setQ(e.target.value)}
               placeholder="Rechercher client / email"
               style={styles.search}
-              // anti-autofill Chrome
               name="client_search"
               autoComplete="off"
               autoCorrect="off"
@@ -473,11 +474,14 @@ export default function Admin() {
                   const activeClient = c.id === selectedClientId;
 
                   return (
-                    // FIX: rendre toute la carte cliquable (utile pour les clients "vides")
+                    // FIX: carte entière cliquable (indispensable pour les clients sans users)
                     <div
                       key={c.id}
-                      style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}
-                      onClick={() => setSelectedClientId(c.id)}
+                      style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}), cursor: "pointer" }}
+                      onClick={() => {
+                        setSelectedClientId(c.id);
+                        if ((c.users || []).length === 0) setSelectedUserId("");
+                      }}
                       title="Sélectionner ce client"
                     >
                       <div style={styles.clientHeader}>
@@ -486,7 +490,9 @@ export default function Admin() {
                           onClick={(e) => {
                             e.stopPropagation();
                             setSelectedClientId(c.id);
+                            if ((c.users || []).length === 0) setSelectedUserId("");
                           }}
+                          title="Sélectionner ce client"
                         >
                           <div style={styles.clientName}>{c.name}</div>
                           <div style={styles.small}>{c.userCount} user(s)</div>
@@ -495,7 +501,7 @@ export default function Admin() {
                         <button
                           style={styles.deleteBtn}
                           onClick={(e) => {
-                            e.stopPropagation(); // FIX: éviter de sélectionner lors d’un delete
+                            e.stopPropagation(); // FIX: ne pas sélectionner en supprimant
                             deleteClient(c.id, c.name);
                           }}
                           title="Supprimer client"
@@ -508,14 +514,11 @@ export default function Admin() {
                         {(c.users || []).map((u) => {
                           const activeUser = activeClient && u.user_id === selectedUserId;
                           return (
-                            <div
-                              key={u.user_id}
-                              style={{ display: "flex", gap: 10, alignItems: "center" }}
-                              onClick={(e) => e.stopPropagation()} // FIX: la sélection user est gérée ci-dessous
-                            >
+                            <div key={u.user_id} style={{ display: "flex", gap: 10, alignItems: "center" }}>
                               <div
                                 style={{ ...styles.userItem, ...(activeUser ? styles.userItemActive : {}) }}
-                                onClick={() => {
+                                onClick={(e) => {
+                                  e.stopPropagation(); // FIX: éviter que le click remonte à la carte
                                   setSelectedClientId(c.id);
                                   setSelectedUserId(u.user_id);
                                 }}
@@ -540,9 +543,8 @@ export default function Admin() {
                             </div>
                           );
                         })}
-
                         {(c.users || []).length === 0 && (
-                          // FIX: rendre “Aucun utilisateur.” cliquable (sélection client)
+                          // FIX: rendre “Aucun utilisateur.” explicitement cliquable
                           <div
                             style={{ ...styles.muted, cursor: "pointer" }}
                             onClick={(e) => {
@@ -702,7 +704,9 @@ export default function Admin() {
                 sources.map((s, idx) => (
                   <div key={idx} style={styles.sourceRow}>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 900 }}>{s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}</div>
+                      <div style={{ fontWeight: 900 }}>
+                        {s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}
+                      </div>
                       <div style={styles.tiny}>
                         {s.type === "pdf"
                           ? `mime: ${s.mime || "application/pdf"} • size: ${s.size || "?"} • path: ${s.path}`
