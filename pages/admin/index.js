@@ -28,6 +28,12 @@ export default function Admin() {
   const [urlToAdd, setUrlToAdd] = useState("");
   const [uploading, setUploading] = useState(false);
 
+  // Integrations UI (Make / n8n / Railway / custom)
+  const [integrations, setIntegrations] = useState([]); // [{provider, name, url}]
+  const [integrationProvider, setIntegrationProvider] = useState("make");
+  const [integrationName, setIntegrationName] = useState("");
+  const [integrationUrl, setIntegrationUrl] = useState("");
+
   // Create client modal
   const [createClientOpen, setCreateClientOpen] = useState(false);
   const [newClientName, setNewClientName] = useState("");
@@ -55,7 +61,6 @@ export default function Admin() {
     window.location.href = "/agents";
   }
 
-  // FIX: refreshAll retourne la liste de clients (utile pour sélectionner le dernier créé)
   async function refreshAll() {
     setLoading(true);
     setMsg("");
@@ -84,7 +89,6 @@ export default function Admin() {
     if (!selectedClientId && firstClient) setSelectedClientId(firstClient);
 
     setLoading(false);
-    return cRes.data || [];
   }
 
   useEffect(() => {
@@ -118,7 +122,6 @@ export default function Admin() {
     });
   }, [clients, clientUsers, profiles, q]);
 
-  // FIX: dépendre de clientCards (pas seulement length) pour recalculer correctement l'utilisateur sélectionné
   useEffect(() => {
     if (!selectedClientId) {
       setSelectedUserId("");
@@ -162,9 +165,19 @@ export default function Admin() {
     const cfg = getConfig(agent.id);
     const ctx = cfg?.context || {};
     const src = Array.isArray(ctx?.sources) ? ctx.sources : [];
+    const integ = Array.isArray(ctx?.integrations) ? ctx.integrations : [];
+
     setModalAgent(agent);
     setModalSystemPrompt(cfg?.system_prompt || "");
+
     setSources(src);
+
+    // Intégrations
+    setIntegrations(integ);
+    setIntegrationProvider("make");
+    setIntegrationName("");
+    setIntegrationUrl("");
+
     setUrlToAdd("");
     setModalOpen(true);
   }
@@ -173,9 +186,15 @@ export default function Admin() {
     setModalOpen(false);
     setModalAgent(null);
     setModalSystemPrompt("");
+
     setSources([]);
     setUrlToAdd("");
     setUploading(false);
+
+    setIntegrations([]);
+    setIntegrationProvider("make");
+    setIntegrationName("");
+    setIntegrationUrl("");
   }
 
   function addUrlSource() {
@@ -189,6 +208,30 @@ export default function Admin() {
 
   function removeSourceAt(idx) {
     setSources((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function addIntegration() {
+    const provider = (integrationProvider || "").trim() || "custom";
+    const name = (integrationName || "").trim();
+    const url = (integrationUrl || "").trim();
+
+    if (!url) return alert("URL requise.");
+    if (!/^https?:\/\//i.test(url)) return alert("URL invalide. Exemple: https://...");
+
+    const item = {
+      provider,
+      name: name || provider.toUpperCase(),
+      url,
+    };
+
+    setIntegrations((prev) => [item, ...prev]);
+    setIntegrationName("");
+    setIntegrationUrl("");
+    setIntegrationProvider(provider);
+  }
+
+  function removeIntegrationAt(idx) {
+    setIntegrations((prev) => prev.filter((_, i) => i !== idx));
   }
 
   async function handlePdfUpload(file) {
@@ -238,7 +281,8 @@ export default function Admin() {
     if (!token) return alert("Non authentifié.");
     if (!selectedUserId || !modalAgent) return;
 
-    const context = { sources };
+    // IMPORTANT: on enrichit context avec integrations
+    const context = { sources, integrations };
 
     const res = await fetch("/api/admin/save-agent-config", {
       method: "POST",
@@ -304,17 +348,7 @@ export default function Admin() {
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     closeCreateClient();
-
-    // FIX: si vous aviez une recherche active, elle peut masquer le nouveau client
-    if (q) setQ("");
-
-    // FIX: sélectionner automatiquement le dernier client créé
-    const list = await refreshAll();
-    const newestId = (list || [])[0]?.id || "";
-    if (newestId) {
-      setSelectedClientId(newestId);
-      setSelectedUserId(""); // client vide -> pas de user
-    }
+    await refreshAll();
   }
 
   function openCreateUser() {
@@ -472,40 +506,15 @@ export default function Admin() {
               <div style={{ display: "grid", gap: 12 }}>
                 {clientCards.map((c) => {
                   const activeClient = c.id === selectedClientId;
-
                   return (
-                    // FIX: carte entière cliquable (indispensable pour les clients sans users)
-                    <div
-                      key={c.id}
-                      style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}), cursor: "pointer" }}
-                      onClick={() => {
-                        setSelectedClientId(c.id);
-                        if ((c.users || []).length === 0) setSelectedUserId("");
-                      }}
-                      title="Sélectionner ce client"
-                    >
+                    <div key={c.id} style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}>
                       <div style={styles.clientHeader}>
-                        <div
-                          style={{ cursor: "pointer" }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedClientId(c.id);
-                            if ((c.users || []).length === 0) setSelectedUserId("");
-                          }}
-                          title="Sélectionner ce client"
-                        >
+                        <div style={{ cursor: "pointer" }} onClick={() => setSelectedClientId(c.id)} title="Sélectionner ce client">
                           <div style={styles.clientName}>{c.name}</div>
                           <div style={styles.small}>{c.userCount} user(s)</div>
                         </div>
 
-                        <button
-                          style={styles.deleteBtn}
-                          onClick={(e) => {
-                            e.stopPropagation(); // FIX: ne pas sélectionner en supprimant
-                            deleteClient(c.id, c.name);
-                          }}
-                          title="Supprimer client"
-                        >
+                        <button style={styles.deleteBtn} onClick={() => deleteClient(c.id, c.name)} title="Supprimer client">
                           Supprimer
                         </button>
                       </div>
@@ -517,8 +526,7 @@ export default function Admin() {
                             <div key={u.user_id} style={{ display: "flex", gap: 10, alignItems: "center" }}>
                               <div
                                 style={{ ...styles.userItem, ...(activeUser ? styles.userItemActive : {}) }}
-                                onClick={(e) => {
-                                  e.stopPropagation(); // FIX: éviter que le click remonte à la carte
+                                onClick={() => {
                                   setSelectedClientId(c.id);
                                   setSelectedUserId(u.user_id);
                                 }}
@@ -532,10 +540,7 @@ export default function Admin() {
 
                               <button
                                 style={styles.xBtnMini}
-                                onClick={(e) => {
-                                  e.stopPropagation(); // FIX
-                                  removeClientUser(c.id, u.user_id, u.email);
-                                }}
+                                onClick={() => removeClientUser(c.id, u.user_id, u.email)}
                                 title="Retirer l’utilisateur du client"
                               >
                                 ✕
@@ -543,19 +548,7 @@ export default function Admin() {
                             </div>
                           );
                         })}
-                        {(c.users || []).length === 0 && (
-                          // FIX: rendre “Aucun utilisateur.” explicitement cliquable
-                          <div
-                            style={{ ...styles.muted, cursor: "pointer" }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setSelectedClientId(c.id);
-                              setSelectedUserId("");
-                            }}
-                          >
-                            Aucun utilisateur.
-                          </div>
-                        )}
+                        {(c.users || []).length === 0 && <div style={styles.muted}>Aucun utilisateur.</div>}
                       </div>
                     </div>
                   );
@@ -604,6 +597,7 @@ export default function Admin() {
                   const cfg = getConfig(a.id);
                   const ctx = cfg?.context || {};
                   const srcCount = Array.isArray(ctx?.sources) ? ctx.sources.length : 0;
+                  const integCount = Array.isArray(ctx?.integrations) ? ctx.integrations.length : 0;
                   const hasPrompt = !!(cfg?.system_prompt || "").trim();
 
                   return (
@@ -617,7 +611,8 @@ export default function Admin() {
                           <div style={styles.agentName}>{a.name}</div>
                           <div style={styles.agentRole}>{a.description || a.slug}</div>
                           <div style={styles.small}>
-                            {assigned ? "Assigné" : "Non assigné"} • Prompt: {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources: {srcCount}
+                            {assigned ? "Assigné" : "Non assigné"} • Prompt: {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources:{" "}
+                            {srcCount} • Intégrations: {integCount}
                           </div>
                         </div>
                       </div>
@@ -662,7 +657,7 @@ export default function Admin() {
 
             <div style={styles.row}>
               <div style={{ flex: 1 }}>
-                <div style={styles.modalLabel}>Ajouter une URL</div>
+                <div style={styles.modalLabel}>Ajouter une URL (source)</div>
                 <div style={styles.row}>
                   <input
                     value={urlToAdd}
@@ -704,9 +699,7 @@ export default function Admin() {
                 sources.map((s, idx) => (
                   <div key={idx} style={styles.sourceRow}>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 900 }}>
-                        {s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}
-                      </div>
+                      <div style={{ fontWeight: 900 }}>{s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}</div>
                       <div style={styles.tiny}>
                         {s.type === "pdf"
                           ? `mime: ${s.mime || "application/pdf"} • size: ${s.size || "?"} • path: ${s.path}`
@@ -714,6 +707,73 @@ export default function Admin() {
                       </div>
                     </div>
                     <button style={styles.xBtn} onClick={() => removeSourceAt(idx)} title="Retirer">
+                      ✕
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* NOUVEAU: INTEGRATIONS */}
+            <div style={styles.modalLabel}>Intégrations (Make / n8n / Railway)</div>
+
+            <div style={styles.row}>
+              <div style={{ width: 170 }}>
+                <select
+                  value={integrationProvider}
+                  onChange={(e) => setIntegrationProvider(e.target.value)}
+                  style={styles.select}
+                  name="integration_provider"
+                >
+                  <option value="make">Make</option>
+                  <option value="n8n">n8n</option>
+                  <option value="railway">Railway</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </div>
+
+              <div style={{ flex: 1 }}>
+                <input
+                  value={integrationName}
+                  onChange={(e) => setIntegrationName(e.target.value)}
+                  placeholder="Nom (ex: Envoi email / Sync CRM)"
+                  style={styles.input}
+                  name="integration_name"
+                  autoComplete="off"
+                />
+              </div>
+
+              <div style={{ flex: 2 }}>
+                <input
+                  value={integrationUrl}
+                  onChange={(e) => setIntegrationUrl(e.target.value)}
+                  placeholder="URL webhook / endpoint (https://...)"
+                  style={styles.input}
+                  name="integration_url"
+                  autoComplete="off"
+                />
+              </div>
+
+              <button style={styles.btnAssign} onClick={addIntegration}>
+                Ajouter
+              </button>
+            </div>
+
+            <div style={styles.sourcesBox}>
+              {integrations.length === 0 ? (
+                <div style={styles.muted}>Aucune intégration.</div>
+              ) : (
+                integrations.map((it, idx) => (
+                  <div key={idx} style={styles.sourceRow}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 900 }}>
+                        {(it.provider || "custom").toUpperCase()} — {it.name || "Sans nom"}
+                      </div>
+                      <div style={styles.tiny} title={it.url}>
+                        url: {it.url}
+                      </div>
+                    </div>
+                    <button style={styles.xBtn} onClick={() => removeIntegrationAt(idx)} title="Retirer">
                       ✕
                     </button>
                   </div>
@@ -730,7 +790,9 @@ export default function Admin() {
               </button>
             </div>
 
-            <div style={styles.small}>Les sources sont enregistrées dans context.sources (JSONB).</div>
+            <div style={styles.small}>
+              Les intégrations sont enregistrées dans <b>context.integrations</b> (JSONB). Les sources restent dans <b>context.sources</b>.
+            </div>
           </div>
         </div>
       )}
