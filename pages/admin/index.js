@@ -28,12 +28,6 @@ export default function Admin() {
   const [urlToAdd, setUrlToAdd] = useState("");
   const [uploading, setUploading] = useState(false);
 
-  // integrations UI (NEW)
-  const [integrations, setIntegrations] = useState([]); // [{ provider:'make'|'n8n'|'railway'|'mcp', name, url }]
-  const [integrationProvider, setIntegrationProvider] = useState("make");
-  const [integrationName, setIntegrationName] = useState("");
-  const [integrationUrl, setIntegrationUrl] = useState("");
-
   // Create client modal
   const [createClientOpen, setCreateClientOpen] = useState(false);
   const [newClientName, setNewClientName] = useState("");
@@ -46,6 +40,12 @@ export default function Admin() {
   const [pwdLocked, setPwdLocked] = useState(true); // anti autofill
   const [createdPassword, setCreatedPassword] = useState(""); // affichage one-shot
   const [createUserNote, setCreateUserNote] = useState("");
+
+  // GLOBAL PROMPT modal
+  const [globalPromptOpen, setGlobalPromptOpen] = useState(false);
+  const [globalPromptText, setGlobalPromptText] = useState("");
+  const [globalPromptNote, setGlobalPromptNote] = useState("");
+  const [globalPromptLoading, setGlobalPromptLoading] = useState(false);
 
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
@@ -84,7 +84,7 @@ export default function Admin() {
     setUserAgents(uaRes.data || []);
     setAgentConfigs(cfgRes.data || []);
 
-    // sélection par défaut uniquement si rien n'est sélectionné
+    // sélection par défaut
     const firstClient = (cRes.data || [])[0]?.id || "";
     if (!selectedClientId && firstClient) setSelectedClientId(firstClient);
 
@@ -165,20 +165,10 @@ export default function Admin() {
     const cfg = getConfig(agent.id);
     const ctx = cfg?.context || {};
     const src = Array.isArray(ctx?.sources) ? ctx.sources : [];
-    const ints = Array.isArray(ctx?.integrations) ? ctx.integrations : [];
-
     setModalAgent(agent);
     setModalSystemPrompt(cfg?.system_prompt || "");
-
     setSources(src);
     setUrlToAdd("");
-
-    // NEW
-    setIntegrations(ints);
-    setIntegrationProvider("make");
-    setIntegrationName("");
-    setIntegrationUrl("");
-
     setModalOpen(true);
   }
 
@@ -189,18 +179,12 @@ export default function Admin() {
     setSources([]);
     setUrlToAdd("");
     setUploading(false);
-
-    // NEW
-    setIntegrations([]);
-    setIntegrationProvider("make");
-    setIntegrationName("");
-    setIntegrationUrl("");
   }
 
   function addUrlSource() {
     const u = (urlToAdd || "").trim();
     if (!u) return;
-    if (!/^https?:\/\//i.test(u)) return alert("URL invalide. Exemple: https://...");
+    if (!/^https?:\/\//i.test(u) && !/^www\./i.test(u)) return alert("URL invalide. Exemple: https://...");
     const item = { type: "url", url: u, name: u };
     setSources((prev) => [item, ...prev]);
     setUrlToAdd("");
@@ -208,26 +192,6 @@ export default function Admin() {
 
   function removeSourceAt(idx) {
     setSources((prev) => prev.filter((_, i) => i !== idx));
-  }
-
-  // NEW: integrations helpers
-  function addIntegration() {
-    const provider = (integrationProvider || "").trim();
-    const name = (integrationName || "").trim() || "Workflow";
-    const url = (integrationUrl || "").trim();
-
-    if (!url) return alert("URL du workflow requise.");
-    if (!/^https?:\/\//i.test(url)) return alert("URL invalide. Exemple: https://...");
-
-    const item = { provider, name, url };
-    setIntegrations((prev) => [item, ...prev]);
-
-    setIntegrationName("");
-    setIntegrationUrl("");
-  }
-
-  function removeIntegrationAt(idx) {
-    setIntegrations((prev) => prev.filter((_, i) => i !== idx));
   }
 
   async function handlePdfUpload(file) {
@@ -277,7 +241,7 @@ export default function Admin() {
     if (!token) return alert("Non authentifié.");
     if (!selectedUserId || !modalAgent) return;
 
-    const context = { sources, integrations };
+    const context = { sources };
 
     const res = await fetch("/api/admin/save-agent-config", {
       method: "POST",
@@ -343,16 +307,7 @@ export default function Admin() {
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     closeCreateClient();
-
-    // IMPORTANT: on sélectionne immédiatement le nouveau client
     await refreshAll();
-
-    const newId = data?.client?.id || data?.client?.[0]?.id || "";
-    if (newId) {
-      setSelectedClientId(newId);
-      setSelectedUserId(""); // client vide => pas d'user sélectionné
-      setQ(""); // évite un filtre qui masquerait le nouveau client
-    }
   }
 
   function openCreateUser() {
@@ -398,10 +353,10 @@ export default function Admin() {
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     if (data?.existing) {
-      setCreateUserNote("Utilisateur déjà existant : il a été rattaché au client. Email envoyé si configuré.");
+      setCreateUserNote("Utilisateur déjà existant : il a été rattaché au client.");
       setCreatedPassword("");
     } else {
-      setCreateUserNote("Utilisateur créé. Email d’invitation envoyé si configuré.");
+      setCreateUserNote("Utilisateur créé.");
       setCreatedPassword(data?.tempPassword || "");
     }
 
@@ -450,10 +405,67 @@ export default function Admin() {
     await refreshAll();
   }
 
-  // NEW: helper pour sélectionner client partout
-  function selectClient(clientId) {
-    setSelectedClientId(clientId);
-    // selectedUserId sera recalculé par le useEffect (premier user ou vide)
+  // --- GLOBAL PROMPT ---
+  async function openGlobalPrompt() {
+    setGlobalPromptNote("");
+    setGlobalPromptLoading(true);
+    setGlobalPromptOpen(true);
+
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        setGlobalPromptNote("Non authentifié.");
+        return;
+      }
+
+      const r = await fetch("/api/admin/app-settings?key=base_system_prompt", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setGlobalPromptNote(`Erreur (${r.status}) : ${j?.error || "?"}`);
+        return;
+      }
+
+      setGlobalPromptText(j?.item?.value || "");
+    } finally {
+      setGlobalPromptLoading(false);
+    }
+  }
+
+  function closeGlobalPrompt() {
+    setGlobalPromptOpen(false);
+    setGlobalPromptText("");
+    setGlobalPromptNote("");
+    setGlobalPromptLoading(false);
+  }
+
+  async function saveGlobalPrompt() {
+    const token = await getAccessToken();
+    if (!token) return alert("Non authentifié.");
+
+    setGlobalPromptLoading(true);
+    setGlobalPromptNote("");
+
+    try {
+      const r = await fetch("/api/admin/app-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ key: "base_system_prompt", value: globalPromptText || "" }),
+      });
+
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setGlobalPromptNote(`Erreur (${r.status}) : ${j?.error || "?"}`);
+        return;
+      }
+
+      setGlobalPromptNote("Enregistré.");
+    } finally {
+      setGlobalPromptLoading(false);
+    }
   }
 
   return (
@@ -489,6 +501,9 @@ export default function Admin() {
             <div style={styles.clientsHead}>
               <div style={styles.boxTitle}>Clients</div>
               <div style={{ display: "flex", gap: 8 }}>
+                <button style={styles.btnPill} onClick={openGlobalPrompt}>
+                  Prompt général
+                </button>
                 <button style={styles.btnPill} onClick={openCreateClient}>
                   + Client
                 </button>
@@ -503,7 +518,6 @@ export default function Admin() {
               onChange={(e) => setQ(e.target.value)}
               placeholder="Rechercher client / email"
               style={styles.search}
-              // anti-autofill Chrome
               name="client_search"
               autoComplete="off"
               autoCorrect="off"
@@ -517,32 +531,19 @@ export default function Admin() {
               <div style={{ display: "grid", gap: 12 }}>
                 {clientCards.map((c) => {
                   const activeClient = c.id === selectedClientId;
-
                   return (
-                    <div
-                      key={c.id}
-                      style={{
-                        ...styles.clientBlock,
-                        ...(activeClient ? styles.clientBlockActive : {}),
-                        cursor: "pointer",
-                      }}
-                      onClick={() => selectClient(c.id)}
-                      title="Sélectionner ce client"
-                    >
-                      <div style={styles.clientHeader} onClick={() => selectClient(c.id)}>
-                        <div style={{ cursor: "pointer" }}>
+                    <div key={c.id} style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}>
+                      <div style={styles.clientHeader}>
+                        <div
+                          style={{ cursor: "pointer" }}
+                          onClick={() => setSelectedClientId(c.id)}
+                          title="Sélectionner ce client"
+                        >
                           <div style={styles.clientName}>{c.name}</div>
                           <div style={styles.small}>{c.userCount} user(s)</div>
                         </div>
 
-                        <button
-                          style={styles.deleteBtn}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteClient(c.id, c.name);
-                          }}
-                          title="Supprimer client"
-                        >
+                        <button style={styles.deleteBtn} onClick={() => deleteClient(c.id, c.name)} title="Supprimer client">
                           Supprimer
                         </button>
                       </div>
@@ -554,8 +555,7 @@ export default function Admin() {
                             <div key={u.user_id} style={{ display: "flex", gap: 10, alignItems: "center" }}>
                               <div
                                 style={{ ...styles.userItem, ...(activeUser ? styles.userItemActive : {}) }}
-                                onClick={(e) => {
-                                  e.stopPropagation();
+                                onClick={() => {
                                   setSelectedClientId(c.id);
                                   setSelectedUserId(u.user_id);
                                 }}
@@ -569,10 +569,7 @@ export default function Admin() {
 
                               <button
                                 style={styles.xBtnMini}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  removeClientUser(c.id, u.user_id, u.email);
-                                }}
+                                onClick={() => removeClientUser(c.id, u.user_id, u.email)}
                                 title="Retirer l’utilisateur du client"
                               >
                                 ✕
@@ -580,11 +577,7 @@ export default function Admin() {
                             </div>
                           );
                         })}
-                        {(c.users || []).length === 0 && (
-                          <div style={styles.muted}>
-                            Aucun utilisateur. Cliquez sur la carte puis “+ Utilisateur”.
-                          </div>
-                        )}
+                        {(c.users || []).length === 0 && <div style={styles.muted}>Aucun utilisateur.</div>}
                       </div>
                     </div>
                   );
@@ -633,7 +626,7 @@ export default function Admin() {
                   const cfg = getConfig(a.id);
                   const ctx = cfg?.context || {};
                   const srcCount = Array.isArray(ctx?.sources) ? ctx.sources.length : 0;
-                  const wfCount = Array.isArray(ctx?.integrations) ? ctx.integrations.length : 0;
+                  const wfCount = Array.isArray(ctx?.workflows) ? ctx.workflows.length : 0;
                   const hasPrompt = !!(cfg?.system_prompt || "").trim();
 
                   return (
@@ -647,7 +640,8 @@ export default function Admin() {
                           <div style={styles.agentName}>{a.name}</div>
                           <div style={styles.agentRole}>{a.description || a.slug}</div>
                           <div style={styles.small}>
-                            {assigned ? "Assigné" : "Non assigné"} • Prompt: {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources: {srcCount} • Workflows: {wfCount}
+                            {assigned ? "Assigné" : "Non assigné"} • Prompt: {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources: {srcCount} • Workflows:{" "}
+                            {wfCount}
                           </div>
                         </div>
                       </div>
@@ -680,7 +674,7 @@ export default function Admin() {
       {modalOpen && modalAgent && (
         <div style={styles.modalOverlay} onClick={closePromptModal}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.modalTitle}>Prompt & données — {modalAgent.name}</div>
+            <div style={styles.modalTitle}>Prompt, données & workflows — {modalAgent.name}</div>
 
             <div style={styles.modalLabel}>System prompt</div>
             <textarea
@@ -751,70 +745,6 @@ export default function Admin() {
               )}
             </div>
 
-            {/* NEW: integrations */}
-            <div style={styles.modalLabel}>Workflows / Intégrations (Make, n8n, Railway, …)</div>
-            <div style={styles.integrationsBox}>
-              <div style={styles.row}>
-                <div style={{ width: 160 }}>
-                  <select
-                    value={integrationProvider}
-                    onChange={(e) => setIntegrationProvider(e.target.value)}
-                    style={styles.select}
-                    name="integration_provider"
-                  >
-                    <option value="make">Make</option>
-                    <option value="n8n">n8n</option>
-                    <option value="railway">Railway</option>
-                    <option value="mcp">MCP / Autre</option>
-                  </select>
-                </div>
-
-                <div style={{ flex: 1 }}>
-                  <input
-                    value={integrationName}
-                    onChange={(e) => setIntegrationName(e.target.value)}
-                    placeholder="Nom (ex: Envoi email Office365)"
-                    style={styles.input}
-                    name="integration_name"
-                    autoComplete="off"
-                  />
-                </div>
-
-                <div style={{ flex: 2 }}>
-                  <input
-                    value={integrationUrl}
-                    onChange={(e) => setIntegrationUrl(e.target.value)}
-                    placeholder="URL du webhook / endpoint (https://...)"
-                    style={styles.input}
-                    name="integration_url"
-                    autoComplete="off"
-                  />
-                </div>
-
-                <button style={styles.btnAssign} onClick={addIntegration}>
-                  Ajouter
-                </button>
-              </div>
-
-              {integrations.length === 0 ? (
-                <div style={styles.muted}>Aucun workflow.</div>
-              ) : (
-                integrations.map((w, idx) => (
-                  <div key={idx} style={styles.integrationRow}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 900 }}>
-                        {String(w.provider || "").toUpperCase()} — {w.name || "Workflow"}
-                      </div>
-                      <div style={styles.tiny}>{w.url}</div>
-                    </div>
-                    <button style={styles.xBtn} onClick={() => removeIntegrationAt(idx)} title="Retirer">
-                      ✕
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-
             <div style={styles.modalActions}>
               <button style={styles.btnGhost} onClick={closePromptModal}>
                 Annuler
@@ -824,7 +754,37 @@ export default function Admin() {
               </button>
             </div>
 
-            <div style={styles.small}>Les workflows sont enregistrés dans context.integrations (JSONB).</div>
+            <div style={styles.small}>Les sources sont enregistrées dans context.sources (JSONB).</div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL Prompt général */}
+      {globalPromptOpen && (
+        <div style={styles.modalOverlay} onClick={closeGlobalPrompt}>
+          <div style={styles.smallModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalTitle}>Prompt général (tous les agents)</div>
+
+            <div style={styles.modalLabel}>Texte</div>
+            <textarea
+              value={globalPromptText}
+              onChange={(e) => setGlobalPromptText(e.target.value)}
+              style={{ ...styles.textarea, minHeight: 260 }}
+              placeholder="Collez ici votre base de règles commune à tous les agents…"
+            />
+
+            {!!globalPromptNote && <div style={styles.noteOk}>{globalPromptNote}</div>}
+
+            <div style={styles.modalActions}>
+              <button style={styles.btnGhost} onClick={closeGlobalPrompt}>
+                Fermer
+              </button>
+              <button style={styles.btnAssign} onClick={saveGlobalPrompt} disabled={globalPromptLoading}>
+                {globalPromptLoading ? "En cours…" : "Enregistrer"}
+              </button>
+            </div>
+
+            <div style={styles.tiny}>Stockage: public.app_settings / key = base_system_prompt</div>
           </div>
         </div>
       )}
@@ -1151,7 +1111,7 @@ const styles = {
     backdropFilter: "blur(12px)",
   },
   smallModal: {
-    width: "min(520px, 96vw)",
+    width: "min(700px, 96vw)",
     borderRadius: 18,
     border: "1px solid rgba(255,255,255,.14)",
     background: "rgba(0,0,0,.70)",
@@ -1229,25 +1189,6 @@ const styles = {
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(0,0,0,.15)",
   },
-
-  integrationsBox: {
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(255,255,255,.03)",
-    padding: 10,
-    display: "grid",
-    gap: 10,
-  },
-  integrationRow: {
-    display: "flex",
-    gap: 10,
-    alignItems: "center",
-    padding: 10,
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(0,0,0,.15)",
-  },
-
   xBtn: {
     width: 40,
     height: 40,
