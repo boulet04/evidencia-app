@@ -18,11 +18,13 @@ export default function Admin() {
   const [selectedUserId, setSelectedUserId] = useState("");
   const [q, setQ] = useState("");
 
+  // Modal prompt & sources
   const [modalOpen, setModalOpen] = useState(false);
   const [modalAgent, setModalAgent] = useState(null);
   const [modalSystemPrompt, setModalSystemPrompt] = useState("");
 
-  const [sources, setSources] = useState([]);
+  // sources UI
+  const [sources, setSources] = useState([]); // [{type:'pdf'|'url', name, path, url, mime, size}]
   const [urlToAdd, setUrlToAdd] = useState("");
   const [uploading, setUploading] = useState(false);
 
@@ -40,9 +42,42 @@ export default function Admin() {
     window.location.href = "/agents";
   }
 
+  async function requireAdminOrRedirect() {
+    const { data: sess } = await supabase.auth.getSession();
+    const user = sess?.session?.user;
+    if (!user) {
+      window.location.href = "/login";
+      return false;
+    }
+
+    // On lit le rôle depuis profiles (règle: admin => profiles.role === 'admin')
+    const { data: prof, error } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (error) {
+      // Par sécurité : si on ne peut pas vérifier, on refuse l'accès
+      window.location.href = "/login";
+      return false;
+    }
+
+    if (!prof || prof.role !== "admin") {
+      window.location.href = "/login";
+      return false;
+    }
+
+    return true;
+  }
+
   async function refreshAll() {
     setLoading(true);
     setMsg("");
+
+    // Safety: empêcher tout chargement si pas admin
+    const ok = await requireAdminOrRedirect();
+    if (!ok) return;
 
     const [cRes, cuRes, pRes, aRes, uaRes, cfgRes] = await Promise.all([
       supabase.from("clients").select("id,name,created_at").order("created_at", { ascending: false }),
@@ -67,7 +102,12 @@ export default function Admin() {
   }
 
   useEffect(() => {
-    refreshAll();
+    // Garde immédiate à l’ouverture de /admin
+    (async () => {
+      const ok = await requireAdminOrRedirect();
+      if (!ok) return;
+      await refreshAll();
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -451,7 +491,12 @@ export default function Admin() {
               <div style={{ flex: 1 }}>
                 <div style={styles.modalLabel}>Ajouter une URL</div>
                 <div style={styles.row}>
-                  <input value={urlToAdd} onChange={(e) => setUrlToAdd(e.target.value)} placeholder="https://…" style={styles.input} />
+                  <input
+                    value={urlToAdd}
+                    onChange={(e) => setUrlToAdd(e.target.value)}
+                    placeholder="https://…"
+                    style={styles.input}
+                  />
                   <button style={styles.btnAssign} onClick={addUrlSource}>
                     Ajouter
                   </button>
