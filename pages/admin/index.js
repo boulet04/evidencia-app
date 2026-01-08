@@ -18,6 +18,20 @@ export default function Admin() {
   const [selectedUserId, setSelectedUserId] = useState("");
   const [q, setQ] = useState("");
 
+  // ---- Create client modal ----
+  const [createClientOpen, setCreateClientOpen] = useState(false);
+  const [newClientName, setNewClientName] = useState("");
+  const [createClientSaving, setCreateClientSaving] = useState(false);
+  const [createClientErr, setCreateClientErr] = useState("");
+
+  // ---- Create user modal ----
+  const [createUserOpen, setCreateUserOpen] = useState(false);
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [newUserRole, setNewUserRole] = useState("user");
+  const [createUserSaving, setCreateUserSaving] = useState(false);
+  const [createUserErr, setCreateUserErr] = useState("");
+
   // Modal prompt & sources
   const [modalOpen, setModalOpen] = useState(false);
   const [modalAgent, setModalAgent] = useState(null);
@@ -33,6 +47,19 @@ export default function Admin() {
     return data?.session?.access_token || "";
   }
 
+  async function apiPost(url, body) {
+    const token = await getAccessToken();
+    if (!token) throw new Error("Non authentifié. Reconnectez-vous.");
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body || {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.error || `Erreur (${res.status})`);
+    return data;
+  }
+
   async function logout() {
     await supabase.auth.signOut();
     window.location.href = "/login";
@@ -42,42 +69,9 @@ export default function Admin() {
     window.location.href = "/agents";
   }
 
-  async function requireAdminOrRedirect() {
-    const { data: sess } = await supabase.auth.getSession();
-    const user = sess?.session?.user;
-    if (!user) {
-      window.location.href = "/login";
-      return false;
-    }
-
-    // On lit le rôle depuis profiles (règle: admin => profiles.role === 'admin')
-    const { data: prof, error } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (error) {
-      // Par sécurité : si on ne peut pas vérifier, on refuse l'accès
-      window.location.href = "/login";
-      return false;
-    }
-
-    if (!prof || prof.role !== "admin") {
-      window.location.href = "/login";
-      return false;
-    }
-
-    return true;
-  }
-
   async function refreshAll() {
     setLoading(true);
     setMsg("");
-
-    // Safety: empêcher tout chargement si pas admin
-    const ok = await requireAdminOrRedirect();
-    if (!ok) return;
 
     const [cRes, cuRes, pRes, aRes, uaRes, cfgRes] = await Promise.all([
       supabase.from("clients").select("id,name,created_at").order("created_at", { ascending: false }),
@@ -102,12 +96,7 @@ export default function Admin() {
   }
 
   useEffect(() => {
-    // Garde immédiate à l’ouverture de /admin
-    (async () => {
-      const ok = await requireAdminOrRedirect();
-      if (!ok) return;
-      await refreshAll();
-    })();
+    refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -161,21 +150,121 @@ export default function Admin() {
 
   async function toggleAssign(agentId, assign) {
     if (!selectedUserId) return alert("Sélectionnez un utilisateur.");
-    const token = await getAccessToken();
-    if (!token) return alert("Non authentifié.");
-
-    const res = await fetch("/api/admin/toggle-user-agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ userId: selectedUserId, agentId, assign }),
-    });
-
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
-
-    await refreshAll();
+    try {
+      await apiPost("/api/admin/toggle-user-agent", { userId: selectedUserId, agentId, assign });
+      await refreshAll();
+    } catch (e) {
+      alert(e?.message || "Erreur.");
+    }
   }
 
+  // -------- CLIENT / USER MANAGEMENT (restauré) --------
+  function openCreateClient() {
+    setCreateClientErr("");
+    setNewClientName("");
+    setCreateClientOpen(true);
+  }
+  function closeCreateClient() {
+    setCreateClientOpen(false);
+    setCreateClientErr("");
+    setCreateClientSaving(false);
+  }
+  async function doCreateClient() {
+    const name = (newClientName || "").trim();
+    if (!name) return setCreateClientErr("Nom du client obligatoire.");
+    setCreateClientSaving(true);
+    setCreateClientErr("");
+    setMsg("");
+    try {
+      await apiPost("/api/admin/create-client", { name });
+      closeCreateClient();
+      await refreshAll();
+      setMsg("Client créé.");
+      setTimeout(() => setMsg(""), 2000);
+    } catch (e) {
+      setCreateClientErr(e?.message || "Création client impossible.");
+    } finally {
+      setCreateClientSaving(false);
+    }
+  }
+
+  function openCreateUser() {
+    if (!selectedClientId) {
+      setMsg("Sélectionnez un client d’abord.");
+      return;
+    }
+    setCreateUserErr("");
+    setNewUserEmail("");
+    setNewUserPassword("");
+    setNewUserRole("user");
+    setCreateUserOpen(true);
+  }
+  function closeCreateUser() {
+    setCreateUserOpen(false);
+    setCreateUserErr("");
+    setCreateUserSaving(false);
+  }
+  async function doCreateUser() {
+    const email = (newUserEmail || "").trim().toLowerCase();
+    const password = (newUserPassword || "").toString();
+    const role = (newUserRole || "user").trim().toLowerCase() || "user";
+
+    if (!selectedClientId) return setCreateUserErr("Client non sélectionné.");
+    if (!email) return setCreateUserErr("Email obligatoire.");
+    if (!password || password.length < 6) return setCreateUserErr("Mot de passe obligatoire (min 6).");
+
+    setCreateUserSaving(true);
+    setCreateUserErr("");
+    setMsg("");
+    try {
+      await apiPost("/api/admin/create-user", { clientId: selectedClientId, email, password, role });
+      closeCreateUser();
+      await refreshAll();
+      setMsg("Utilisateur créé.");
+      setTimeout(() => setMsg(""), 2000);
+    } catch (e) {
+      setCreateUserErr(e?.message || "Création utilisateur impossible.");
+    } finally {
+      setCreateUserSaving(false);
+    }
+  }
+
+  async function deleteClient(clientId, clientName) {
+    const ok = window.confirm(`Supprimer le client "${clientName}" ?\n(Cela supprimera aussi les liens users via cascade.)`);
+    if (!ok) return;
+
+    setMsg("");
+    try {
+      await apiPost("/api/admin/delete-client", { clientId });
+      if (selectedClientId === clientId) {
+        setSelectedClientId("");
+        setSelectedUserId("");
+      }
+      await refreshAll();
+      setMsg("Client supprimé.");
+      setTimeout(() => setMsg(""), 2000);
+    } catch (e) {
+      alert(e?.message || "Suppression client impossible.");
+    }
+  }
+
+  async function removeUserFromClient(clientId, userId, email) {
+    const ok = window.confirm(`Retirer l’utilisateur "${email}" de ce client ?`);
+    if (!ok) return;
+
+    setMsg("");
+    try {
+      await apiPost("/api/admin/remove-client-user", { clientId, userId });
+      if (selectedUserId === userId) setSelectedUserId("");
+      await refreshAll();
+      setMsg("Utilisateur retiré du client.");
+      setTimeout(() => setMsg(""), 2000);
+    } catch (e) {
+      alert(e?.message || "Suppression utilisateur impossible.");
+    }
+  }
+
+  // -------- PROMPT & SOURCES --------
   function openPromptModal(agent) {
     const cfg = getConfig(agent.id);
     const ctx = cfg?.context || {};
@@ -216,25 +305,15 @@ export default function Admin() {
 
     setUploading(true);
     try {
-      const token = await getAccessToken();
-      if (!token) return alert("Non authentifié.");
-
       const base64 = await fileToBase64(file);
 
-      const res = await fetch("/api/admin/upload-agent-source", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          userId: selectedUserId,
-          agentSlug: modalAgent.slug,
-          fileName: file.name,
-          mimeType: file.type,
-          base64,
-        }),
+      const data = await apiPost("/api/admin/upload-agent-source", {
+        userId: selectedUserId,
+        agentSlug: modalAgent.slug,
+        fileName: file.name,
+        mimeType: file.type,
+        base64,
       });
-
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) return alert(`Erreur upload (${res.status}) : ${data?.error || "?"}`);
 
       const item = {
         type: "pdf",
@@ -246,34 +325,29 @@ export default function Admin() {
       };
 
       setSources((prev) => [item, ...prev]);
+    } catch (e) {
+      alert(e?.message || "Erreur upload.");
     } finally {
       setUploading(false);
     }
   }
 
   async function savePromptModal() {
-    const token = await getAccessToken();
-    if (!token) return alert("Non authentifié.");
     if (!selectedUserId || !modalAgent) return;
 
-    const context = { sources };
-
-    const res = await fetch("/api/admin/save-agent-config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({
+    try {
+      await apiPost("/api/admin/save-agent-config", {
         userId: selectedUserId,
         agentId: modalAgent.id,
         systemPrompt: modalSystemPrompt,
-        context,
-      }),
-    });
+        context: { sources },
+      });
 
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
-
-    closePromptModal();
-    await refreshAll();
+      closePromptModal();
+      await refreshAll();
+    } catch (e) {
+      alert(e?.message || "Erreur sauvegarde.");
+    }
   }
 
   async function deleteAgentConversations(agentSlug, agentName) {
@@ -281,19 +355,12 @@ export default function Admin() {
     const ok = window.confirm(`Supprimer toutes les conversations de "${agentName}" pour cet utilisateur ?`);
     if (!ok) return;
 
-    const token = await getAccessToken();
-    if (!token) return alert("Non authentifié.");
-
-    const res = await fetch("/api/admin/delete-agent-conversations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ userId: selectedUserId, agentSlug }),
-    });
-
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
-
-    alert(`OK. Conversations supprimées: ${data?.deleted ?? 0}`);
+    try {
+      const data = await apiPost("/api/admin/delete-agent-conversations", { userId: selectedUserId, agentSlug });
+      alert(`OK. Conversations supprimées: ${data?.deleted ?? 0}`);
+    } catch (e) {
+      alert(e?.message || "Erreur suppression conversations.");
+    }
   }
 
   return (
@@ -326,7 +393,23 @@ export default function Admin() {
       <div style={styles.wrap}>
         <aside style={styles.left}>
           <div style={styles.box}>
-            <div style={styles.boxTitle}>Clients</div>
+            <div style={styles.boxTopRow}>
+              <div style={styles.boxTitle}>Clients</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button style={styles.iconBtn} onClick={openCreateClient} title="Créer un client">
+                  + Client
+                </button>
+                <button
+                  style={{ ...styles.iconBtn, ...(selectedClientId ? {} : styles.iconBtnDisabled) }}
+                  onClick={openCreateUser}
+                  disabled={!selectedClientId}
+                  title="Créer un utilisateur sous le client sélectionné"
+                >
+                  + Utilisateur
+                </button>
+              </div>
+            </div>
+
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -340,20 +423,35 @@ export default function Admin() {
               <div style={{ display: "grid", gap: 12 }}>
                 {clientCards.map((c) => {
                   const activeClient = c.id === selectedClientId;
+
                   return (
                     <div key={c.id} style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}>
-                      <div
-                        style={styles.clientHeader}
-                        onClick={() => setSelectedClientId(c.id)}
-                        title="Sélectionner ce client"
-                      >
-                        <div style={styles.clientName}>{c.name}</div>
-                        <div style={styles.small}>{c.userCount} user(s)</div>
+                      <div style={styles.clientHeader}>
+                        <div
+                          style={{ display: "flex", alignItems: "baseline", gap: 10, flex: 1, cursor: "pointer" }}
+                          onClick={() => setSelectedClientId(c.id)}
+                          title="Sélectionner ce client"
+                        >
+                          <div style={styles.clientName}>{c.name}</div>
+                          <div style={styles.small}>{c.userCount} user(s)</div>
+                        </div>
+
+                        <button
+                          style={styles.trashBtn}
+                          title="Supprimer ce client"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteClient(c.id, c.name);
+                          }}
+                        >
+                          Supprimer
+                        </button>
                       </div>
 
                       <div style={styles.userList}>
                         {(c.users || []).map((u) => {
                           const activeUser = activeClient && u.user_id === selectedUserId;
+
                           return (
                             <div
                               key={u.user_id}
@@ -363,7 +461,19 @@ export default function Admin() {
                                 setSelectedUserId(u.user_id);
                               }}
                             >
-                              <div style={{ fontWeight: 900 }}>{u.email}</div>
+                              <div style={styles.userRow}>
+                                <div style={{ fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis" }}>{u.email}</div>
+                                <button
+                                  style={styles.userRemoveBtn}
+                                  title="Retirer cet utilisateur du client"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    removeUserFromClient(c.id, u.user_id, u.email);
+                                  }}
+                                >
+                                  ✕
+                                </button>
+                              </div>
                               <div style={styles.tiny}>
                                 {u.role ? `role: ${u.role}` : "role: (vide)"} —{" "}
                                 <span style={{ fontFamily: "monospace" }}>{u.user_id.slice(0, 8)}…</span>
@@ -474,6 +584,77 @@ export default function Admin() {
         </section>
       </div>
 
+      {/* MODAL CREATE CLIENT */}
+      {createClientOpen && (
+        <div style={styles.modalOverlay} onClick={closeCreateClient}>
+          <div style={styles.modalSmall} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalTitle}>Créer un client</div>
+            <div style={styles.modalLabel}>Nom du client</div>
+            <input
+              value={newClientName}
+              onChange={(e) => setNewClientName(e.target.value)}
+              placeholder="Ex: B Contact"
+              style={styles.input}
+            />
+
+            {!!createClientErr && <div style={styles.alert}>{createClientErr}</div>}
+
+            <div style={styles.modalActions}>
+              <button style={styles.btnGhost} onClick={closeCreateClient} disabled={createClientSaving}>
+                Annuler
+              </button>
+              <button style={styles.btnAssign} onClick={doCreateClient} disabled={createClientSaving}>
+                {createClientSaving ? "Création…" : "Créer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL CREATE USER */}
+      {createUserOpen && (
+        <div style={styles.modalOverlay} onClick={closeCreateUser}>
+          <div style={styles.modalSmall} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalTitle}>Créer un utilisateur</div>
+
+            <div style={styles.modalLabel}>Email</div>
+            <input
+              value={newUserEmail}
+              onChange={(e) => setNewUserEmail(e.target.value)}
+              placeholder="email@domaine.fr"
+              style={styles.input}
+            />
+
+            <div style={styles.modalLabel}>Mot de passe</div>
+            <input
+              value={newUserPassword}
+              onChange={(e) => setNewUserPassword(e.target.value)}
+              placeholder="Min 6 caractères"
+              style={styles.input}
+              type="password"
+            />
+
+            <div style={styles.modalLabel}>Rôle</div>
+            <select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value)} style={styles.select}>
+              <option value="user">user</option>
+              <option value="admin">admin</option>
+            </select>
+
+            {!!createUserErr && <div style={styles.alert}>{createUserErr}</div>}
+
+            <div style={styles.modalActions}>
+              <button style={styles.btnGhost} onClick={closeCreateUser} disabled={createUserSaving}>
+                Annuler
+              </button>
+              <button style={styles.btnAssign} onClick={doCreateUser} disabled={createUserSaving}>
+                {createUserSaving ? "Création…" : "Créer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL PROMPT & SOURCES */}
       {modalOpen && modalAgent && (
         <div style={styles.modalOverlay} onClick={closePromptModal}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -491,12 +672,7 @@ export default function Admin() {
               <div style={{ flex: 1 }}>
                 <div style={styles.modalLabel}>Ajouter une URL</div>
                 <div style={styles.row}>
-                  <input
-                    value={urlToAdd}
-                    onChange={(e) => setUrlToAdd(e.target.value)}
-                    placeholder="https://…"
-                    style={styles.input}
-                  />
+                  <input value={urlToAdd} onChange={(e) => setUrlToAdd(e.target.value)} placeholder="https://…" style={styles.input} />
                   <button style={styles.btnAssign} onClick={addUrlSource}>
                     Ajouter
                   </button>
@@ -626,6 +802,30 @@ const styles = {
   },
   boxTitle: { fontWeight: 900, marginBottom: 10 },
 
+  boxTopRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    marginBottom: 10,
+  },
+
+  iconBtn: {
+    borderRadius: 999,
+    padding: "8px 10px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+    fontSize: 12,
+  },
+  iconBtnDisabled: {
+    opacity: 0.4,
+    cursor: "not-allowed",
+  },
+
   search: {
     width: "100%",
     padding: "10px 12px",
@@ -654,10 +854,22 @@ const styles = {
     alignItems: "baseline",
     justifyContent: "space-between",
     gap: 10,
-    cursor: "pointer",
     background: "rgba(0,0,0,.18)",
   },
   clientName: { fontWeight: 900, fontSize: 14 },
+
+  trashBtn: {
+    borderRadius: 999,
+    padding: "8px 10px",
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    fontSize: 12,
+    whiteSpace: "nowrap",
+  },
+
   userList: { padding: 10, display: "grid", gap: 10 },
   userItem: {
     padding: 10,
@@ -667,6 +879,19 @@ const styles = {
     cursor: "pointer",
   },
   userItemActive: { borderColor: "rgba(80,120,255,.35)", background: "rgba(80,120,255,.08)" },
+
+  userRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  userRemoveBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    flex: "0 0 auto",
+  },
 
   small: { fontSize: 12, opacity: 0.75, fontWeight: 800 },
   tiny: { fontSize: 11, opacity: 0.7, fontWeight: 800 },
@@ -781,8 +1006,18 @@ const styles = {
     padding: 16,
     backdropFilter: "blur(12px)",
   },
+  modalSmall: {
+    width: "min(560px, 96vw)",
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.70)",
+    boxShadow: "0 34px 90px rgba(0,0,0,.62)",
+    padding: 16,
+    backdropFilter: "blur(12px)",
+  },
   modalTitle: { fontWeight: 900, fontSize: 16, marginBottom: 10 },
   modalLabel: { fontWeight: 900, marginTop: 10, marginBottom: 6, opacity: 0.9 },
+
   textarea: {
     width: "100%",
     minHeight: 120,
@@ -796,9 +1031,11 @@ const styles = {
     fontSize: 13,
     fontWeight: 700,
   },
+
   modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 12 },
 
   row: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
+
   input: {
     width: "100%",
     padding: "10px 12px",
@@ -809,6 +1046,18 @@ const styles = {
     outline: "none",
     fontWeight: 800,
   },
+
+  select: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.92)",
+    outline: "none",
+    fontWeight: 900,
+  },
+
   uploadBox: {
     display: "flex",
     alignItems: "center",
@@ -820,6 +1069,7 @@ const styles = {
     cursor: "pointer",
     fontWeight: 900,
   },
+
   sourcesBox: {
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,.12)",
@@ -830,6 +1080,7 @@ const styles = {
     maxHeight: 260,
     overflow: "auto",
   },
+
   sourceRow: {
     display: "flex",
     gap: 10,
@@ -839,6 +1090,7 @@ const styles = {
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(0,0,0,.15)",
   },
+
   xBtn: {
     width: 40,
     height: 40,
