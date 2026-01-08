@@ -4,7 +4,6 @@ import { supabase } from "../lib/supabaseClient";
 
 export default function ChatPage() {
   const [sessionEmail, setSessionEmail] = useState("");
-  const [sessionUserId, setSessionUserId] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
 
   const [agentSlug, setAgentSlug] = useState("");
@@ -25,13 +24,6 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const endRef = useRef(null);
 
-  // Micro (Web Speech API) — FIX: ne pas empiler les interim results
-  const [micAvailable, setMicAvailable] = useState(false);
-  const [listening, setListening] = useState(false);
-  const recognitionRef = useRef(null);
-  const dictationBaseRef = useRef(""); // texte déjà présent avant dictée
-  const dictationFinalRef = useRef(""); // accumulateur uniquement des résultats finals
-
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
     return data?.session?.access_token || "";
@@ -47,6 +39,10 @@ export default function ChatPage() {
   }
 
   function openAdmin() {
+    if (!isAdmin) {
+      alert("Accès interdit (admin requis).");
+      return;
+    }
     window.location.href = "/admin";
   }
 
@@ -59,125 +55,38 @@ export default function ChatPage() {
     return () => mql.removeEventListener?.("change", apply);
   }, []);
 
-  // Détecter disponibilité micro (sans instancier en boucle)
-  useEffect(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    setMicAvailable(!!SR);
-  }, []);
-
-  function stopMic() {
-    try {
-      if (recognitionRef.current) {
-        recognitionRef.current.onresult = null;
-        recognitionRef.current.onerror = null;
-        recognitionRef.current.onend = null;
-        recognitionRef.current.stop();
-      }
-    } catch {
-      // ignore
-    } finally {
-      recognitionRef.current = null;
-      setListening(false);
-    }
-  }
-
-  function startMic() {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      setMicAvailable(false);
-      alert("Micro non disponible sur ce navigateur.");
-      return;
-    }
-
-    // Sécurité anti-doublons
-    if (recognitionRef.current) stopMic();
-
-    // Base = ce qui est déjà tapé au moment où on lance la dictée
-    dictationBaseRef.current = (input || "").trim();
-    dictationFinalRef.current = "";
-
-    const rec = new SR();
-    recognitionRef.current = rec;
-
-    rec.lang = "fr-FR";
-    rec.interimResults = true; // ok, mais on remplace au lieu d'empiler
-    rec.continuous = false;
-
-    rec.onresult = (event) => {
-      let interim = "";
-
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const res = event.results[i];
-        const txt = res?.[0]?.transcript || "";
-        if (res.isFinal) dictationFinalRef.current += txt;
-        else interim += txt;
-      }
-
-      const base = dictationBaseRef.current;
-      const spoken = (dictationFinalRef.current + interim).trim();
-
-      // IMPORTANT: on RECONSTRUIT la valeur entière, on n'ajoute pas à prev
-      const next = base ? (spoken ? `${base} ${spoken}` : base) : spoken;
-      setInput(next.trim());
-    };
-
-    rec.onerror = () => {
-      stopMic();
-    };
-
-    rec.onend = () => {
-      // Fin normale (silence / stop)
-      stopMic();
-    };
-
-    try {
-      setListening(true);
-      rec.start();
-    } catch {
-      stopMic();
-    }
-  }
-
-  function toggleMic() {
-    if (listening) stopMic();
-    else startMic();
-  }
-
   // Boot
   useEffect(() => {
     (async () => {
       setLoading(true);
 
       const { data: sess } = await supabase.auth.getSession();
-      const email = sess?.session?.user?.email || "";
-      const userId = sess?.session?.user?.id || "";
-      setSessionEmail(email);
-      setSessionUserId(userId);
+      const user = sess?.session?.user || null;
 
-      // Admin ?
-      if (userId) {
+      const email = user?.email || "";
+      setSessionEmail(email);
+
+      // Déterminer si admin (profiles.role)
+      if (user?.id) {
         const { data: prof } = await supabase
           .from("profiles")
           .select("role")
-          .eq("user_id", userId)
+          .eq("user_id", user.id)
           .maybeSingle();
 
-        setIsAdmin((prof?.role || "") === "admin");
+        setIsAdmin(!!prof && prof.role === "admin");
+      } else {
+        setIsAdmin(false);
       }
 
-      // Agent choisi via query ?agent=emma sinon localStorage sinon emma
-      const params = new URLSearchParams(window.location.search || "");
-      const fromQuery = (params.get("agent") || "").trim().toLowerCase();
-      const stored = (window.localStorage.getItem("selected_agent_slug") || "").trim().toLowerCase();
-      const slug = (fromQuery || stored || "emma").trim().toLowerCase();
-
+      // Agent choisi
+      const stored = window.localStorage.getItem("selected_agent_slug") || "";
+      const slug = (stored || "emma").trim().toLowerCase();
       setAgentSlug(slug);
-      window.localStorage.setItem("selected_agent_slug", slug);
 
-      // Infos agent
       const { data: agent } = await supabase
         .from("agents")
-        .select("id,slug,name,description,avatar_url")
+        .select("slug,name,description,avatar_url")
         .eq("slug", slug)
         .maybeSingle();
 
@@ -185,25 +94,18 @@ export default function ChatPage() {
       setAgentRole(agent?.description || "");
       setAgentAvatar(agent?.avatar_url || "");
 
-      // Conversations: filtrer par user_id + agent_slug
-      let list = [];
-      if (userId) {
-        const { data: convs, error } = await supabase
-          .from("conversations")
-          .select("id,user_id,created_at,agent_slug,title")
-          .eq("user_id", userId)
-          .eq("agent_slug", slug)
-          .order("created_at", { ascending: false });
+      const { data: convs } = await supabase
+        .from("conversations")
+        .select("id,user_id,created_at,agent_slug,title,archived")
+        .eq("agent_slug", slug)
+        .order("created_at", { ascending: false });
 
-        if (!error) list = convs || [];
-      }
-
+      const list = convs || [];
       setConversations(list);
 
       const firstId = list?.[0]?.id || "";
       setSelectedConvId(firstId);
 
-      // Messages
       if (firstId) {
         const { data: msgs } = await supabase
           .from("messages")
@@ -220,7 +122,7 @@ export default function ChatPage() {
     })();
   }, []);
 
-  // Scroll
+  // Scroll to bottom
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
@@ -242,85 +144,40 @@ export default function ChatPage() {
     setMessages(msgs || []);
   }
 
-  async function newConversation(optionalTitle) {
+  async function newConversation() {
     const { data: sess } = await supabase.auth.getSession();
     const userId = sess?.session?.user?.id;
-    if (!userId) {
-      alert("Non authentifié.");
-      return "";
-    }
-
-    const title = (optionalTitle || "Nouvelle conversation").trim();
+    if (!userId) return alert("Non authentifié.");
 
     const { data: conv, error } = await supabase
       .from("conversations")
-      .insert([{ user_id: userId, agent_slug: agentSlug, title }])
-      .select("id,user_id,created_at,agent_slug,title")
+      .insert([{ user_id: userId, agent_slug: agentSlug, title: "Nouvelle conversation", archived: false }])
+      .select("id,user_id,created_at,agent_slug,title,archived")
       .maybeSingle();
 
-    if (error) {
-      alert(error.message);
-      return "";
-    }
+    if (error) return alert(error.message);
 
     const next = [conv, ...conversations];
     setConversations(next);
     setSelectedConvId(conv.id);
     setMessages([]);
     setDrawerOpen(false);
-
-    return conv.id;
-  }
-
-  function buildAutoTitle(text) {
-    const t = (text || "").trim().replace(/\s+/g, " ");
-    if (!t) return "Conversation";
-    const maxLen = 42;
-    const short = t.length > maxLen ? t.slice(0, maxLen).trim() + "…" : t;
-    return short;
-  }
-
-  async function maybeRenameConversation(convId, firstUserText) {
-    const conv = conversations.find((c) => c.id === convId);
-    const current = (conv?.title || "").trim().toLowerCase();
-    if (current && current !== "nouvelle conversation") return;
-
-    const title = buildAutoTitle(firstUserText);
-
-    await supabase.from("conversations").update({ title }).eq("id", convId);
-
-    setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, title } : c)));
   }
 
   async function sendMessage() {
     const text = (input || "").trim();
     if (!text) return;
+    if (!selectedConvId) return alert("Aucune conversation sélectionnée.");
 
     setSending(true);
     setInput("");
 
-    let convId = selectedConvId;
+    await supabase.from("messages").insert([{ conversation_id: selectedConvId, role: "user", content: text }]);
 
-    // Si aucune conversation => on en crée une automatiquement
-    if (!convId) {
-      convId = await newConversation("Nouvelle conversation");
-      if (!convId) {
-        setSending(false);
-        return;
-      }
-    }
-
-    // 1) save user msg
-    await supabase.from("messages").insert([{ conversation_id: convId, role: "user", content: text }]);
-
-    // rename conv after first user message
-    await maybeRenameConversation(convId, text);
-
-    // 2) refresh msgs
     const { data: msgs1 } = await supabase
       .from("messages")
       .select("id,conversation_id,role,content,created_at")
-      .eq("conversation_id", convId)
+      .eq("conversation_id", selectedConvId)
       .order("created_at", { ascending: true });
 
     setMessages(msgs1 || []);
@@ -338,29 +195,26 @@ export default function ChatPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
 
-      const reply = (data.reply || data.answer || data.content || "").toString().trim() || "Réponse vide.";
+      const reply = (data.reply || data.answer || data.content || "").toString();
 
-      // 3) save assistant msg
-      await supabase.from("messages").insert([{ conversation_id: convId, role: "assistant", content: reply }]);
+      await supabase.from("messages").insert([{ conversation_id: selectedConvId, role: "assistant", content: reply }]);
 
       const { data: msgs2 } = await supabase
         .from("messages")
         .select("id,conversation_id,role,content,created_at")
-        .eq("conversation_id", convId)
+        .eq("conversation_id", selectedConvId)
         .order("created_at", { ascending: true });
 
       setMessages(msgs2 || []);
     } catch (e) {
       await supabase.from("messages").insert([
-        { conversation_id: convId, role: "assistant", content: `Erreur: ${String(e?.message || e)}` },
+        { conversation_id: selectedConvId, role: "assistant", content: `Erreur: ${String(e?.message || e)}` },
       ]);
-
       const { data: msgs2 } = await supabase
         .from("messages")
         .select("id,conversation_id,role,content,created_at")
-        .eq("conversation_id", convId)
+        .eq("conversation_id", selectedConvId)
         .order("created_at", { ascending: true });
-
       setMessages(msgs2 || []);
     } finally {
       setSending(false);
@@ -369,7 +223,6 @@ export default function ChatPage() {
 
   return (
     <main style={styles.page}>
-      {/* HEADER */}
       <div style={styles.header}>
         <div style={styles.headerLeft}>
           <button style={styles.headerBtn} onClick={goBack}>
@@ -423,14 +276,12 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* LAYOUT */}
       <div style={styles.layout}>
-        {/* SIDEBAR desktop */}
         {!isMobile && (
           <aside style={styles.sidebar}>
             <div style={styles.sidebarHead}>
               <div style={styles.sidebarTitle}>Historique</div>
-              <button style={styles.newBtn} onClick={() => newConversation("Nouvelle conversation")}>
+              <button style={styles.newBtn} onClick={newConversation}>
                 + Nouvelle
               </button>
             </div>
@@ -454,13 +305,12 @@ export default function ChatPage() {
           </aside>
         )}
 
-        {/* Drawer mobile */}
         {isMobile && drawerOpen && (
           <div style={styles.drawerOverlay} onClick={() => setDrawerOpen(false)}>
             <div style={styles.drawer} onClick={(e) => e.stopPropagation()}>
               <div style={styles.sidebarHead}>
                 <div style={styles.sidebarTitle}>Historique</div>
-                <button style={styles.newBtn} onClick={() => newConversation("Nouvelle conversation")}>
+                <button style={styles.newBtn} onClick={newConversation}>
                   + Nouvelle
                 </button>
               </div>
@@ -483,7 +333,6 @@ export default function ChatPage() {
           </div>
         )}
 
-        {/* CHAT */}
         <section style={styles.chat}>
           <div style={styles.chatInner}>
             {loading ? (
@@ -511,53 +360,7 @@ export default function ChatPage() {
                     placeholder="Écrire…"
                     style={styles.input}
                     rows={isMobile ? 2 : 3}
-                    onKeyDown={(e) => {
-                      // Enter envoie, Shift+Enter nouvelle ligne
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        if (!sending) sendMessage();
-                      }
-                    }}
                   />
-
-                  <button
-                    style={{ ...styles.micBtn, ...(listening ? styles.micBtnOn : {}) }}
-                    onClick={toggleMic}
-                    disabled={!micAvailable}
-                    title={micAvailable ? (listening ? "Arrêter la dictée" : "Dicter") : "Micro non disponible"}
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <path
-                        d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                      <path
-                        d="M19 11a7 7 0 0 1-14 0"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                      <path
-                        d="M12 18v3"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                      <path
-                        d="M8 21h8"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </button>
-
                   <button style={styles.sendBtn} onClick={sendMessage} disabled={sending}>
                     {sending ? "…" : "Envoyer"}
                   </button>
@@ -565,8 +368,7 @@ export default function ChatPage() {
 
                 {!!selectedConversation && (
                   <div style={styles.tinyNote}>
-                    Conversation:{" "}
-                    <span style={{ fontFamily: "monospace" }}>{selectedConversation.id.slice(0, 8)}…</span>
+                    Conversation: <span style={{ fontFamily: "monospace" }}>{selectedConversation.id.slice(0, 8)}…</span>
                   </div>
                 )}
               </>
@@ -750,34 +552,15 @@ const styles = {
     fontWeight: 800,
     lineHeight: 1.3,
   },
-
-  micBtn: {
-    width: 46,
-    height: 46,
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(0,0,0,.20)",
-    color: "rgba(238,242,255,.92)",
-    fontWeight: 900,
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  micBtnOn: {
-    border: "1px solid rgba(255,140,40,.55)",
-    background: "rgba(255,140,40,.12)",
-  },
-
   sendBtn: {
     borderRadius: 14,
     padding: "12px 14px",
-    border: "1px solid rgba(255,140,40,.50)",
-    background: "rgba(255,140,40,.18)",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.10)",
     color: "#fff",
     fontWeight: 900,
     cursor: "pointer",
-    minWidth: 110,
+    minWidth: 96,
   },
 
   tinyNote: { padding: "0 12px 10px", opacity: 0.7, fontWeight: 800, fontSize: 12 },
