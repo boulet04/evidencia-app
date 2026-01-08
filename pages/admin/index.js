@@ -4,6 +4,9 @@ import { supabase } from "../../lib/supabaseClient";
 
 export default function Admin() {
   const [loading, setLoading] = useState(true);
+  const [checking, setChecking] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [sessionEmail, setSessionEmail] = useState("");
   const [msg, setMsg] = useState("");
 
   const [clients, setClients] = useState([]);
@@ -24,7 +27,7 @@ export default function Admin() {
   const [modalSystemPrompt, setModalSystemPrompt] = useState("");
 
   // sources UI
-  const [sources, setSources] = useState([]); // [{type:'pdf'|'url', name, path, url, mime, size}]
+  const [sources, setSources] = useState([]); // [{type:'pdf'|'url', name, path, url, mime, size, bucket}]
   const [urlToAdd, setUrlToAdd] = useState("");
   const [uploading, setUploading] = useState(false);
 
@@ -35,7 +38,6 @@ export default function Admin() {
 
   async function logout() {
     await supabase.auth.signOut();
-    // IMPORTANT: redirection vers la page de connexion habituelle
     window.location.href = "/login";
   }
 
@@ -43,7 +45,53 @@ export default function Admin() {
     window.location.href = "/agents";
   }
 
+  async function ensureAdminOrRedirect() {
+    setChecking(true);
+    try {
+      const { data: sess } = await supabase.auth.getSession();
+      const user = sess?.session?.user || null;
+
+      if (!user) {
+        window.location.href = "/login";
+        return false;
+      }
+
+      setSessionEmail(user.email || "");
+
+      // Vérifie role dans profiles
+      // IMPORTANT: la politique RLS doit permettre au user de lire son propre profile (au minimum role/email).
+      const { data: prof, error: profErr } = await supabase
+        .from("profiles")
+        .select("role,email")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (profErr) {
+        // Si on ne peut pas lire profiles, on refuse l'accès par défaut.
+        window.location.href = "/agents";
+        return false;
+      }
+
+      const role = (prof?.role || "").toString().trim().toLowerCase();
+      const ok = role === "admin";
+
+      if (!ok) {
+        // Accès interdit aux non-admins
+        window.location.href = "/agents";
+        return false;
+      }
+
+      setIsAdmin(true);
+      return true;
+    } finally {
+      setChecking(false);
+    }
+  }
+
   async function refreshAll() {
+    // garde-fou : on ne charge rien si pas admin
+    if (!isAdmin) return;
+
     setLoading(true);
     setMsg("");
 
@@ -69,11 +117,17 @@ export default function Admin() {
     setLoading(false);
   }
 
+  // Boot sécurisé : vérifie admin, puis charge
   useEffect(() => {
-    refreshAll();
+    (async () => {
+      const ok = await ensureAdminOrRedirect();
+      if (!ok) return;
+      await refreshAll();
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Construire des cartes “client + utilisateurs”
   const clientCards = useMemo(() => {
     const qq = (q || "").trim().toLowerCase();
 
@@ -100,6 +154,7 @@ export default function Admin() {
     });
   }, [clients, clientUsers, profiles, q]);
 
+  // Auto-sélection: si client change, sélectionner son 1er user
   useEffect(() => {
     if (!selectedClientId) {
       setSelectedUserId("");
@@ -259,6 +314,26 @@ export default function Admin() {
     alert(`OK. Conversations supprimées: ${data?.deleted ?? 0}`);
   }
 
+  // Pendant la vérif d'accès, on affiche une page neutre
+  if (checking) {
+    return (
+      <main style={styles.page}>
+        <div style={{ padding: 18, fontWeight: 900, opacity: 0.85 }}>Vérification des droits…</div>
+      </main>
+    );
+  }
+
+  // Si pas admin, on ne doit jamais rendre l'UI admin (normalement on a déjà redirect)
+  if (!isAdmin) {
+    return (
+      <main style={styles.page}>
+        <div style={{ padding: 18, fontWeight: 900, opacity: 0.85 }}>
+          Accès interdit. Redirection…
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main style={styles.page}>
       <div style={styles.header}>
@@ -280,6 +355,7 @@ export default function Admin() {
         </div>
 
         <div style={styles.headerRight}>
+          {sessionEmail ? <div style={styles.emailPill}>{sessionEmail}</div> : null}
           <button style={styles.headerBtnDanger} onClick={logout}>
             Déconnexion
           </button>
@@ -349,11 +425,7 @@ export default function Admin() {
         <section style={styles.right}>
           <div style={styles.box}>
             <div style={styles.boxTitle}>
-              {selectedClientId
-                ? selectedUserId
-                  ? "Assignation agents"
-                  : "Sélectionnez un utilisateur"
-                : "Sélectionnez un client"}
+              {selectedClientId ? (selectedUserId ? "Assignation agents" : "Sélectionnez un utilisateur") : "Sélectionnez un client"}
             </div>
 
             <div style={styles.diag}>
@@ -547,9 +619,23 @@ const styles = {
     flexWrap: "wrap",
   },
   headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 280 },
-  headerRight: { display: "flex", alignItems: "center", gap: 10 },
+  headerRight: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" },
   headerLogo: { height: 26, width: "auto", opacity: 0.95, display: "block" },
   headerTitle: { fontWeight: 900, opacity: 0.9 },
+
+  emailPill: {
+    padding: "8px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.06)",
+    fontWeight: 800,
+    fontSize: 12,
+    opacity: 0.9,
+    maxWidth: 260,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
 
   headerBtn: {
     borderRadius: 999,
