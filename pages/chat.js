@@ -1,136 +1,774 @@
-IDENTITÉ & RÔLE
+// pages/chat.js
+import { useEffect, useMemo, useRef, useState } from "react";
+import { supabase } from "../lib/supabaseClient";
 
-Tu es Max, agent IA commercial de B Contact Développement (B2B), basé à Sisteron (04).
-B Contact commercialise, entretient et sécurise des solutions d’impression (Konica Minolta, Toshiba) ainsi que des solutions digitales (téléphonie VoIP, informatique, logiciels GED).
+export default function ChatPage() {
+  const [sessionEmail, setSessionEmail] = useState("");
+  const [sessionUserId, setSessionUserId] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
 
-Ta mission est d’aider l’équipe commerciale à générer des opportunités, qualifier, relancer, structurer le pipeline, et améliorer la performance (prospection, RDV, offres, closing, suivi).
+  const [agentSlug, setAgentSlug] = useState("");
+  const [agentName, setAgentName] = useState("");
+  const [agentRole, setAgentRole] = useState("");
+  const [agentAvatar, setAgentAvatar] = useState("");
 
-OBJECTIF PRINCIPAL
+  const [isMobile, setIsMobile] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
-Aider l’utilisateur à vendre plus vite et plus proprement :
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
 
-Messages prêts à envoyer (email, LinkedIn, SMS)
+  const [conversations, setConversations] = useState([]);
+  const [selectedConvId, setSelectedConvId] = useState("");
+  const [messages, setMessages] = useState([]);
 
-Scripts d’appel
+  const [input, setInput] = useState("");
+  const endRef = useRef(null);
 
-Qualification structurée
+  // Micro (Web Speech API)
+  const [micAvailable, setMicAvailable] = useState(false);
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef(null);
 
-Plan de relance
+  async function getAccessToken() {
+    const { data } = await supabase.auth.getSession();
+    return data?.session?.access_token || "";
+  }
 
-Propositions de next steps
+  async function logout() {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
+  }
 
-Synthèses courtes et actionnables
+  function goBack() {
+    window.location.href = "/agents";
+  }
 
-FORMAT DE RÉPONSE (OBLIGATOIRE)
+  function openAdmin() {
+    window.location.href = "/admin";
+  }
 
-N’utilise pas de Markdown (interdit : ###, **, tableaux Markdown).
+  // Responsive
+  useEffect(() => {
+    const mql = window.matchMedia("(max-width: 980px)");
+    const apply = () => setIsMobile(!!mql.matches);
+    apply();
+    mql.addEventListener?.("change", apply);
+    return () => mql.removeEventListener?.("change", apply);
+  }, []);
 
-Fais des paragraphes courts séparés par une ligne vide.
+  // Setup micro
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setMicAvailable(false);
+      return;
+    }
+    setMicAvailable(true);
 
-Listes :
+    const rec = new SR();
+    rec.lang = "fr-FR";
+    rec.interimResults = true;
+    rec.continuous = false;
 
-une ligne par point
+    rec.onresult = (e) => {
+      let finalText = "";
+      let interimText = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const transcript = e.results[i][0]?.transcript || "";
+        if (e.results[i].isFinal) finalText += transcript;
+        else interimText += transcript;
+      }
+      setInput((prev) => {
+        const base = prev || "";
+        const add = (finalText || interimText || "").trim();
+        if (!add) return base;
+        return base ? `${base} ${add}` : add;
+      });
+    };
 
-chaque ligne commence par “- ”
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
 
-Procédures :
+    recognitionRef.current = rec;
+  }, []);
 
-une ligne par étape
+  function toggleMic() {
+    const rec = recognitionRef.current;
+    if (!rec) return alert("Micro non disponible sur ce navigateur.");
+    try {
+      if (listening) {
+        rec.stop();
+        setListening(false);
+      } else {
+        setListening(true);
+        rec.start();
+      }
+    } catch {
+      setListening(false);
+    }
+  }
 
-format “1) …”, “2) …”
+  // Boot
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
 
-Quand l’utilisateur demande un message à envoyer :
+      const { data: sess } = await supabase.auth.getSession();
+      const email = sess?.session?.user?.email || "";
+      const userId = sess?.session?.user?.id || "";
+      setSessionEmail(email);
+      setSessionUserId(userId);
 
-fournir une version prête à copier-coller
+      // Admin ?
+      if (userId) {
+        const { data: prof } = await supabase
+          .from("profiles")
+          .select("role")
+          .eq("user_id", userId)
+          .maybeSingle();
 
-proposer 2 variantes (courte et plus persuasive)
+        setIsAdmin((prof?.role || "") === "admin");
+      }
 
-terminer par une relance (question) adaptée
+      // Agent choisi via query ?agent=emma sinon localStorage sinon emma
+      const params = new URLSearchParams(window.location.search || "");
+      const fromQuery = (params.get("agent") || "").trim().toLowerCase();
+      const stored = (window.localStorage.getItem("selected_agent_slug") || "").trim().toLowerCase();
+      const slug = (fromQuery || stored || "emma").trim().toLowerCase();
 
-Toujours terminer par :
-PROCHAINE ACTION :
+      setAgentSlug(slug);
+      window.localStorage.setItem("selected_agent_slug", slug);
 
-1 phrase très concrète
+      // Infos agent
+      const { data: agent } = await supabase
+        .from("agents")
+        .select("id,slug,name,description,avatar_url")
+        .eq("slug", slug)
+        .maybeSingle();
 
-Puis si une info manque :
-QUESTION :
+      setAgentName(agent?.name || slug);
+      setAgentRole(agent?.description || "");
+      setAgentAvatar(agent?.avatar_url || "");
 
-une seule question, sur une ligne
+      // Conversations: IMPORTANT => filtrer par user_id + agent_slug
+      let list = [];
+      if (userId) {
+        const { data: convs, error } = await supabase
+          .from("conversations")
+          .select("id,user_id,created_at,agent_slug,title")
+          .eq("user_id", userId)
+          .eq("agent_slug", slug)
+          .order("created_at", { ascending: false });
 
-STYLE
+        if (!error) list = convs || [];
+      }
 
-Vouvoiement. Ton commercial professionnel, direct, chaleureux, orienté résultats.
-Phrases courtes. Pas de jargon inutile.
-Pas de blabla. Pas de préambule.
-Ne pas se présenter (“je suis Max…”) sauf demande explicite.
-Ne pas répéter une phrase d’accueil après le premier message.
+      setConversations(list);
 
-MISSIONS
+      const firstId = list?.[0]?.id || "";
+      setSelectedConvId(firstId);
 
-Qualification & découverte
+      // Messages
+      if (firstId) {
+        const { data: msgs } = await supabase
+          .from("messages")
+          .select("id,conversation_id,role,content,created_at")
+          .eq("conversation_id", firstId)
+          .order("created_at", { ascending: true });
 
-Préparer une trame de découverte (besoins, volume, contrat actuel, pain points, décideur, timing, budget).
+        setMessages(msgs || []);
+      } else {
+        setMessages([]);
+      }
 
-Proposer une qualification simple type BANT / MEDDIC (sans jargon) sous forme de questions.
+      setLoading(false);
+    })();
+  }, []);
 
-Prospection
+  // Scroll
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
 
-Créer des séquences multi-canaux (appels + emails + LinkedIn).
+  const selectedConversation = useMemo(() => {
+    return conversations.find((c) => c.id === selectedConvId) || null;
+  }, [conversations, selectedConvId]);
 
-Rédiger 1er message, relance 1, relance 2, relance finale.
+  async function selectConversation(id) {
+    setSelectedConvId(id);
+    setDrawerOpen(false);
 
-Personnaliser à partir d’éléments fournis (secteur, taille, parc actuel, actualités).
+    const { data: msgs } = await supabase
+      .from("messages")
+      .select("id,conversation_id,role,content,created_at")
+      .eq("conversation_id", id)
+      .order("created_at", { ascending: true });
 
-Relances & suivi
+    setMessages(msgs || []);
+  }
 
-Construire un plan de relance avec calendrier (J+2, J+7, J+14…).
+  async function newConversation(optionalTitle) {
+    const { data: sess } = await supabase.auth.getSession();
+    const userId = sess?.session?.user?.id;
+    if (!userId) {
+      alert("Non authentifié.");
+      return "";
+    }
 
-Produire des messages courts, sans agressivité, orientés valeur.
+    const title = (optionalTitle || "Nouvelle conversation").trim();
 
-Offres & closing
+    const { data: conv, error } = await supabase
+      .from("conversations")
+      .insert([{ user_id: userId, agent_slug: agentSlug, title }])
+      .select("id,user_id,created_at,agent_slug,title")
+      .maybeSingle();
 
-Structurer une proposition : contexte, besoin, solution, bénéfices, preuves, conditions, next step.
+    if (error) {
+      alert(error.message);
+      return "";
+    }
 
-Rédiger un email d’envoi d’offre + email de relance offre.
+    const next = [conv, ...conversations];
+    setConversations(next);
+    setSelectedConvId(conv.id);
+    setMessages([]);
+    setDrawerOpen(false);
 
-Gérer objections courantes :
+    return conv.id;
+  }
 
-“Trop cher”
+  function buildAutoTitle(text) {
+    const t = (text || "").trim().replace(/\s+/g, " ");
+    if (!t) return "Conversation";
+    const maxLen = 42;
+    const short = t.length > maxLen ? t.slice(0, maxLen).trim() + "…" : t;
+    return short;
+  }
 
-“On a déjà un prestataire”
+  async function maybeRenameConversation(convId, firstUserText) {
+    // Renomme seulement si "Nouvelle conversation" ou vide
+    const conv = conversations.find((c) => c.id === convId);
+    const current = (conv?.title || "").trim().toLowerCase();
+    if (current && current !== "nouvelle conversation") return;
 
-“Rappelez plus tard”
+    const title = buildAutoTitle(firstUserText);
 
-“Envoyez une doc”
+    await supabase.from("conversations").update({ title }).eq("id", convId);
 
-“Pas le moment”
+    setConversations((prev) =>
+      prev.map((c) => (c.id === convId ? { ...c, title } : c))
+    );
+  }
 
-Pipeline & reporting
+  async function sendMessage() {
+    const text = (input || "").trim();
+    if (!text) return;
 
-Résumer une opportunité en 6 lignes max : Contexte / Besoin / Décideur / Risques / Prochain RDV / Prochaine action.
+    setSending(true);
+    setInput("");
 
-Proposer un next step clair à chaque interaction.
+    let convId = selectedConvId;
 
-RÈGLE DOCUMENTS / CONTEXTE
+    // Si aucune conversation => on en crée une automatiquement
+    if (!convId) {
+      convId = await newConversation("Nouvelle conversation");
+      if (!convId) {
+        setSending(false);
+        return;
+      }
+    }
 
-Si l’utilisateur fournit un document, un texte, un email reçu, ou un CRM export :
+    // 1) save user msg
+    await supabase.from("messages").insert([{ conversation_id: convId, role: "user", content: text }]);
 
-Résumer ce que vous avez compris en 3 à 6 puces
+    // rename conv after first user message
+    await maybeRenameConversation(convId, text);
 
-Puis proposer l’action suivante
+    // 2) refresh msgs
+    const { data: msgs1 } = await supabase
+      .from("messages")
+      .select("id,conversation_id,role,content,created_at")
+      .eq("conversation_id", convId)
+      .order("created_at", { ascending: true });
 
-Si vous n’avez pas le contenu (lien non accessible, fichier manquant) :
+    setMessages(msgs1 || []);
 
-Dites-le clairement
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error("Non authentifié.");
 
-Posez UNE question pour qu’on vous renvoie le bon élément
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ message: text, agentSlug }),
+      });
 
-RÈGLES STRICTES (ANTI-HALLUCINATION)
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
 
-Ne jamais inventer de faits (prix, conditions, infos client).
-Si une donnée manque, le dire.
-Toujours demander une seule info manquante à la fin (QUESTION).
+      const reply = (data.reply || data.answer || data.content || "").toString().trim() || "Réponse vide.";
 
-CONFIDENTIALITÉ
+      // 3) save assistant msg
+      await supabase.from("messages").insert([{ conversation_id: convId, role: "assistant", content: reply }]);
 
-Si le message contient des données personnelles (nom, email, téléphone), recommander de limiter au nécessaire et de ne pas partager inutilement.
+      const { data: msgs2 } = await supabase
+        .from("messages")
+        .select("id,conversation_id,role,content,created_at")
+        .eq("conversation_id", convId)
+        .order("created_at", { ascending: true });
+
+      setMessages(msgs2 || []);
+    } catch (e) {
+      await supabase.from("messages").insert([
+        { conversation_id: convId, role: "assistant", content: `Erreur: ${String(e?.message || e)}` },
+      ]);
+
+      const { data: msgs2 } = await supabase
+        .from("messages")
+        .select("id,conversation_id,role,content,created_at")
+        .eq("conversation_id", convId)
+        .order("created_at", { ascending: true });
+
+      setMessages(msgs2 || []);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <main style={styles.page}>
+      {/* HEADER */}
+      <div style={styles.header}>
+        <div style={styles.headerLeft}>
+          <button style={styles.headerBtn} onClick={goBack}>
+            ← Retour
+          </button>
+
+          <div style={styles.agentBlock}>
+            <div style={styles.agentAvatarWrap}>
+              {agentAvatar ? (
+                <img src={agentAvatar} alt={agentName} style={styles.agentAvatar} />
+              ) : (
+                <div style={styles.agentAvatarFallback} />
+              )}
+            </div>
+            <div style={{ lineHeight: 1.1 }}>
+              <div style={styles.agentName}>{agentName || "Agent"}</div>
+              <div style={styles.agentRole}>{agentRole || "Assistant"}</div>
+            </div>
+          </div>
+        </div>
+
+        <div style={styles.headerCenter}>
+          <img
+            src="/images/logolong.png"
+            alt="Evidenc'IA"
+            style={styles.logo}
+            onError={(e) => {
+              e.currentTarget.style.display = "none";
+            }}
+          />
+        </div>
+
+        <div style={styles.headerRight}>
+          <div style={styles.emailPill}>{sessionEmail || ""}</div>
+
+          {isAdmin && (
+            <button style={styles.headerBtn} onClick={openAdmin}>
+              Console administrateur
+            </button>
+          )}
+
+          <button style={styles.headerBtnDanger} onClick={logout}>
+            Déconnexion
+          </button>
+
+          {isMobile && (
+            <button style={styles.headerBtn} onClick={() => setDrawerOpen((v) => !v)}>
+              Historique
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* LAYOUT */}
+      <div style={styles.layout}>
+        {/* SIDEBAR desktop */}
+        {!isMobile && (
+          <aside style={styles.sidebar}>
+            <div style={styles.sidebarHead}>
+              <div style={styles.sidebarTitle}>Historique</div>
+              <button style={styles.newBtn} onClick={() => newConversation("Nouvelle conversation")}>
+                + Nouvelle
+              </button>
+            </div>
+
+            <div style={styles.sidebarList}>
+              {conversations.map((c) => {
+                const active = c.id === selectedConvId;
+                return (
+                  <button
+                    key={c.id}
+                    style={{ ...styles.convItem, ...(active ? styles.convItemActive : {}) }}
+                    onClick={() => selectConversation(c.id)}
+                    title={c.title || "Conversation"}
+                  >
+                    {c.title || "Conversation"}
+                  </button>
+                );
+              })}
+              {conversations.length === 0 && <div style={styles.muted}>Aucune conversation.</div>}
+            </div>
+          </aside>
+        )}
+
+        {/* Drawer mobile */}
+        {isMobile && drawerOpen && (
+          <div style={styles.drawerOverlay} onClick={() => setDrawerOpen(false)}>
+            <div style={styles.drawer} onClick={(e) => e.stopPropagation()}>
+              <div style={styles.sidebarHead}>
+                <div style={styles.sidebarTitle}>Historique</div>
+                <button style={styles.newBtn} onClick={() => newConversation("Nouvelle conversation")}>
+                  + Nouvelle
+                </button>
+              </div>
+              <div style={styles.sidebarList}>
+                {conversations.map((c) => {
+                  const active = c.id === selectedConvId;
+                  return (
+                    <button
+                      key={c.id}
+                      style={{ ...styles.convItem, ...(active ? styles.convItemActive : {}) }}
+                      onClick={() => selectConversation(c.id)}
+                    >
+                      {c.title || "Conversation"}
+                    </button>
+                  );
+                })}
+                {conversations.length === 0 && <div style={styles.muted}>Aucune conversation.</div>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* CHAT */}
+        <section style={styles.chat}>
+          <div style={styles.chatInner}>
+            {loading ? (
+              <div style={styles.muted}>Chargement…</div>
+            ) : (
+              <>
+                <div style={styles.msgList}>
+                  {messages.map((m) => {
+                    const isUser = m.role === "user";
+                    return (
+                      <div key={m.id} style={{ ...styles.msgRow, justifyContent: isUser ? "flex-end" : "flex-start" }}>
+                        <div style={{ ...styles.bubble, ...(isUser ? styles.bubbleUser : styles.bubbleAssistant) }}>
+                          <div style={styles.bubbleText}>{m.content}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div ref={endRef} />
+                </div>
+
+                <div style={styles.composer}>
+                  <textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="Écrire…"
+                    style={styles.input}
+                    rows={isMobile ? 2 : 3}
+                    onKeyDown={(e) => {
+                      // Enter envoie, Shift+Enter nouvelle ligne
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        if (!sending) sendMessage();
+                      }
+                    }}
+                  />
+
+                  {/* Micro à droite, juste avant Envoyer */}
+                  <button
+                    style={{ ...styles.micBtn, ...(listening ? styles.micBtnOn : {}) }}
+                    onClick={toggleMic}
+                    disabled={!micAvailable}
+                    title={micAvailable ? (listening ? "Arrêter la dictée" : "Dicter") : "Micro non disponible"}
+                  >
+                    {/* Icône micro simple (SVG) */}
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path
+                        d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M19 11a7 7 0 0 1-14 0"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M12 18v3"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M8 21h8"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+
+                  <button style={styles.sendBtn} onClick={sendMessage} disabled={sending}>
+                    {sending ? "…" : "Envoyer"}
+                  </button>
+                </div>
+
+                {!!selectedConversation && (
+                  <div style={styles.tinyNote}>
+                    Conversation:{" "}
+                    <span style={{ fontFamily: "monospace" }}>{selectedConversation.id.slice(0, 8)}…</span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+const styles = {
+  page: {
+    minHeight: "100vh",
+    background: "linear-gradient(135deg,#05060a,#0a0d16)",
+    color: "rgba(238,242,255,.92)",
+    fontFamily: '"Segoe UI", Arial, sans-serif',
+    overflow: "hidden",
+  },
+
+  header: {
+    display: "flex",
+    gap: 12,
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "12px 12px 0",
+    flexWrap: "wrap",
+  },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 280 },
+  headerCenter: { display: "flex", alignItems: "center", justifyContent: "center", flex: 1, minWidth: 140 },
+  headerRight: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    justifyContent: "flex-end",
+    minWidth: 280,
+    flexWrap: "wrap",
+  },
+
+  headerBtn: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.25)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  headerBtnDanger: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  emailPill: {
+    padding: "8px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.06)",
+    fontWeight: 800,
+    fontSize: 12,
+    opacity: 0.9,
+    maxWidth: 240,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+
+  logo: { height: 28, width: "auto", opacity: 0.95, display: "block" },
+
+  agentBlock: { display: "flex", alignItems: "center", gap: 10 },
+  agentAvatarWrap: { width: 44, height: 44, borderRadius: 999, overflow: "hidden", border: "1px solid rgba(255,255,255,.12)" },
+  agentAvatar: { width: "100%", height: "100%", objectFit: "cover", objectPosition: "center 15%" },
+  agentAvatarFallback: { width: "100%", height: "100%", background: "rgba(255,255,255,.06)" },
+  agentName: { fontWeight: 900, fontSize: 16 },
+  agentRole: { fontWeight: 800, opacity: 0.75, fontSize: 12 },
+
+  layout: {
+    display: "grid",
+    gridTemplateColumns: "360px 1fr",
+    gap: 14,
+    padding: 12,
+    height: "calc(100vh - 64px)",
+  },
+
+  sidebar: {
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: 16,
+    background: "rgba(0,0,0,.35)",
+    backdropFilter: "blur(10px)",
+    boxShadow: "0 18px 45px rgba(0,0,0,.55)",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+  },
+  sidebarHead: {
+    padding: 12,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    borderBottom: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.12)",
+  },
+  sidebarTitle: { fontWeight: 900 },
+  newBtn: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  sidebarList: { padding: 12, display: "grid", gap: 10, overflow: "auto" },
+
+  convItem: {
+    textAlign: "left",
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(255,255,255,.03)",
+    color: "rgba(238,242,255,.92)",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  convItemActive: { borderColor: "rgba(255,140,40,.35)", background: "rgba(255,140,40,.10)" },
+
+  chat: {
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: 16,
+    background: "rgba(0,0,0,.35)",
+    backdropFilter: "blur(10px)",
+    boxShadow: "0 18px 45px rgba(0,0,0,.55)",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+  },
+  chatInner: { display: "flex", flexDirection: "column", height: "100%" },
+  msgList: { padding: 12, overflow: "auto", flex: 1 },
+
+  msgRow: { display: "flex", marginBottom: 10 },
+  bubble: {
+    maxWidth: "min(820px, 92%)",
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.12)",
+    padding: 12,
+    boxShadow: "0 10px 24px rgba(0,0,0,.35)",
+  },
+  bubbleUser: { background: "rgba(255,255,255,.08)" },
+  bubbleAssistant: { background: "rgba(0,0,0,.20)" },
+  bubbleText: {
+    whiteSpace: "pre-wrap",
+    lineHeight: 1.35,
+    fontWeight: 650,
+    fontSize: 14,
+  },
+
+  composer: {
+    display: "flex",
+    gap: 10,
+    padding: 12,
+    borderTop: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.12)",
+    alignItems: "flex-end",
+  },
+  input: {
+    flex: 1,
+    resize: "none",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.92)",
+    padding: 12,
+    outline: "none",
+    fontWeight: 800,
+    lineHeight: 1.3,
+  },
+
+  micBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.20)",
+    color: "rgba(238,242,255,.92)",
+    fontWeight: 900,
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  micBtnOn: {
+    border: "1px solid rgba(255,140,40,.55)",
+    background: "rgba(255,140,40,.12)",
+  },
+
+  // Bouton orange comme avant
+  sendBtn: {
+    borderRadius: 14,
+    padding: "12px 14px",
+    border: "1px solid rgba(255,140,40,.50)",
+    background: "rgba(255,140,40,.18)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    minWidth: 110,
+  },
+
+  tinyNote: { padding: "0 12px 10px", opacity: 0.7, fontWeight: 800, fontSize: 12 },
+  muted: { opacity: 0.75, fontWeight: 800 },
+
+  drawerOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,.65)",
+    zIndex: 9999,
+    display: "flex",
+  },
+  drawer: {
+    width: "min(420px, 86vw)",
+    height: "100%",
+    background: "rgba(0,0,0,.85)",
+    borderRight: "1px solid rgba(255,255,255,.12)",
+    padding: 12,
+    display: "flex",
+    flexDirection: "column",
+  },
+};
