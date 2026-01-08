@@ -4,8 +4,6 @@ import { supabase } from "../lib/supabaseClient";
 
 export default function ChatPage() {
   const [sessionEmail, setSessionEmail] = useState("");
-  const [isAdmin, setIsAdmin] = useState(false);
-
   const [agentSlug, setAgentSlug] = useState("");
   const [agentName, setAgentName] = useState("");
   const [agentRole, setAgentRole] = useState("");
@@ -24,6 +22,11 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const endRef = useRef(null);
 
+  // --- Micro / dictée ---
+  const recognitionRef = useRef(null);
+  const [micSupported, setMicSupported] = useState(false);
+  const [listening, setListening] = useState(false);
+
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
     return data?.session?.access_token || "";
@@ -38,14 +41,6 @@ export default function ChatPage() {
     window.location.href = "/agents";
   }
 
-  function openAdmin() {
-    if (!isAdmin) {
-      alert("Accès interdit (admin requis).");
-      return;
-    }
-    window.location.href = "/admin";
-  }
-
   // Responsive
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 980px)");
@@ -55,35 +50,92 @@ export default function ChatPage() {
     return () => mql.removeEventListener?.("change", apply);
   }, []);
 
-  // Boot
+  // Init dictée (Web Speech API)
+  useEffect(() => {
+    const SR =
+      typeof window !== "undefined"
+        ? window.SpeechRecognition || window.webkitSpeechRecognition
+        : null;
+
+    if (!SR) {
+      setMicSupported(false);
+      return;
+    }
+
+    setMicSupported(true);
+    const rec = new SR();
+    rec.lang = "fr-FR";
+    rec.continuous = false; // évite les répétitions / doublons
+    rec.interimResults = false; // évite "bonjour bonjour..." en incrémental
+    rec.maxAlternatives = 1;
+
+    rec.onstart = () => setListening(true);
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
+
+    rec.onresult = (event) => {
+      try {
+        const transcript = (event?.results?.[0]?.[0]?.transcript || "").trim();
+        if (!transcript) return;
+
+        // Ajoute proprement au champ de saisie
+        setInput((prev) => {
+          const p = (prev || "").trim();
+          return p ? `${p} ${transcript}` : transcript;
+        });
+      } catch {
+        // no-op
+      }
+    };
+
+    recognitionRef.current = rec;
+
+    return () => {
+      try {
+        rec.onresult = null;
+        rec.onstart = null;
+        rec.onend = null;
+        rec.onerror = null;
+        rec.stop?.();
+      } catch {
+        // no-op
+      }
+      recognitionRef.current = null;
+    };
+  }, []);
+
+  function toggleMic() {
+    if (!micSupported || !recognitionRef.current) {
+      alert("Micro non supporté sur ce navigateur.");
+      return;
+    }
+    try {
+      if (listening) recognitionRef.current.stop();
+      else recognitionRef.current.start();
+    } catch {
+      // Sur certains navigateurs, start() peut throw si appelé trop vite
+    }
+  }
+
+  // Boot: session + agent + conversations/messages
   useEffect(() => {
     (async () => {
       setLoading(true);
 
       const { data: sess } = await supabase.auth.getSession();
-      const user = sess?.session?.user || null;
-
-      const email = user?.email || "";
+      const email = sess?.session?.user?.email || "";
       setSessionEmail(email);
 
-      // Déterminer si admin (profiles.role)
-      if (user?.id) {
-        const { data: prof } = await supabase
-          .from("profiles")
-          .select("role")
-          .eq("user_id", user.id)
-          .maybeSingle();
+      // agent depuis querystring ?agent=emma sinon localStorage
+      const params = new URLSearchParams(window.location.search);
+      const qsAgent = (params.get("agent") || "").trim().toLowerCase();
+      const stored = (window.localStorage.getItem("selected_agent_slug") || "").trim().toLowerCase();
 
-        setIsAdmin(!!prof && prof.role === "admin");
-      } else {
-        setIsAdmin(false);
-      }
-
-      // Agent choisi
-      const stored = window.localStorage.getItem("selected_agent_slug") || "";
-      const slug = (stored || "emma").trim().toLowerCase();
+      const slug = (qsAgent || stored || "emma").trim().toLowerCase();
+      window.localStorage.setItem("selected_agent_slug", slug);
       setAgentSlug(slug);
 
+      // Charger infos agent
       const { data: agent } = await supabase
         .from("agents")
         .select("slug,name,description,avatar_url")
@@ -94,6 +146,7 @@ export default function ChatPage() {
       setAgentRole(agent?.description || "");
       setAgentAvatar(agent?.avatar_url || "");
 
+      // Charger conversations
       const { data: convs } = await supabase
         .from("conversations")
         .select("id,user_id,created_at,agent_slug,title,archived")
@@ -106,6 +159,7 @@ export default function ChatPage() {
       const firstId = list?.[0]?.id || "";
       setSelectedConvId(firstId);
 
+      // Charger messages
       if (firstId) {
         const { data: msgs } = await supabase
           .from("messages")
@@ -122,7 +176,7 @@ export default function ChatPage() {
     })();
   }, []);
 
-  // Scroll to bottom
+  // Scroll to bottom on messages change
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
@@ -144,45 +198,100 @@ export default function ChatPage() {
     setMessages(msgs || []);
   }
 
-  async function newConversation() {
+  async function newConversationInternal(title = "Nouvelle conversation") {
     const { data: sess } = await supabase.auth.getSession();
     const userId = sess?.session?.user?.id;
-    if (!userId) return alert("Non authentifié.");
+    if (!userId) throw new Error("Non authentifié.");
 
     const { data: conv, error } = await supabase
       .from("conversations")
-      .insert([{ user_id: userId, agent_slug: agentSlug, title: "Nouvelle conversation", archived: false }])
+      .insert([{ user_id: userId, agent_slug: agentSlug, title, archived: false }])
       .select("id,user_id,created_at,agent_slug,title,archived")
       .maybeSingle();
 
-    if (error) return alert(error.message);
+    if (error) throw new Error(error.message);
+    return conv;
+  }
 
-    const next = [conv, ...conversations];
-    setConversations(next);
+  async function newConversation() {
+    try {
+      const conv = await newConversationInternal("Nouvelle conversation");
+      const next = [conv, ...conversations];
+      setConversations(next);
+      setSelectedConvId(conv.id);
+      setMessages([]);
+      setDrawerOpen(false);
+    } catch (e) {
+      alert(String(e?.message || e));
+    }
+  }
+
+  function buildAutoTitleFromFirstMessage(text) {
+    const t = (text || "").trim().replace(/\s+/g, " ");
+    if (!t) return "Conversation";
+    const words = t.split(" ").slice(0, 7).join(" ");
+    return words.length < t.length ? `${words}…` : words;
+  }
+
+  async function ensureConversationSelected(forFirstMessageText) {
+    if (selectedConvId) return selectedConvId;
+
+    // Aucune conversation: on en crée une automatiquement
+    const autoTitle = buildAutoTitleFromFirstMessage(forFirstMessageText);
+    const conv = await newConversationInternal(autoTitle);
+    setConversations((prev) => [conv, ...prev]);
     setSelectedConvId(conv.id);
     setMessages([]);
     setDrawerOpen(false);
+    return conv.id;
+  }
+
+  async function maybeUpdateConversationTitleIfDefault(convId, firstUserText) {
+    const conv = conversations.find((c) => c.id === convId) || null;
+    const currentTitle = (conv?.title || "").trim();
+
+    // Si déjà nommé autre chose, on ne touche pas
+    if (currentTitle && currentTitle !== "Nouvelle conversation") return;
+
+    const newTitle = buildAutoTitleFromFirstMessage(firstUserText);
+
+    // Update DB
+    await supabase.from("conversations").update({ title: newTitle }).eq("id", convId);
+
+    // Update state
+    setConversations((prev) =>
+      prev.map((c) => (c.id === convId ? { ...c, title: newTitle } : c))
+    );
   }
 
   async function sendMessage() {
     const text = (input || "").trim();
     if (!text) return;
-    if (!selectedConvId) return alert("Aucune conversation sélectionnée.");
 
     setSending(true);
     setInput("");
 
-    await supabase.from("messages").insert([{ conversation_id: selectedConvId, role: "user", content: text }]);
-
-    const { data: msgs1 } = await supabase
-      .from("messages")
-      .select("id,conversation_id,role,content,created_at")
-      .eq("conversation_id", selectedConvId)
-      .order("created_at", { ascending: true });
-
-    setMessages(msgs1 || []);
-
     try {
+      const convId = await ensureConversationSelected(text);
+
+      // 1) Sauvegarde message user
+      await supabase.from("messages").insert([{ conversation_id: convId, role: "user", content: text }]);
+
+      // 1b) Auto-titre si première interaction / titre par défaut
+      if ((messages || []).length === 0) {
+        await maybeUpdateConversationTitleIfDefault(convId, text);
+      }
+
+      // 2) Refresh messages
+      const { data: msgs1 } = await supabase
+        .from("messages")
+        .select("id,conversation_id,role,content,created_at")
+        .eq("conversation_id", convId)
+        .order("created_at", { ascending: true });
+
+      setMessages(msgs1 || []);
+
+      // 3) Appel agent
       const token = await getAccessToken();
       if (!token) throw new Error("Non authentifié.");
 
@@ -195,27 +304,32 @@ export default function ChatPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
 
-      const reply = (data.reply || data.answer || data.content || "").toString();
+      const reply = (data.reply || data.answer || data.content || "").toString().trim();
 
-      await supabase.from("messages").insert([{ conversation_id: selectedConvId, role: "assistant", content: reply }]);
+      // 4) Sauvegarde message assistant
+      await supabase.from("messages").insert([{ conversation_id: convId, role: "assistant", content: reply || "Réponse vide." }]);
 
       const { data: msgs2 } = await supabase
         .from("messages")
         .select("id,conversation_id,role,content,created_at")
-        .eq("conversation_id", selectedConvId)
+        .eq("conversation_id", convId)
         .order("created_at", { ascending: true });
 
       setMessages(msgs2 || []);
     } catch (e) {
-      await supabase.from("messages").insert([
-        { conversation_id: selectedConvId, role: "assistant", content: `Erreur: ${String(e?.message || e)}` },
-      ]);
-      const { data: msgs2 } = await supabase
-        .from("messages")
-        .select("id,conversation_id,role,content,created_at")
-        .eq("conversation_id", selectedConvId)
-        .order("created_at", { ascending: true });
-      setMessages(msgs2 || []);
+      const msg = `Erreur: ${String(e?.message || e)}`;
+      const convId = selectedConvId || null;
+      if (convId) {
+        await supabase.from("messages").insert([{ conversation_id: convId, role: "assistant", content: msg }]);
+        const { data: msgs2 } = await supabase
+          .from("messages")
+          .select("id,conversation_id,role,content,created_at")
+          .eq("conversation_id", convId)
+          .order("created_at", { ascending: true });
+        setMessages(msgs2 || []);
+      } else {
+        alert(msg);
+      }
     } finally {
       setSending(false);
     }
@@ -223,6 +337,7 @@ export default function ChatPage() {
 
   return (
     <main style={styles.page}>
+      {/* HEADER */}
       <div style={styles.header}>
         <div style={styles.headerLeft}>
           <button style={styles.headerBtn} onClick={goBack}>
@@ -258,12 +373,6 @@ export default function ChatPage() {
         <div style={styles.headerRight}>
           <div style={styles.emailPill}>{sessionEmail || ""}</div>
 
-          {isAdmin && (
-            <button style={styles.headerBtn} onClick={openAdmin}>
-              Console administrateur
-            </button>
-          )}
-
           <button style={styles.headerBtnDanger} onClick={logout}>
             Déconnexion
           </button>
@@ -276,7 +385,9 @@ export default function ChatPage() {
         </div>
       </div>
 
+      {/* LAYOUT */}
       <div style={styles.layout}>
+        {/* SIDEBAR desktop */}
         {!isMobile && (
           <aside style={styles.sidebar}>
             <div style={styles.sidebarHead}>
@@ -305,6 +416,7 @@ export default function ChatPage() {
           </aside>
         )}
 
+        {/* Drawer mobile */}
         {isMobile && drawerOpen && (
           <div style={styles.drawerOverlay} onClick={() => setDrawerOpen(false)}>
             <div style={styles.drawer} onClick={(e) => e.stopPropagation()}>
@@ -333,6 +445,7 @@ export default function ChatPage() {
           </div>
         )}
 
+        {/* CHAT */}
         <section style={styles.chat}>
           <div style={styles.chatInner}>
             {loading ? (
@@ -360,7 +473,30 @@ export default function ChatPage() {
                     placeholder="Écrire…"
                     style={styles.input}
                     rows={isMobile ? 2 : 3}
+                    onKeyDown={(e) => {
+                      // Entrée => envoyer | Shift+Entrée => nouvelle ligne
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        if (!sending) sendMessage();
+                      }
+                    }}
                   />
+
+                  {/* Micro à droite, juste avant Envoyer */}
+                  <button
+                    type="button"
+                    onClick={toggleMic}
+                    title={micSupported ? (listening ? "Arrêter la dictée" : "Dicter (micro)") : "Micro non supporté"}
+                    style={{
+                      ...styles.micBtn,
+                      ...(listening ? styles.micBtnActive : {}),
+                      ...(micSupported ? {} : styles.micBtnDisabled),
+                    }}
+                    disabled={!micSupported}
+                  >
+                    <MicIcon />
+                  </button>
+
                   <button style={styles.sendBtn} onClick={sendMessage} disabled={sending}>
                     {sending ? "…" : "Envoyer"}
                   </button>
@@ -377,6 +513,17 @@ export default function ChatPage() {
         </section>
       </div>
     </main>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        fill="currentColor"
+        d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a1 1 0 1 1 2 0a7 7 0 0 1-6 6.92V20h2a1 1 0 1 1 0 2H9a1 1 0 1 1 0-2h2v-2.08A7 7 0 0 1 5 11a1 1 0 1 1 2 0a5 5 0 0 0 10 0z"
+      />
+    </svg>
   );
 }
 
@@ -399,14 +546,7 @@ const styles = {
   },
   headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 280 },
   headerCenter: { display: "flex", alignItems: "center", justifyContent: "center", flex: 1, minWidth: 140 },
-  headerRight: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    justifyContent: "flex-end",
-    minWidth: 280,
-    flexWrap: "wrap",
-  },
+  headerRight: { display: "flex", alignItems: "center", gap: 10, justifyContent: "flex-end", minWidth: 280, flexWrap: "wrap" },
 
   headerBtn: {
     borderRadius: 999,
@@ -552,15 +692,41 @@ const styles = {
     fontWeight: 800,
     lineHeight: 1.3,
   },
+
+  // Micro (juste avant Envoyer)
+  micBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.92)",
+    fontWeight: 900,
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flex: "0 0 auto",
+  },
+  micBtnActive: {
+    borderColor: "rgba(255,80,80,.45)",
+    background: "rgba(255,80,80,.12)",
+  },
+  micBtnDisabled: {
+    opacity: 0.5,
+    cursor: "not-allowed",
+  },
+
+  // Envoyer orange
   sendBtn: {
     borderRadius: 14,
     padding: "12px 14px",
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(255,255,255,.10)",
+    border: "1px solid rgba(255,140,40,.45)",
+    background: "rgba(255,140,40,.18)",
     color: "#fff",
     fontWeight: 900,
     cursor: "pointer",
-    minWidth: 96,
+    minWidth: 104,
   },
 
   tinyNote: { padding: "0 12px 10px", opacity: 0.7, fontWeight: 800, fontSize: 12 },
