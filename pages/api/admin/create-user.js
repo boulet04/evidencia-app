@@ -1,4 +1,4 @@
-// pages/api/admin/create-user.js
+// pages/api/admin/create-user.js test
 import { createClient } from "@supabase/supabase-js";
 import { sendEmail } from "../../../lib/sendEmail";
 
