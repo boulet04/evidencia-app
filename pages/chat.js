@@ -25,10 +25,12 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const endRef = useRef(null);
 
-  // Micro (Web Speech API)
+  // Micro (Web Speech API) — FIX: ne pas empiler les interim results
   const [micAvailable, setMicAvailable] = useState(false);
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef(null);
+  const dictationBaseRef = useRef(""); // texte déjà présent avant dictée
+  const dictationFinalRef = useRef(""); // accumulateur uniquement des résultats finals
 
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
@@ -57,56 +59,88 @@ export default function ChatPage() {
     return () => mql.removeEventListener?.("change", apply);
   }, []);
 
-  // Setup micro
+  // Détecter disponibilité micro (sans instancier en boucle)
   useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    setMicAvailable(!!SR);
+  }, []);
+
+  function stopMic() {
+    try {
+      if (recognitionRef.current) {
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.stop();
+      }
+    } catch {
+      // ignore
+    } finally {
+      recognitionRef.current = null;
+      setListening(false);
+    }
+  }
+
+  function startMic() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       setMicAvailable(false);
+      alert("Micro non disponible sur ce navigateur.");
       return;
     }
-    setMicAvailable(true);
+
+    // Sécurité anti-doublons
+    if (recognitionRef.current) stopMic();
+
+    // Base = ce qui est déjà tapé au moment où on lance la dictée
+    dictationBaseRef.current = (input || "").trim();
+    dictationFinalRef.current = "";
 
     const rec = new SR();
+    recognitionRef.current = rec;
+
     rec.lang = "fr-FR";
-    rec.interimResults = true;
+    rec.interimResults = true; // ok, mais on remplace au lieu d'empiler
     rec.continuous = false;
 
-    rec.onresult = (e) => {
-      let finalText = "";
-      let interimText = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const transcript = e.results[i][0]?.transcript || "";
-        if (e.results[i].isFinal) finalText += transcript;
-        else interimText += transcript;
+    rec.onresult = (event) => {
+      let interim = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const res = event.results[i];
+        const txt = res?.[0]?.transcript || "";
+        if (res.isFinal) dictationFinalRef.current += txt;
+        else interim += txt;
       }
-      setInput((prev) => {
-        const base = prev || "";
-        const add = (finalText || interimText || "").trim();
-        if (!add) return base;
-        return base ? `${base} ${add}` : add;
-      });
+
+      const base = dictationBaseRef.current;
+      const spoken = (dictationFinalRef.current + interim).trim();
+
+      // IMPORTANT: on RECONSTRUIT la valeur entière, on n'ajoute pas à prev
+      const next = base ? (spoken ? `${base} ${spoken}` : base) : spoken;
+      setInput(next.trim());
     };
 
-    rec.onend = () => setListening(false);
-    rec.onerror = () => setListening(false);
+    rec.onerror = () => {
+      stopMic();
+    };
 
-    recognitionRef.current = rec;
-  }, []);
+    rec.onend = () => {
+      // Fin normale (silence / stop)
+      stopMic();
+    };
+
+    try {
+      setListening(true);
+      rec.start();
+    } catch {
+      stopMic();
+    }
+  }
 
   function toggleMic() {
-    const rec = recognitionRef.current;
-    if (!rec) return alert("Micro non disponible sur ce navigateur.");
-    try {
-      if (listening) {
-        rec.stop();
-        setListening(false);
-      } else {
-        setListening(true);
-        rec.start();
-      }
-    } catch {
-      setListening(false);
-    }
+    if (listening) stopMic();
+    else startMic();
   }
 
   // Boot
@@ -151,7 +185,7 @@ export default function ChatPage() {
       setAgentRole(agent?.description || "");
       setAgentAvatar(agent?.avatar_url || "");
 
-      // Conversations: IMPORTANT => filtrer par user_id + agent_slug
+      // Conversations: filtrer par user_id + agent_slug
       let list = [];
       if (userId) {
         const { data: convs, error } = await supabase
@@ -247,7 +281,6 @@ export default function ChatPage() {
   }
 
   async function maybeRenameConversation(convId, firstUserText) {
-    // Renomme seulement si "Nouvelle conversation" ou vide
     const conv = conversations.find((c) => c.id === convId);
     const current = (conv?.title || "").trim().toLowerCase();
     if (current && current !== "nouvelle conversation") return;
@@ -256,9 +289,7 @@ export default function ChatPage() {
 
     await supabase.from("conversations").update({ title }).eq("id", convId);
 
-    setConversations((prev) =>
-      prev.map((c) => (c.id === convId ? { ...c, title } : c))
-    );
+    setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, title } : c)));
   }
 
   async function sendMessage() {
@@ -489,14 +520,12 @@ export default function ChatPage() {
                     }}
                   />
 
-                  {/* Micro à droite, juste avant Envoyer */}
                   <button
                     style={{ ...styles.micBtn, ...(listening ? styles.micBtnOn : {}) }}
                     onClick={toggleMic}
                     disabled={!micAvailable}
                     title={micAvailable ? (listening ? "Arrêter la dictée" : "Dicter") : "Micro non disponible"}
                   >
-                    {/* Icône micro simple (SVG) */}
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                       <path
                         d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z"
@@ -740,7 +769,6 @@ const styles = {
     background: "rgba(255,140,40,.12)",
   },
 
-  // Bouton orange comme avant
   sendBtn: {
     borderRadius: 14,
     padding: "12px 14px",
