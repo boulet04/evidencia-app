@@ -1,6 +1,16 @@
 // pages/api/admin/toggle-user-agent.js
 import { createClient } from "@supabase/supabase-js";
 
+function getSupabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url) throw new Error("NEXT_PUBLIC_SUPABASE_URL manquant.");
+  if (!serviceKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY manquant.");
+
+  return createClient(url, serviceKey, { auth: { persistSession: false } });
+}
+
 function setCors(res) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -19,60 +29,43 @@ function safeStr(v) {
 }
 
 function isUuid(v) {
-  const s = safeStr(v);
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(safeStr(v));
 }
 
-function getSupabaseAdmin() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url) throw new Error("NEXT_PUBLIC_SUPABASE_URL manquant.");
-  if (!serviceKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY manquant.");
-
-  return createClient(url, serviceKey, { auth: { persistSession: false } });
-}
-
-async function requireAdmin({ supabaseAdmin, token }) {
-  const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-  if (userErr || !userData?.user?.id) {
-    return { ok: false, status: 401, error: "Session invalide. Reconnectez-vous." };
-  }
-
-  const adminId = userData.user.id;
-
-  const { data: profile, error: profErr } = await supabaseAdmin
-    .from("profiles")
-    .select("role")
-    .eq("user_id", adminId)
-    .maybeSingle();
-
-  if (profErr) {
-    return { ok: false, status: 500, error: profErr.message || "Erreur profiles." };
-  }
-
-  // Règle demandée: admin via profiles.role === 'admin' (pas via is_admin)
-  if (!profile || profile.role !== "admin") {
-    return { ok: false, status: 403, error: "Accès interdit (admin requis)." };
-  }
-
-  return { ok: true, adminId };
+function isDuplicateError(error) {
+  const msg = String(error?.message || "").toLowerCase();
+  const code = String(error?.code || "").toLowerCase();
+  return code === "23505" || msg.includes("duplicate") || msg.includes("unique constraint");
 }
 
 export default async function handler(req, res) {
-  try {
-    setCors(res);
+  setCors(res);
 
-    if (req.method === "OPTIONS") return res.status(200).end();
-    if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
+
+  try {
+    const supabaseAdmin = getSupabaseAdmin();
 
     const token = getBearerToken(req);
     if (!token) return res.status(401).json({ error: "Token manquant." });
 
-    const supabaseAdmin = getSupabaseAdmin();
+    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
+    if (userErr || !userData?.user) return res.status(401).json({ error: "Session invalide." });
 
-    const adminCheck = await requireAdmin({ supabaseAdmin, token });
-    if (!adminCheck.ok) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const adminId = userData.user.id;
+
+    // Admin check: profiles.role === 'admin'
+    const { data: profile, error: profErr } = await supabaseAdmin
+      .from("profiles")
+      .select("role")
+      .eq("user_id", adminId)
+      .maybeSingle();
+
+    if (profErr) return res.status(500).json({ error: profErr.message });
+    if (!profile || profile.role !== "admin") {
+      return res.status(403).json({ error: "Accès interdit (admin requis)." });
+    }
 
     const { userId, agentId, assign } = req.body || {};
     const uid = safeStr(userId);
@@ -82,5 +75,27 @@ export default async function handler(req, res) {
     if (!uid) return res.status(400).json({ error: "userId manquant." });
     if (!aid) return res.status(400).json({ error: "agentId manquant." });
 
-    // Validation simple pour éviter des insert foireux / injections de string
-    if (!isUuid(uid)) return res
+    // Validation UUID (évite inserts foireux)
+    if (!isUuid(uid)) return res.status(400).json({ error: "userId invalide (UUID attendu)." });
+    if (!isUuid(aid)) return res.status(400).json({ error: "agentId invalide (UUID attendu)." });
+
+    if (doAssign) {
+      const { error } = await supabaseAdmin.from("user_agents").insert([{ user_id: uid, agent_id: aid }]);
+
+      // Si déjà existant, on considère OK
+      if (error && !isDuplicateError(error)) {
+        return res.status(500).json({ error: error.message || "Erreur insert user_agents." });
+      }
+
+      return res.status(200).json({ ok: true, assigned: true });
+    }
+
+    // Unassign
+    const { error } = await supabaseAdmin.from("user_agents").delete().eq("user_id", uid).eq("agent_id", aid);
+    if (error) return res.status(500).json({ error: error.message || "Erreur delete user_agents." });
+
+    return res.status(200).json({ ok: true, assigned: false });
+  } catch (e) {
+    return res.status(500).json({ error: safeStr(e?.message) || "Erreur interne." });
+  }
+}
