@@ -28,8 +28,8 @@ export default function Admin() {
   const [urlToAdd, setUrlToAdd] = useState("");
   const [uploading, setUploading] = useState(false);
 
-  // Integrations UI (Make / n8n / Railway / custom)
-  const [integrations, setIntegrations] = useState([]); // [{provider, name, url}]
+  // integrations UI (NEW)
+  const [integrations, setIntegrations] = useState([]); // [{ provider:'make'|'n8n'|'railway'|'mcp', name, url }]
   const [integrationProvider, setIntegrationProvider] = useState("make");
   const [integrationName, setIntegrationName] = useState("");
   const [integrationUrl, setIntegrationUrl] = useState("");
@@ -84,7 +84,7 @@ export default function Admin() {
     setUserAgents(uaRes.data || []);
     setAgentConfigs(cfgRes.data || []);
 
-    // sélection par défaut
+    // sélection par défaut uniquement si rien n'est sélectionné
     const firstClient = (cRes.data || [])[0]?.id || "";
     if (!selectedClientId && firstClient) setSelectedClientId(firstClient);
 
@@ -132,7 +132,7 @@ export default function Admin() {
     if (selectedUserId && card?.users?.some((u) => u.user_id === selectedUserId)) return;
     setSelectedUserId(firstUser);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedClientId, clientCards]);
+  }, [selectedClientId, clientCards.length]);
 
   function isAssigned(agentId) {
     if (!selectedUserId) return false;
@@ -165,20 +165,20 @@ export default function Admin() {
     const cfg = getConfig(agent.id);
     const ctx = cfg?.context || {};
     const src = Array.isArray(ctx?.sources) ? ctx.sources : [];
-    const integ = Array.isArray(ctx?.integrations) ? ctx.integrations : [];
+    const ints = Array.isArray(ctx?.integrations) ? ctx.integrations : [];
 
     setModalAgent(agent);
     setModalSystemPrompt(cfg?.system_prompt || "");
 
     setSources(src);
+    setUrlToAdd("");
 
-    // Intégrations
-    setIntegrations(integ);
+    // NEW
+    setIntegrations(ints);
     setIntegrationProvider("make");
     setIntegrationName("");
     setIntegrationUrl("");
 
-    setUrlToAdd("");
     setModalOpen(true);
   }
 
@@ -186,11 +186,11 @@ export default function Admin() {
     setModalOpen(false);
     setModalAgent(null);
     setModalSystemPrompt("");
-
     setSources([]);
     setUrlToAdd("");
     setUploading(false);
 
+    // NEW
     setIntegrations([]);
     setIntegrationProvider("make");
     setIntegrationName("");
@@ -210,24 +210,20 @@ export default function Admin() {
     setSources((prev) => prev.filter((_, i) => i !== idx));
   }
 
+  // NEW: integrations helpers
   function addIntegration() {
-    const provider = (integrationProvider || "").trim() || "custom";
-    const name = (integrationName || "").trim();
+    const provider = (integrationProvider || "").trim();
+    const name = (integrationName || "").trim() || "Workflow";
     const url = (integrationUrl || "").trim();
 
-    if (!url) return alert("URL requise.");
+    if (!url) return alert("URL du workflow requise.");
     if (!/^https?:\/\//i.test(url)) return alert("URL invalide. Exemple: https://...");
 
-    const item = {
-      provider,
-      name: name || provider.toUpperCase(),
-      url,
-    };
-
+    const item = { provider, name, url };
     setIntegrations((prev) => [item, ...prev]);
+
     setIntegrationName("");
     setIntegrationUrl("");
-    setIntegrationProvider(provider);
   }
 
   function removeIntegrationAt(idx) {
@@ -281,7 +277,6 @@ export default function Admin() {
     if (!token) return alert("Non authentifié.");
     if (!selectedUserId || !modalAgent) return;
 
-    // IMPORTANT: on enrichit context avec integrations
     const context = { sources, integrations };
 
     const res = await fetch("/api/admin/save-agent-config", {
@@ -348,7 +343,16 @@ export default function Admin() {
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     closeCreateClient();
+
+    // IMPORTANT: on sélectionne immédiatement le nouveau client
     await refreshAll();
+
+    const newId = data?.client?.id || data?.client?.[0]?.id || "";
+    if (newId) {
+      setSelectedClientId(newId);
+      setSelectedUserId(""); // client vide => pas d'user sélectionné
+      setQ(""); // évite un filtre qui masquerait le nouveau client
+    }
   }
 
   function openCreateUser() {
@@ -394,10 +398,10 @@ export default function Admin() {
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     if (data?.existing) {
-      setCreateUserNote("Utilisateur déjà existant : il a été rattaché au client.");
+      setCreateUserNote("Utilisateur déjà existant : il a été rattaché au client. Email envoyé si configuré.");
       setCreatedPassword("");
     } else {
-      setCreateUserNote("Utilisateur créé.");
+      setCreateUserNote("Utilisateur créé. Email d’invitation envoyé si configuré.");
       setCreatedPassword(data?.tempPassword || "");
     }
 
@@ -444,6 +448,12 @@ export default function Admin() {
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     await refreshAll();
+  }
+
+  // NEW: helper pour sélectionner client partout
+  function selectClient(clientId) {
+    setSelectedClientId(clientId);
+    // selectedUserId sera recalculé par le useEffect (premier user ou vide)
   }
 
   return (
@@ -493,6 +503,7 @@ export default function Admin() {
               onChange={(e) => setQ(e.target.value)}
               placeholder="Rechercher client / email"
               style={styles.search}
+              // anti-autofill Chrome
               name="client_search"
               autoComplete="off"
               autoCorrect="off"
@@ -506,15 +517,32 @@ export default function Admin() {
               <div style={{ display: "grid", gap: 12 }}>
                 {clientCards.map((c) => {
                   const activeClient = c.id === selectedClientId;
+
                   return (
-                    <div key={c.id} style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}>
-                      <div style={styles.clientHeader}>
-                        <div style={{ cursor: "pointer" }} onClick={() => setSelectedClientId(c.id)} title="Sélectionner ce client">
+                    <div
+                      key={c.id}
+                      style={{
+                        ...styles.clientBlock,
+                        ...(activeClient ? styles.clientBlockActive : {}),
+                        cursor: "pointer",
+                      }}
+                      onClick={() => selectClient(c.id)}
+                      title="Sélectionner ce client"
+                    >
+                      <div style={styles.clientHeader} onClick={() => selectClient(c.id)}>
+                        <div style={{ cursor: "pointer" }}>
                           <div style={styles.clientName}>{c.name}</div>
                           <div style={styles.small}>{c.userCount} user(s)</div>
                         </div>
 
-                        <button style={styles.deleteBtn} onClick={() => deleteClient(c.id, c.name)} title="Supprimer client">
+                        <button
+                          style={styles.deleteBtn}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteClient(c.id, c.name);
+                          }}
+                          title="Supprimer client"
+                        >
                           Supprimer
                         </button>
                       </div>
@@ -526,7 +554,8 @@ export default function Admin() {
                             <div key={u.user_id} style={{ display: "flex", gap: 10, alignItems: "center" }}>
                               <div
                                 style={{ ...styles.userItem, ...(activeUser ? styles.userItemActive : {}) }}
-                                onClick={() => {
+                                onClick={(e) => {
+                                  e.stopPropagation();
                                   setSelectedClientId(c.id);
                                   setSelectedUserId(u.user_id);
                                 }}
@@ -540,7 +569,10 @@ export default function Admin() {
 
                               <button
                                 style={styles.xBtnMini}
-                                onClick={() => removeClientUser(c.id, u.user_id, u.email)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  removeClientUser(c.id, u.user_id, u.email);
+                                }}
                                 title="Retirer l’utilisateur du client"
                               >
                                 ✕
@@ -548,7 +580,11 @@ export default function Admin() {
                             </div>
                           );
                         })}
-                        {(c.users || []).length === 0 && <div style={styles.muted}>Aucun utilisateur.</div>}
+                        {(c.users || []).length === 0 && (
+                          <div style={styles.muted}>
+                            Aucun utilisateur. Cliquez sur la carte puis “+ Utilisateur”.
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
@@ -597,7 +633,7 @@ export default function Admin() {
                   const cfg = getConfig(a.id);
                   const ctx = cfg?.context || {};
                   const srcCount = Array.isArray(ctx?.sources) ? ctx.sources.length : 0;
-                  const integCount = Array.isArray(ctx?.integrations) ? ctx.integrations.length : 0;
+                  const wfCount = Array.isArray(ctx?.integrations) ? ctx.integrations.length : 0;
                   const hasPrompt = !!(cfg?.system_prompt || "").trim();
 
                   return (
@@ -611,8 +647,7 @@ export default function Admin() {
                           <div style={styles.agentName}>{a.name}</div>
                           <div style={styles.agentRole}>{a.description || a.slug}</div>
                           <div style={styles.small}>
-                            {assigned ? "Assigné" : "Non assigné"} • Prompt: {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources:{" "}
-                            {srcCount} • Intégrations: {integCount}
+                            {assigned ? "Assigné" : "Non assigné"} • Prompt: {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources: {srcCount} • Workflows: {wfCount}
                           </div>
                         </div>
                       </div>
@@ -623,7 +658,7 @@ export default function Admin() {
                         </button>
 
                         <button style={styles.btnGhost} onClick={() => openPromptModal(a)}>
-                          Prompt & données
+                          Prompt, données & workflows
                         </button>
 
                         <button style={styles.btnDangerGhost} onClick={() => deleteAgentConversations(a.slug, a.name)}>
@@ -699,7 +734,9 @@ export default function Admin() {
                 sources.map((s, idx) => (
                   <div key={idx} style={styles.sourceRow}>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 900 }}>{s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}</div>
+                      <div style={{ fontWeight: 900 }}>
+                        {s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}
+                      </div>
                       <div style={styles.tiny}>
                         {s.type === "pdf"
                           ? `mime: ${s.mime || "application/pdf"} • size: ${s.size || "?"} • path: ${s.path}`
@@ -714,64 +751,61 @@ export default function Admin() {
               )}
             </div>
 
-            {/* NOUVEAU: INTEGRATIONS */}
-            <div style={styles.modalLabel}>Intégrations (Make / n8n / Railway)</div>
+            {/* NEW: integrations */}
+            <div style={styles.modalLabel}>Workflows / Intégrations (Make, n8n, Railway, …)</div>
+            <div style={styles.integrationsBox}>
+              <div style={styles.row}>
+                <div style={{ width: 160 }}>
+                  <select
+                    value={integrationProvider}
+                    onChange={(e) => setIntegrationProvider(e.target.value)}
+                    style={styles.select}
+                    name="integration_provider"
+                  >
+                    <option value="make">Make</option>
+                    <option value="n8n">n8n</option>
+                    <option value="railway">Railway</option>
+                    <option value="mcp">MCP / Autre</option>
+                  </select>
+                </div>
 
-            <div style={styles.row}>
-              <div style={{ width: 170 }}>
-                <select
-                  value={integrationProvider}
-                  onChange={(e) => setIntegrationProvider(e.target.value)}
-                  style={styles.select}
-                  name="integration_provider"
-                >
-                  <option value="make">Make</option>
-                  <option value="n8n">n8n</option>
-                  <option value="railway">Railway</option>
-                  <option value="custom">Custom</option>
-                </select>
+                <div style={{ flex: 1 }}>
+                  <input
+                    value={integrationName}
+                    onChange={(e) => setIntegrationName(e.target.value)}
+                    placeholder="Nom (ex: Envoi email Office365)"
+                    style={styles.input}
+                    name="integration_name"
+                    autoComplete="off"
+                  />
+                </div>
+
+                <div style={{ flex: 2 }}>
+                  <input
+                    value={integrationUrl}
+                    onChange={(e) => setIntegrationUrl(e.target.value)}
+                    placeholder="URL du webhook / endpoint (https://...)"
+                    style={styles.input}
+                    name="integration_url"
+                    autoComplete="off"
+                  />
+                </div>
+
+                <button style={styles.btnAssign} onClick={addIntegration}>
+                  Ajouter
+                </button>
               </div>
 
-              <div style={{ flex: 1 }}>
-                <input
-                  value={integrationName}
-                  onChange={(e) => setIntegrationName(e.target.value)}
-                  placeholder="Nom (ex: Envoi email / Sync CRM)"
-                  style={styles.input}
-                  name="integration_name"
-                  autoComplete="off"
-                />
-              </div>
-
-              <div style={{ flex: 2 }}>
-                <input
-                  value={integrationUrl}
-                  onChange={(e) => setIntegrationUrl(e.target.value)}
-                  placeholder="URL webhook / endpoint (https://...)"
-                  style={styles.input}
-                  name="integration_url"
-                  autoComplete="off"
-                />
-              </div>
-
-              <button style={styles.btnAssign} onClick={addIntegration}>
-                Ajouter
-              </button>
-            </div>
-
-            <div style={styles.sourcesBox}>
               {integrations.length === 0 ? (
-                <div style={styles.muted}>Aucune intégration.</div>
+                <div style={styles.muted}>Aucun workflow.</div>
               ) : (
-                integrations.map((it, idx) => (
-                  <div key={idx} style={styles.sourceRow}>
+                integrations.map((w, idx) => (
+                  <div key={idx} style={styles.integrationRow}>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontWeight: 900 }}>
-                        {(it.provider || "custom").toUpperCase()} — {it.name || "Sans nom"}
+                        {String(w.provider || "").toUpperCase()} — {w.name || "Workflow"}
                       </div>
-                      <div style={styles.tiny} title={it.url}>
-                        url: {it.url}
-                      </div>
+                      <div style={styles.tiny}>{w.url}</div>
                     </div>
                     <button style={styles.xBtn} onClick={() => removeIntegrationAt(idx)} title="Retirer">
                       ✕
@@ -790,9 +824,7 @@ export default function Admin() {
               </button>
             </div>
 
-            <div style={styles.small}>
-              Les intégrations sont enregistrées dans <b>context.integrations</b> (JSONB). Les sources restent dans <b>context.sources</b>.
-            </div>
+            <div style={styles.small}>Les workflows sont enregistrés dans context.integrations (JSONB).</div>
           </div>
         </div>
       )}
@@ -1197,6 +1229,25 @@ const styles = {
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(0,0,0,.15)",
   },
+
+  integrationsBox: {
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.03)",
+    padding: 10,
+    display: "grid",
+    gap: 10,
+  },
+  integrationRow: {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    padding: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.15)",
+  },
+
   xBtn: {
     width: 40,
     height: 40,
