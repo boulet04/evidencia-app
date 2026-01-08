@@ -1,4 +1,4 @@
-// pages/admin/index.js
+// pages/admin/index.js test
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabaseClient";
 
