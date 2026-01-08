@@ -1,11 +1,11 @@
-// pages/api/admin/create-client.js
+// pages/api/admin/remove-client-user.js
 import { createClient } from "@supabase/supabase-js";
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-}
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  { auth: { persistSession: false } }
+);
 
 function getBearerToken(req) {
   const h = req.headers?.authorization || "";
@@ -17,77 +17,61 @@ function safeStr(v) {
   return (v ?? "").toString().trim();
 }
 
-function getSupabaseAdmin() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url) throw new Error("NEXT_PUBLIC_SUPABASE_URL manquant.");
-  if (!serviceKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY manquant.");
-
-  return createClient(url, serviceKey, { auth: { persistSession: false } });
-}
-
-async function requireAdmin(supabaseAdmin, token) {
-  const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-  if (userErr || !userData?.user) {
-    const msg = userErr?.message || "Session invalide.";
-    const e = new Error(msg);
-    e.status = 401;
-    throw e;
-  }
-
-  const adminId = userData.user.id;
-
-  const { data: profile, error: profErr } = await supabaseAdmin
-    .from("profiles")
-    .select("role")
-    .eq("user_id", adminId)
-    .maybeSingle();
-
-  if (profErr) {
-    const e = new Error(profErr.message);
-    e.status = 500;
-    throw e;
-  }
-
-  if (!profile || profile.role !== "admin") {
-    const e = new Error("Accès interdit (admin requis).");
-    e.status = 403;
-    throw e;
-  }
-
-  return { adminId };
-}
-
 export default async function handler(req, res) {
-  setCors(res);
-
   try {
-    if (req.method === "OPTIONS") return res.status(200).end();
-    if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
 
-    const supabaseAdmin = getSupabaseAdmin();
+    // CORS (au cas où)
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+    if (req.method === "OPTIONS") return res.status(200).end();
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Méthode non autorisée." });
+    }
+
+    // Auth admin via token
     const token = getBearerToken(req);
     if (!token) return res.status(401).json({ error: "Token manquant." });
 
-    await requireAdmin(supabaseAdmin, token);
+    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
+    if (userErr || !userData?.user) {
+      return res.status(401).json({ error: "Session invalide." });
+    }
 
-    const name = safeStr(req.body?.name);
-    if (!name) return res.status(400).json({ error: "Nom du client manquant." });
+    const adminId = userData.user.id;
 
-    const { data: client, error } = await supabaseAdmin
-      .from("clients")
-      .insert([{ name }])
-      .select("id,name,created_at")
+    // Vérifier rôle admin
+    const { data: adminProfile, error: profErr } = await supabaseAdmin
+      .from("profiles")
+      .select("role")
+      .eq("user_id", adminId)
       .maybeSingle();
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (profErr) return res.status(500).json({ error: profErr.message });
+    if (!adminProfile || adminProfile.role !== "admin") {
+      return res.status(403).json({ error: "Accès interdit (admin requis)." });
+    }
 
-    return res.status(200).json({ ok: true, client });
+    const { clientId, userId } = req.body || {};
+    const cid = safeStr(clientId);
+    const uid = safeStr(userId);
+    if (!cid) return res.status(400).json({ error: "clientId manquant." });
+    if (!uid) return res.status(400).json({ error: "userId manquant." });
+
+    const { error } = await supabaseAdmin
+      .from("client_users")
+      .delete()
+      .eq("client_id", cid)
+      .eq("user_id", uid);
+
+    if (error) {
+      return res.status(500).json({ error: `Suppression liaison échouée: ${error.message}` });
+    }
+
+    return res.status(200).json({ ok: true });
   } catch (e) {
-    const status = e?.status || 500;
-    return res.status(status).json({
-      error: safeStr(e?.message) || "Erreur interne create-client.",
-    });
+    return res.status(500).json({ error: safeStr(e?.message) || "Erreur interne." });
   }
 }
