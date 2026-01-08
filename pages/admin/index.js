@@ -116,6 +116,7 @@ export default function Admin() {
     });
   }, [clients, clientUsers, profiles, q]);
 
+  // FIX: dépendance correcte sur clientCards (pas seulement length)
   useEffect(() => {
     if (!selectedClientId) {
       setSelectedUserId("");
@@ -126,7 +127,7 @@ export default function Admin() {
     if (selectedUserId && card?.users?.some((u) => u.user_id === selectedUserId)) return;
     setSelectedUserId(firstUser);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedClientId, clientCards.length]);
+  }, [selectedClientId, clientCards]);
 
   function isAssigned(agentId) {
     if (!selectedUserId) return false;
@@ -301,7 +302,17 @@ export default function Admin() {
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     closeCreateClient();
+
+    // FIX: si un filtre est actif, le client créé peut ne pas être cliquable/visible dans la liste
+    if (q) setQ("");
+
+    // FIX: sélectionner immédiatement le nouveau client (même sans utilisateur)
+    const newId = data?.client?.id || data?.id || "";
     await refreshAll();
+    if (newId) {
+      setSelectedClientId(newId);
+      setSelectedUserId(""); // client vide -> pas d'user sélectionné
+    }
   }
 
   function openCreateUser() {
@@ -460,19 +471,35 @@ export default function Admin() {
               <div style={{ display: "grid", gap: 12 }}>
                 {clientCards.map((c) => {
                   const activeClient = c.id === selectedClientId;
+
                   return (
-                    <div key={c.id} style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}>
+                    // FIX: rendre toute la carte cliquable (utile pour les clients "vides")
+                    <div
+                      key={c.id}
+                      style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}
+                      onClick={() => setSelectedClientId(c.id)}
+                      title="Sélectionner ce client"
+                    >
                       <div style={styles.clientHeader}>
                         <div
                           style={{ cursor: "pointer" }}
-                          onClick={() => setSelectedClientId(c.id)}
-                          title="Sélectionner ce client"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedClientId(c.id);
+                          }}
                         >
                           <div style={styles.clientName}>{c.name}</div>
                           <div style={styles.small}>{c.userCount} user(s)</div>
                         </div>
 
-                        <button style={styles.deleteBtn} onClick={() => deleteClient(c.id, c.name)} title="Supprimer client">
+                        <button
+                          style={styles.deleteBtn}
+                          onClick={(e) => {
+                            e.stopPropagation(); // FIX: éviter de sélectionner lors d’un delete
+                            deleteClient(c.id, c.name);
+                          }}
+                          title="Supprimer client"
+                        >
                           Supprimer
                         </button>
                       </div>
@@ -481,7 +508,11 @@ export default function Admin() {
                         {(c.users || []).map((u) => {
                           const activeUser = activeClient && u.user_id === selectedUserId;
                           return (
-                            <div key={u.user_id} style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                            <div
+                              key={u.user_id}
+                              style={{ display: "flex", gap: 10, alignItems: "center" }}
+                              onClick={(e) => e.stopPropagation()} // FIX: la sélection user est gérée ci-dessous
+                            >
                               <div
                                 style={{ ...styles.userItem, ...(activeUser ? styles.userItemActive : {}) }}
                                 onClick={() => {
@@ -498,7 +529,10 @@ export default function Admin() {
 
                               <button
                                 style={styles.xBtnMini}
-                                onClick={() => removeClientUser(c.id, u.user_id, u.email)}
+                                onClick={(e) => {
+                                  e.stopPropagation(); // FIX
+                                  removeClientUser(c.id, u.user_id, u.email);
+                                }}
                                 title="Retirer l’utilisateur du client"
                               >
                                 ✕
@@ -506,7 +540,20 @@ export default function Admin() {
                             </div>
                           );
                         })}
-                        {(c.users || []).length === 0 && <div style={styles.muted}>Aucun utilisateur.</div>}
+
+                        {(c.users || []).length === 0 && (
+                          // FIX: rendre “Aucun utilisateur.” cliquable (sélection client)
+                          <div
+                            style={{ ...styles.muted, cursor: "pointer" }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedClientId(c.id);
+                              setSelectedUserId("");
+                            }}
+                          >
+                            Aucun utilisateur.
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
@@ -655,9 +702,7 @@ export default function Admin() {
                 sources.map((s, idx) => (
                   <div key={idx} style={styles.sourceRow}>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 900 }}>
-                        {s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}
-                      </div>
+                      <div style={{ fontWeight: 900 }}>{s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}</div>
                       <div style={styles.tiny}>
                         {s.type === "pdf"
                           ? `mime: ${s.mime || "application/pdf"} • size: ${s.size || "?"} • path: ${s.path}`
@@ -724,7 +769,6 @@ export default function Admin() {
               onChange={(e) => setNewUserEmail(e.target.value)}
               style={styles.input}
               placeholder="test@test.fr"
-              // important : empêcher le password manager de confondre avec la barre de recherche
               name="new_user_email"
               autoComplete="new-username"
               autoCapitalize="none"
@@ -740,7 +784,6 @@ export default function Admin() {
               placeholder="Laisser vide pour générer automatiquement"
               name="new_user_password"
               autoComplete="new-password"
-              // anti-autofill Chrome : readOnly jusqu’au focus
               readOnly={pwdLocked}
               onFocus={() => setPwdLocked(false)}
             />
