@@ -28,6 +28,12 @@ export default function Admin() {
   const [urlToAdd, setUrlToAdd] = useState("");
   const [uploading, setUploading] = useState(false);
 
+  // workflows / integrations UI
+  const [workflows, setWorkflows] = useState([]); // [{ provider:'make'|'n8n'|'railway'|'webhook', name, url }]
+  const [wfProvider, setWfProvider] = useState("make");
+  const [wfName, setWfName] = useState("");
+  const [wfUrl, setWfUrl] = useState("");
+
   // Create client modal
   const [createClientOpen, setCreateClientOpen] = useState(false);
   const [newClientName, setNewClientName] = useState("");
@@ -41,11 +47,10 @@ export default function Admin() {
   const [createdPassword, setCreatedPassword] = useState(""); // affichage one-shot
   const [createUserNote, setCreateUserNote] = useState("");
 
-  // GLOBAL PROMPT modal
-  const [globalPromptOpen, setGlobalPromptOpen] = useState(false);
-  const [globalPromptText, setGlobalPromptText] = useState("");
-  const [globalPromptNote, setGlobalPromptNote] = useState("");
-  const [globalPromptLoading, setGlobalPromptLoading] = useState(false);
+  // Base prompt modal (prompt général)
+  const [basePromptOpen, setBasePromptOpen] = useState(false);
+  const [basePromptValue, setBasePromptValue] = useState("");
+  const [basePromptSavedMsg, setBasePromptSavedMsg] = useState("");
 
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
@@ -165,10 +170,18 @@ export default function Admin() {
     const cfg = getConfig(agent.id);
     const ctx = cfg?.context || {};
     const src = Array.isArray(ctx?.sources) ? ctx.sources : [];
+    const wf = Array.isArray(ctx?.workflows) ? ctx.workflows : [];
+
     setModalAgent(agent);
     setModalSystemPrompt(cfg?.system_prompt || "");
     setSources(src);
+    setWorkflows(wf);
+
     setUrlToAdd("");
+    setWfProvider("make");
+    setWfName("");
+    setWfUrl("");
+
     setModalOpen(true);
   }
 
@@ -179,12 +192,17 @@ export default function Admin() {
     setSources([]);
     setUrlToAdd("");
     setUploading(false);
+
+    setWorkflows([]);
+    setWfProvider("make");
+    setWfName("");
+    setWfUrl("");
   }
 
   function addUrlSource() {
     const u = (urlToAdd || "").trim();
     if (!u) return;
-    if (!/^https?:\/\//i.test(u) && !/^www\./i.test(u)) return alert("URL invalide. Exemple: https://...");
+    if (!/^https?:\/\//i.test(u)) return alert("URL invalide. Exemple: https://...");
     const item = { type: "url", url: u, name: u };
     setSources((prev) => [item, ...prev]);
     setUrlToAdd("");
@@ -192,6 +210,27 @@ export default function Admin() {
 
   function removeSourceAt(idx) {
     setSources((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function addWorkflow() {
+    const provider = (wfProvider || "webhook").trim();
+    const name = (wfName || "").trim();
+    const url = (wfUrl || "").trim();
+
+    if (!url) return alert("URL du workflow requise.");
+    if (!/^https?:\/\//i.test(url)) return alert("URL invalide. Exemple: https://...");
+    const item = {
+      provider,
+      name: name || `${provider.toUpperCase()} workflow`,
+      url,
+    };
+    setWorkflows((prev) => [item, ...prev]);
+    setWfName("");
+    setWfUrl("");
+  }
+
+  function removeWorkflowAt(idx) {
+    setWorkflows((prev) => prev.filter((_, i) => i !== idx));
   }
 
   async function handlePdfUpload(file) {
@@ -241,7 +280,10 @@ export default function Admin() {
     if (!token) return alert("Non authentifié.");
     if (!selectedUserId || !modalAgent) return;
 
-    const context = { sources };
+    const context = {
+      sources,
+      workflows,
+    };
 
     const res = await fetch("/api/admin/save-agent-config", {
       method: "POST",
@@ -405,67 +447,45 @@ export default function Admin() {
     await refreshAll();
   }
 
-  // --- GLOBAL PROMPT ---
-  async function openGlobalPrompt() {
-    setGlobalPromptNote("");
-    setGlobalPromptLoading(true);
-    setGlobalPromptOpen(true);
-
-    try {
-      const token = await getAccessToken();
-      if (!token) {
-        setGlobalPromptNote("Non authentifié.");
-        return;
-      }
-
-      const r = await fetch("/api/admin/app-settings?key=base_system_prompt", {
-        method: "GET",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setGlobalPromptNote(`Erreur (${r.status}) : ${j?.error || "?"}`);
-        return;
-      }
-
-      setGlobalPromptText(j?.item?.value || "");
-    } finally {
-      setGlobalPromptLoading(false);
-    }
-  }
-
-  function closeGlobalPrompt() {
-    setGlobalPromptOpen(false);
-    setGlobalPromptText("");
-    setGlobalPromptNote("");
-    setGlobalPromptLoading(false);
-  }
-
-  async function saveGlobalPrompt() {
+  // --- BASE PROMPT (PROMPT GÉNÉRAL) ---
+  async function openBasePrompt() {
+    setBasePromptSavedMsg("");
     const token = await getAccessToken();
     if (!token) return alert("Non authentifié.");
 
-    setGlobalPromptLoading(true);
-    setGlobalPromptNote("");
+    const res = await fetch("/api/admin/get-base-prompt", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    });
 
-    try {
-      const r = await fetch("/api/admin/app-settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ key: "base_system_prompt", value: globalPromptText || "" }),
-      });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setGlobalPromptNote(`Erreur (${r.status}) : ${j?.error || "?"}`);
-        return;
-      }
+    setBasePromptValue(data?.basePrompt || "");
+    setBasePromptOpen(true);
+  }
 
-      setGlobalPromptNote("Enregistré.");
-    } finally {
-      setGlobalPromptLoading(false);
-    }
+  async function saveBasePrompt() {
+    const token = await getAccessToken();
+    if (!token) return alert("Non authentifié.");
+
+    const res = await fetch("/api/admin/save-base-prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ basePrompt: basePromptValue || "" }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
+
+    setBasePromptSavedMsg("Enregistré.");
+    setTimeout(() => setBasePromptSavedMsg(""), 1200);
+    setBasePromptOpen(false);
+  }
+
+  function closeBasePrompt() {
+    setBasePromptOpen(false);
+    setBasePromptSavedMsg("");
   }
 
   return (
@@ -500,8 +520,8 @@ export default function Admin() {
           <div style={styles.box}>
             <div style={styles.clientsHead}>
               <div style={styles.boxTitle}>Clients</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button style={styles.btnPill} onClick={openGlobalPrompt}>
+              <div style={styles.clientsHeadBtns}>
+                <button style={styles.btnPill} onClick={openBasePrompt}>
                   Prompt général
                 </button>
                 <button style={styles.btnPill} onClick={openCreateClient}>
@@ -535,7 +555,7 @@ export default function Admin() {
                     <div key={c.id} style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}>
                       <div style={styles.clientHeader}>
                         <div
-                          style={{ cursor: "pointer" }}
+                          style={{ cursor: "pointer", minWidth: 0 }}
                           onClick={() => setSelectedClientId(c.id)}
                           title="Sélectionner ce client"
                         >
@@ -636,12 +656,12 @@ export default function Admin() {
                           {a.avatar_url ? <img src={a.avatar_url} alt={a.name} style={styles.avatar} /> : <div style={styles.avatarFallback} />}
                         </div>
 
-                        <div style={{ flex: 1 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={styles.agentName}>{a.name}</div>
                           <div style={styles.agentRole}>{a.description || a.slug}</div>
                           <div style={styles.small}>
-                            {assigned ? "Assigné" : "Non assigné"} • Prompt: {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources: {srcCount} • Workflows:{" "}
-                            {wfCount}
+                            {assigned ? "Assigné" : "Non assigné"} • Prompt: {hasPrompt ? "personnalisé" : "défaut / vide"} • Sources: {srcCount} •
+                            Workflows: {wfCount}
                           </div>
                         </div>
                       </div>
@@ -670,7 +690,7 @@ export default function Admin() {
         </section>
       </div>
 
-      {/* MODAL Prompt & données */}
+      {/* MODAL Prompt & données & workflows */}
       {modalOpen && modalAgent && (
         <div style={styles.modalOverlay} onClick={closePromptModal}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -685,7 +705,7 @@ export default function Admin() {
             />
 
             <div style={styles.row}>
-              <div style={{ flex: 1 }}>
+              <div style={{ flex: 1, minWidth: 280 }}>
                 <div style={styles.modalLabel}>Ajouter une URL (source)</div>
                 <div style={styles.row}>
                   <input
@@ -704,7 +724,7 @@ export default function Admin() {
 
               <div style={{ width: 18 }} />
 
-              <div style={{ width: 320 }}>
+              <div style={{ width: 320, minWidth: 280 }}>
                 <div style={styles.modalLabel}>Uploader un PDF</div>
                 <label style={styles.uploadBox}>
                   <input
@@ -727,7 +747,7 @@ export default function Admin() {
               ) : (
                 sources.map((s, idx) => (
                   <div key={idx} style={styles.sourceRow}>
-                    <div style={{ flex: 1 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 900 }}>
                         {s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}
                       </div>
@@ -745,6 +765,60 @@ export default function Admin() {
               )}
             </div>
 
+            <div style={styles.modalLabel}>Workflows / Intégrations</div>
+            <div style={styles.wfBox}>
+              <div style={styles.row}>
+                <select value={wfProvider} onChange={(e) => setWfProvider(e.target.value)} style={styles.select} name="wf_provider">
+                  <option value="make">Make</option>
+                  <option value="n8n">n8n</option>
+                  <option value="railway">Railway</option>
+                  <option value="webhook">Webhook</option>
+                </select>
+
+                <input
+                  value={wfName}
+                  onChange={(e) => setWfName(e.target.value)}
+                  placeholder="Nom (ex: Relance facture, Envoi devis...)"
+                  style={styles.input}
+                  name="wf_name"
+                  autoComplete="off"
+                />
+
+                <input
+                  value={wfUrl}
+                  onChange={(e) => setWfUrl(e.target.value)}
+                  placeholder="URL webhook (https://...)"
+                  style={styles.input}
+                  name="wf_url"
+                  autoComplete="off"
+                />
+
+                <button style={styles.btnAssign} onClick={addWorkflow}>
+                  Ajouter
+                </button>
+              </div>
+
+              <div style={{ height: 10 }} />
+
+              {workflows.length === 0 ? (
+                <div style={styles.muted}>Aucun workflow.</div>
+              ) : (
+                workflows.map((w, idx) => (
+                  <div key={idx} style={styles.wfRow}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 900 }}>
+                        {String(w.provider || "").toUpperCase()} — {w.name || "Workflow"}
+                      </div>
+                      <div style={styles.tiny}>{w.url}</div>
+                    </div>
+                    <button style={styles.xBtn} onClick={() => removeWorkflowAt(idx)} title="Retirer">
+                      ✕
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
             <div style={styles.modalActions}>
               <button style={styles.btnGhost} onClick={closePromptModal}>
                 Annuler
@@ -754,37 +828,9 @@ export default function Admin() {
               </button>
             </div>
 
-            <div style={styles.small}>Les sources sont enregistrées dans context.sources (JSONB).</div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL Prompt général */}
-      {globalPromptOpen && (
-        <div style={styles.modalOverlay} onClick={closeGlobalPrompt}>
-          <div style={styles.smallModal} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.modalTitle}>Prompt général (tous les agents)</div>
-
-            <div style={styles.modalLabel}>Texte</div>
-            <textarea
-              value={globalPromptText}
-              onChange={(e) => setGlobalPromptText(e.target.value)}
-              style={{ ...styles.textarea, minHeight: 260 }}
-              placeholder="Collez ici votre base de règles commune à tous les agents…"
-            />
-
-            {!!globalPromptNote && <div style={styles.noteOk}>{globalPromptNote}</div>}
-
-            <div style={styles.modalActions}>
-              <button style={styles.btnGhost} onClick={closeGlobalPrompt}>
-                Fermer
-              </button>
-              <button style={styles.btnAssign} onClick={saveGlobalPrompt} disabled={globalPromptLoading}>
-                {globalPromptLoading ? "En cours…" : "Enregistrer"}
-              </button>
+            <div style={styles.small}>
+              Les sources sont enregistrées dans <b>context.sources</b> et les workflows dans <b>context.workflows</b> (JSONB).
             </div>
-
-            <div style={styles.tiny}>Stockage: public.app_settings / key = base_system_prompt</div>
           </div>
         </div>
       )}
@@ -816,6 +862,11 @@ export default function Admin() {
       )}
 
       {/* MODAL Create User */}
+      {createUserOpen && (
+_toggle
+      )}
+
+      {/* MODAL Create User (original, inchangé) */}
       {createUserOpen && (
         <div style={styles.modalOverlay} onClick={closeCreateUser}>
           <div style={styles.smallModal} onClick={(e) => e.stopPropagation()}>
@@ -866,6 +917,38 @@ export default function Admin() {
               <button style={styles.btnAssign} onClick={createUser}>
                 Créer
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL Base Prompt */}
+      {basePromptOpen && (
+        <div style={styles.modalOverlay} onClick={closeBasePrompt}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalTitle}>Prompt général (appliqué à tous les agents)</div>
+
+            <div style={styles.modalLabel}>Base prompt</div>
+            <textarea
+              value={basePromptValue}
+              onChange={(e) => setBasePromptValue(e.target.value)}
+              style={styles.textarea}
+              placeholder="Entrez ici le prompt général…"
+            />
+
+            {!!basePromptSavedMsg && <div style={styles.noteOk}>{basePromptSavedMsg}</div>}
+
+            <div style={styles.modalActions}>
+              <button style={styles.btnGhost} onClick={closeBasePrompt}>
+                Annuler
+              </button>
+              <button style={styles.btnAssign} onClick={saveBasePrompt}>
+                Enregistrer
+              </button>
+            </div>
+
+            <div style={styles.small}>
+              Ce prompt sera injecté côté backend avant le prompt agent (selon ton implémentation /api/chat).
             </div>
           </div>
         </div>
@@ -925,7 +1008,13 @@ const styles = {
     whiteSpace: "nowrap",
   },
 
-  wrap: { display: "grid", gridTemplateColumns: "420px 1fr", gap: 16, padding: 18 },
+  wrap: {
+    display: "grid",
+    gridTemplateColumns: "420px 1fr",
+    gap: 16,
+    padding: 18,
+    alignItems: "start",
+  },
 
   box: {
     border: "1px solid rgba(255,255,255,.12)",
@@ -934,10 +1023,25 @@ const styles = {
     backdropFilter: "blur(10px)",
     padding: 14,
     boxShadow: "0 18px 45px rgba(0,0,0,.55)",
+    overflow: "hidden", // IMPORTANT : empêche tout débordement visuel
   },
   boxTitle: { fontWeight: 900, marginBottom: 10 },
 
-  clientsHead: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  // IMPORTANT : wrap propre -> plus de chevauchement
+  clientsHead: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  clientsHeadBtns: {
+    display: "flex",
+    gap: 8,
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    maxWidth: "100%",
+  },
 
   btnPill: {
     borderRadius: 999,
@@ -960,10 +1064,11 @@ const styles = {
     outline: "none",
     marginBottom: 12,
     fontWeight: 800,
+    marginTop: 10,
   },
 
-  left: {},
-  right: {},
+  left: { minWidth: 0 },
+  right: { minWidth: 0 },
 
   clientBlock: {
     borderRadius: 16,
@@ -980,7 +1085,7 @@ const styles = {
     gap: 10,
     background: "rgba(0,0,0,.18)",
   },
-  clientName: { fontWeight: 900, fontSize: 14 },
+  clientName: { fontWeight: 900, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
   userList: { padding: 10, display: "grid", gap: 10 },
   userItem: {
     flex: 1,
@@ -989,6 +1094,7 @@ const styles = {
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(255,255,255,.03)",
     cursor: "pointer",
+    minWidth: 0,
   },
   userItemActive: { borderColor: "rgba(80,120,255,.35)", background: "rgba(80,120,255,.08)" },
 
@@ -1000,6 +1106,7 @@ const styles = {
     color: "#fff",
     fontWeight: 900,
     cursor: "pointer",
+    whiteSpace: "nowrap",
   },
 
   small: { fontSize: 12, opacity: 0.75, fontWeight: 800 },
@@ -1035,6 +1142,7 @@ const styles = {
     background: "rgba(255,255,255,.03)",
     padding: 14,
     boxShadow: "0 14px 40px rgba(0,0,0,.45)",
+    minWidth: 0,
   },
   agentTop: { display: "flex", gap: 12, alignItems: "center", marginBottom: 12 },
 
@@ -1111,7 +1219,7 @@ const styles = {
     backdropFilter: "blur(12px)",
   },
   smallModal: {
-    width: "min(700px, 96vw)",
+    width: "min(520px, 96vw)",
     borderRadius: 18,
     border: "1px solid rgba(255,255,255,.14)",
     background: "rgba(0,0,0,.70)",
@@ -1147,9 +1255,9 @@ const styles = {
     color: "rgba(238,242,255,.92)",
     outline: "none",
     fontWeight: 800,
+    minWidth: 220,
   },
   select: {
-    width: "100%",
     padding: "10px 12px",
     borderRadius: 12,
     border: "1px solid rgba(255,255,255,.14)",
@@ -1157,6 +1265,7 @@ const styles = {
     color: "rgba(238,242,255,.92)",
     outline: "none",
     fontWeight: 800,
+    minWidth: 160,
   },
 
   uploadBox: {
@@ -1177,7 +1286,7 @@ const styles = {
     padding: 10,
     display: "grid",
     gap: 10,
-    maxHeight: 260,
+    maxHeight: 220,
     overflow: "auto",
   },
   sourceRow: {
@@ -1189,6 +1298,27 @@ const styles = {
     border: "1px solid rgba(255,255,255,.10)",
     background: "rgba(0,0,0,.15)",
   },
+
+  wfBox: {
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.03)",
+    padding: 10,
+    display: "grid",
+    gap: 10,
+    maxHeight: 220,
+    overflow: "auto",
+  },
+  wfRow: {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    padding: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.15)",
+  },
+
   xBtn: {
     width: 40,
     height: 40,
@@ -1198,6 +1328,7 @@ const styles = {
     color: "#fff",
     fontWeight: 900,
     cursor: "pointer",
+    flex: "0 0 auto",
   },
   xBtnMini: {
     width: 40,
