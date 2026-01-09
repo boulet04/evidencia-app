@@ -18,18 +18,18 @@ export default function Admin() {
   const [selectedUserId, setSelectedUserId] = useState("");
   const [q, setQ] = useState("");
 
-  // Modal prompt & sources
+  // Modal prompt & sources/workflows
   const [modalOpen, setModalOpen] = useState(false);
   const [modalAgent, setModalAgent] = useState(null);
   const [modalSystemPrompt, setModalSystemPrompt] = useState("");
 
-  // sources UI
-  const [sources, setSources] = useState([]); // [{type:'pdf'|'url', name, path, url, mime, size}]
+  // Sources UI
+  const [sources, setSources] = useState([]); // [{type:'pdf'|'url', name, path, url, mime, size, bucket}]
   const [urlToAdd, setUrlToAdd] = useState("");
   const [uploading, setUploading] = useState(false);
 
-  // Workflows / integrations UI (dans context)
-  const [workflows, setWorkflows] = useState([]); // [{provider:'make'|'n8n'|'railway'|'custom', name, url}]
+  // Workflows / integrations UI
+  const [workflows, setWorkflows] = useState([]); // [{provider, name, url}]
   const [wfProvider, setWfProvider] = useState("make");
   const [wfName, setWfName] = useState("");
   const [wfUrl, setWfUrl] = useState("");
@@ -94,7 +94,7 @@ export default function Admin() {
     setUserAgents(newUserAgents);
     setAgentConfigs(newAgentConfigs);
 
-    // Sélection stable (évite de “sauter” sur un autre client)
+    // sélection stable : on ne saute pas sur un autre client lors des refresh
     const firstClient = newClients[0]?.id || "";
     setSelectedClientId((current) => {
       if (!keepSelection) return firstClient;
@@ -103,7 +103,6 @@ export default function Admin() {
       return firstClient;
     });
 
-    // user sélection : on le revalide plus bas via useEffect (clientCards)
     setSelectedUserId((current) => {
       if (!keepSelection) return "";
       return current || prevUserId || "";
@@ -133,7 +132,7 @@ export default function Admin() {
             role: p?.role || "",
           };
         })
-        .filter((u) => !!u.user_id); // sécurité
+        .filter((u) => !!u.user_id);
 
       return { ...c, users, userCount: users.length };
     });
@@ -147,21 +146,17 @@ export default function Admin() {
     });
   }, [clients, clientUsers, profiles, q]);
 
-  // Quand on change de client, on choisit un user valide si dispo.
+  // Quand on change de client, on sélectionne un user valide si dispo
   useEffect(() => {
     if (!selectedClientId) {
       setSelectedUserId("");
       return;
     }
-
     const card = clientCards.find((c) => c.id === selectedClientId);
     const users = Array.isArray(card?.users) ? card.users : [];
     const firstUser = users[0]?.user_id || "";
 
-    // si user déjà ok, on garde
     if (selectedUserId && users.some((u) => u.user_id === selectedUserId)) return;
-
-    // sinon on place le 1er (ou vide)
     setSelectedUserId(firstUser);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedClientId, clientCards]);
@@ -187,13 +182,12 @@ export default function Admin() {
       body: JSON.stringify({ userId: selectedUserId, agentId, assign }),
     });
 
-  let data = {};
-try {
-  data = await res.json();
-} catch {
-  data = {};
-}
-
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     await refreshAll({ keepSelection: true });
@@ -207,10 +201,13 @@ try {
 
     setModalAgent(agent);
     setModalSystemPrompt(cfg?.system_prompt || "");
+
     setSources(src);
     setWorkflows(wfs);
 
     setUrlToAdd("");
+    setUploading(false);
+
     setWfProvider("make");
     setWfName("");
     setWfUrl("");
@@ -226,6 +223,9 @@ try {
     setWorkflows([]);
     setUrlToAdd("");
     setUploading(false);
+    setWfProvider("make");
+    setWfName("");
+    setWfUrl("");
   }
 
   function addUrlSource() {
@@ -244,10 +244,12 @@ try {
   function addWorkflow() {
     const name = (wfName || "").trim();
     const url = (wfUrl || "").trim();
+    const provider = (wfProvider || "make").trim();
+
     if (!name) return alert("Nom requis.");
     if (!/^https?:\/\//i.test(url)) return alert("URL webhook invalide. Exemple: https://...");
 
-    const item = { provider: wfProvider || "make", name, url };
+    const item = { provider, name, url };
     setWorkflows((prev) => [item, ...prev]);
 
     setWfName("");
@@ -261,7 +263,7 @@ try {
   async function handlePdfUpload(file) {
     if (!file) return;
     if (file.type !== "application/pdf") return alert("Veuillez sélectionner un PDF.");
-    if (!selectedUserId || !modalAgent) return;
+    if (!selectedUserId || !modalAgent) return alert("Sélectionnez un utilisateur et un agent.");
 
     setUploading(true);
     try {
@@ -282,7 +284,12 @@ try {
         }),
       });
 
-      const data = await res.json().catch(() => ({}));
+      let data = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = {};
+      }
       if (!res.ok) return alert(`Erreur upload (${res.status}) : ${data?.error || "?"}`);
 
       const item = {
@@ -303,7 +310,7 @@ try {
   async function savePromptModal() {
     const token = await getAccessToken();
     if (!token) return alert("Non authentifié.");
-    if (!selectedUserId || !modalAgent) return;
+    if (!selectedUserId || !modalAgent) return alert("Sélectionnez un utilisateur.");
 
     const context = { sources, workflows };
 
@@ -318,7 +325,12 @@ try {
       }),
     });
 
-    const data = await res.json().catch(() => ({}));
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     closePromptModal();
@@ -339,7 +351,12 @@ try {
       body: JSON.stringify({ userId: selectedUserId, agentSlug }),
     });
 
-    const data = await res.json().catch(() => ({}));
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     alert(`OK. Conversations supprimées: ${data?.deleted ?? 0}`);
@@ -358,6 +375,7 @@ try {
   async function createClient() {
     const name = (newClientName || "").trim();
     if (!name) return alert("Nom du client requis.");
+
     const token = await getAccessToken();
     if (!token) return alert("Non authentifié.");
 
@@ -367,16 +385,21 @@ try {
       body: JSON.stringify({ name }),
     });
 
-    const data = await res.json().catch(() => ({}));
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     closeCreateClient();
 
-    // IMPORTANT : sélectionner le client créé si l’API renvoie l’id
     const newId = (data?.clientId || data?.id || "").toString();
     if (newId) setSelectedClientId(newId);
 
     await refreshAll({ keepSelection: true });
+    if (newId) setSelectedClientId(newId);
   }
 
   function openCreateUser() {
@@ -386,9 +409,10 @@ try {
     setNewUserPassword("");
     setCreatedPassword("");
     setCreateUserNote("");
-    setPwdLocked(true); // anti-autofill
+    setPwdLocked(true);
     setCreateUserOpen(true);
   }
+
   function closeCreateUser() {
     setCreateUserOpen(false);
     setNewUserEmail("");
@@ -420,7 +444,12 @@ try {
       }),
     });
 
-    const data = await res.json().catch(() => ({}));
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     if (data?.existing) {
@@ -431,11 +460,9 @@ try {
       setCreatedPassword((data?.tempPassword || "").toString());
     }
 
-    // refresh puis rester sur le bon client
     await refreshAll({ keepSelection: true });
     setSelectedClientId(clientIdForCreate);
 
-    // si l’API renvoie l'id user, le sélectionner
     const newUid = (data?.userId || data?.user_id || "").toString();
     if (newUid) setSelectedUserId(newUid);
   }
@@ -453,7 +480,12 @@ try {
       body: JSON.stringify({ clientId }),
     });
 
-    const data = await res.json().catch(() => ({}));
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     await refreshAll({ keepSelection: false });
@@ -472,10 +504,20 @@ try {
       body: JSON.stringify({ clientId, userId }),
     });
 
-    const data = await res.json().catch(() => ({}));
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     await refreshAll({ keepSelection: true });
+  }
+
+  function goPromptGeneral() {
+    // page déjà générée dans ton projet (vu dans les logs Vercel)
+    window.location.href = "/admin/settings";
   }
 
   return (
@@ -510,7 +552,11 @@ try {
           <div style={styles.box}>
             <div style={styles.clientsHead}>
               <div style={styles.boxTitle}>Clients</div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+
+              <div style={styles.clientsHeadBtns}>
+                <button style={styles.btnPill} onClick={goPromptGeneral} title="Configurer le prompt global">
+                  Prompt général
+                </button>
                 <button style={styles.btnPill} onClick={openCreateClient}>
                   + Client
                 </button>
@@ -541,11 +587,7 @@ try {
                   return (
                     <div key={c.id} style={{ ...styles.clientBlock, ...(activeClient ? styles.clientBlockActive : {}) }}>
                       <div style={styles.clientHeader}>
-                        <div
-                          style={{ cursor: "pointer" }}
-                          onClick={() => setSelectedClientId(c.id)}
-                          title="Sélectionner ce client"
-                        >
+                        <div style={{ cursor: "pointer" }} onClick={() => setSelectedClientId(c.id)} title="Sélectionner ce client">
                           <div style={styles.clientName}>{c.name}</div>
                           <div style={styles.small}>{(c.userCount || 0).toString()} user(s)</div>
                         </div>
@@ -562,7 +604,7 @@ try {
                           const shortId = uid ? `${uid.slice(0, 8)}…` : "(id manquant)";
 
                           return (
-                            <div key={uid || Math.random()} style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                            <div key={uid} style={{ display: "flex", gap: 10, alignItems: "center" }}>
                               <div
                                 style={{ ...styles.userItem, ...(activeUser ? styles.userItemActive : {}) }}
                                 onClick={() => {
@@ -631,7 +673,7 @@ try {
               </div>
             ) : (
               <div style={styles.grid}>
-                {agents.map((a) => {
+                {(agents || []).map((a) => {
                   const assigned = isAssigned(a.id);
                   const cfg = getConfig(a.id);
                   const ctx = cfg?.context || {};
@@ -643,11 +685,7 @@ try {
                     <article key={a.id} style={styles.agentCard}>
                       <div style={styles.agentTop}>
                         <div style={styles.avatarWrap}>
-                          {a.avatar_url ? (
-                            <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
-                          ) : (
-                            <div style={styles.avatarFallback} />
-                          )}
+                          {a.avatar_url ? <img src={a.avatar_url} alt={a.name} style={styles.avatar} /> : <div style={styles.avatarFallback} />}
                         </div>
 
                         <div style={{ flex: 1 }}>
@@ -699,7 +737,7 @@ try {
             />
 
             <div style={styles.row}>
-              <div style={{ flex: 1 }}>
+              <div style={{ flex: 1, minWidth: 280 }}>
                 <div style={styles.modalLabel}>Ajouter une URL (source)</div>
                 <div style={styles.row}>
                   <input
@@ -718,7 +756,7 @@ try {
 
               <div style={{ width: 18 }} />
 
-              <div style={{ width: 320 }}>
+              <div style={{ width: 320, minWidth: 260 }}>
                 <div style={styles.modalLabel}>Uploader un PDF</div>
                 <label style={styles.uploadBox}>
                   <input
@@ -736,4 +774,534 @@ try {
 
             <div style={styles.modalLabel}>Sources</div>
             <div style={styles.sourcesBox}>
-              {sources.length === 0
+              {sources.length === 0 ? (
+                <div style={styles.muted}>Aucune source.</div>
+              ) : (
+                sources.map((s, idx) => (
+                  <div key={idx} style={styles.sourceRow}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 900 }}>
+                        {s.type === "pdf" ? "PDF" : "URL"} — {s.name || s.url || s.path}
+                      </div>
+                      <div style={styles.tiny}>
+                        {s.type === "pdf"
+                          ? `mime: ${s.mime || "application/pdf"} • size: ${s.size || "?"} • path: ${s.path}`
+                          : `url: ${s.url}`}
+                      </div>
+                    </div>
+                    <button style={styles.xBtn} onClick={() => removeSourceAt(idx)} title="Retirer">
+                      ✕
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div style={styles.modalLabel}>Workflows / intégrations</div>
+            <div style={styles.sourcesBox}>
+              <div style={{ display: "grid", gap: 10 }}>
+                <select value={wfProvider} onChange={(e) => setWfProvider(e.target.value)} style={styles.select} name="wf_provider">
+                  <option value="make">Make</option>
+                  <option value="n8n">n8n</option>
+                  <option value="railway">Railway</option>
+                  <option value="custom">Autre</option>
+                </select>
+
+                <input
+                  value={wfName}
+                  onChange={(e) => setWfName(e.target.value)}
+                  placeholder="Nom (ex: Relance facture, Envoi devis...)"
+                  style={styles.input}
+                  autoComplete="off"
+                  name="wf_name"
+                />
+
+                <input
+                  value={wfUrl}
+                  onChange={(e) => setWfUrl(e.target.value)}
+                  placeholder="URL webhook (https://...)"
+                  style={styles.input}
+                  autoComplete="off"
+                  name="wf_url"
+                />
+
+                <button style={styles.btnAssign} onClick={addWorkflow}>
+                  Ajouter
+                </button>
+
+                {(workflows || []).length === 0 ? (
+                  <div style={styles.muted}>Aucun workflow.</div>
+                ) : (
+                  (workflows || []).map((w, idx) => (
+                    <div key={idx} style={styles.sourceRow}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 900 }}>
+                          {String(w?.provider || "custom").toUpperCase()} — {w?.name || "(sans nom)"}
+                        </div>
+                        <div style={styles.tiny}>{w?.url || ""}</div>
+                      </div>
+                      <button style={styles.xBtn} onClick={() => removeWorkflowAt(idx)} title="Retirer">
+                        ✕
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div style={styles.modalActions}>
+              <button style={styles.btnGhost} onClick={closePromptModal}>
+                Annuler
+              </button>
+              <button style={styles.btnAssign} onClick={savePromptModal} disabled={uploading}>
+                Enregistrer
+              </button>
+            </div>
+
+            <div style={styles.small}>Les sources sont enregistrées dans context.sources (JSONB). Les workflows dans context.workflows.</div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL Create Client */}
+      {createClientOpen && (
+        <div style={styles.modalOverlay} onClick={closeCreateClient}>
+          <div style={styles.smallModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalTitle}>Créer un client</div>
+            <div style={styles.modalLabel}>Nom du client</div>
+            <input
+              value={newClientName}
+              onChange={(e) => setNewClientName(e.target.value)}
+              style={styles.input}
+              placeholder="Ex: Bcontact"
+              name="new_client_name"
+              autoComplete="off"
+            />
+            <div style={styles.modalActions}>
+              <button style={styles.btnGhost} onClick={closeCreateClient}>
+                Annuler
+              </button>
+              <button style={styles.btnAssign} onClick={createClient}>
+                Créer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL Create User */}
+      {createUserOpen && (
+        <div style={styles.modalOverlay} onClick={closeCreateUser}>
+          <div style={styles.smallModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalTitle}>Créer un utilisateur</div>
+
+            <div style={styles.modalLabel}>Email</div>
+            <input
+              value={newUserEmail}
+              onChange={(e) => setNewUserEmail(e.target.value)}
+              style={styles.input}
+              placeholder="test@test.fr"
+              name="new_user_email"
+              autoComplete="new-username"
+              autoCapitalize="none"
+              spellCheck={false}
+            />
+
+            <div style={styles.modalLabel}>Mot de passe (optionnel)</div>
+            <input
+              type="password"
+              value={newUserPassword}
+              onChange={(e) => setNewUserPassword(e.target.value)}
+              style={styles.input}
+              placeholder="Laisser vide pour générer automatiquement"
+              name="new_user_password"
+              autoComplete="new-password"
+              readOnly={pwdLocked}
+              onFocus={() => setPwdLocked(false)}
+            />
+
+            <div style={styles.modalLabel}>Rôle</div>
+            <select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value)} style={styles.select} name="new_user_role">
+              <option value="user">user</option>
+              <option value="admin">admin</option>
+            </select>
+
+            {!!createUserNote && <div style={styles.noteOk}>{createUserNote}</div>}
+            {!!createdPassword && (
+              <div style={styles.notePwd}>
+                Mot de passe temporaire : <span style={{ fontFamily: "monospace" }}>{createdPassword}</span>
+              </div>
+            )}
+
+            <div style={styles.modalActions}>
+              <button style={styles.btnGhost} onClick={closeCreateUser}>
+                Annuler
+              </button>
+              <button style={styles.btnAssign} onClick={createUser}>
+                Créer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </main>
+  );
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+const styles = {
+  page: {
+    minHeight: "100vh",
+    background: "linear-gradient(135deg,#05060a,#0a0d16)",
+    color: "rgba(238,242,255,.92)",
+    fontFamily: '"Segoe UI", Arial, sans-serif',
+  },
+
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "14px 16px 0",
+    flexWrap: "wrap",
+  },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 280, flexWrap: "wrap" },
+  headerRight: { display: "flex", alignItems: "center", gap: 10 },
+  headerLogo: { height: 26, width: "auto", opacity: 0.95, display: "block" },
+  headerTitle: { fontWeight: 900, opacity: 0.9 },
+
+  headerBtn: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.25)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  headerBtnDanger: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+
+  wrap: { display: "grid", gridTemplateColumns: "420px 1fr", gap: 16, padding: 18 },
+
+  box: {
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: 16,
+    background: "rgba(0,0,0,.35)",
+    backdropFilter: "blur(10px)",
+    padding: 14,
+    boxShadow: "0 18px 45px rgba(0,0,0,.55)",
+  },
+  boxTitle: { fontWeight: 900, marginBottom: 10 },
+
+  clientsHead: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 },
+  clientsHeadBtns: { display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" },
+
+  btnPill: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.08)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+
+  search: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.92)",
+    outline: "none",
+    marginBottom: 12,
+    fontWeight: 800,
+  },
+
+  left: {},
+  right: {},
+
+  clientBlock: {
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.03)",
+    overflow: "hidden",
+  },
+  clientBlockActive: { borderColor: "rgba(255,140,40,.35)" },
+  clientHeader: {
+    padding: 12,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    background: "rgba(0,0,0,.18)",
+  },
+  clientName: { fontWeight: 900, fontSize: 14 },
+  userList: { padding: 10, display: "grid", gap: 10 },
+  userItem: {
+    flex: 1,
+    padding: 10,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(255,255,255,.03)",
+    cursor: "pointer",
+  },
+  userItemActive: { borderColor: "rgba(80,120,255,.35)", background: "rgba(80,120,255,.08)" },
+
+  deleteBtn: {
+    borderRadius: 999,
+    padding: "8px 10px",
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+
+  small: { fontSize: 12, opacity: 0.75, fontWeight: 800 },
+  tiny: { fontSize: 11, opacity: 0.7, fontWeight: 800 },
+  muted: { opacity: 0.75, fontWeight: 800, fontSize: 13 },
+  alert: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    fontWeight: 900,
+  },
+
+  diag: {
+    display: "grid",
+    gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+    gap: 10,
+    padding: 10,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(255,255,255,.03)",
+    marginBottom: 12,
+    fontSize: 12,
+    fontWeight: 800,
+    opacity: 0.9,
+  },
+
+  grid: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 14 },
+  agentCard: {
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.03)",
+    padding: 14,
+    boxShadow: "0 14px 40px rgba(0,0,0,.45)",
+  },
+  agentTop: { display: "flex", gap: 12, alignItems: "center", marginBottom: 12 },
+
+  avatarWrap: {
+    width: 64,
+    height: 64,
+    borderRadius: 999,
+    overflow: "hidden",
+    border: "1px solid rgba(255,255,255,.12)",
+    flex: "0 0 auto",
+    background: "rgba(255,255,255,.05)",
+  },
+  avatar: { width: "100%", height: "100%", objectFit: "cover", objectPosition: "center 15%" },
+  avatarFallback: { width: "100%", height: "100%", background: "rgba(255,255,255,.06)" },
+
+  agentName: { fontWeight: 900, fontSize: 16 },
+  agentRole: { fontWeight: 800, opacity: 0.8, fontSize: 12, marginTop: 2 },
+  agentActions: { display: "grid", gap: 10 },
+
+  btnAssign: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  btnAssigned: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,140,40,.35)",
+    background: "rgba(255,140,40,.12)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  btnGhost: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.20)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  btnDangerGhost: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,.65)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+    zIndex: 9999,
+  },
+  modal: {
+    width: "min(980px, 96vw)",
+    maxHeight: "92vh",
+    overflow: "auto",
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.70)",
+    boxShadow: "0 34px 90px rgba(0,0,0,.62)",
+    padding: 16,
+    backdropFilter: "blur(12px)",
+  },
+  smallModal: {
+    width: "min(520px, 96vw)",
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.70)",
+    boxShadow: "0 34px 90px rgba(0,0,0,.62)",
+    padding: 16,
+    backdropFilter: "blur(12px)",
+  },
+
+  modalTitle: { fontWeight: 900, fontSize: 16, marginBottom: 10 },
+  modalLabel: { fontWeight: 900, marginTop: 10, marginBottom: 6, opacity: 0.9 },
+  textarea: {
+    width: "100%",
+    minHeight: 120,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.92)",
+    padding: 12,
+    outline: "none",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontSize: 13,
+    fontWeight: 700,
+  },
+  modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 12, flexWrap: "wrap" },
+
+  row: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
+  input: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.92)",
+    outline: "none",
+    fontWeight: 800,
+  },
+  select: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.92)",
+    outline: "none",
+    fontWeight: 800,
+  },
+
+  uploadBox: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    height: 44,
+    borderRadius: 12,
+    border: "1px dashed rgba(255,255,255,.25)",
+    background: "rgba(255,255,255,.04)",
+    cursor: "pointer",
+    fontWeight: 900,
+  },
+  sourcesBox: {
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(255,255,255,.03)",
+    padding: 10,
+    display: "grid",
+    gap: 10,
+    maxHeight: 260,
+    overflow: "auto",
+  },
+  sourceRow: {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    padding: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.15)",
+  },
+  xBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  xBtnMini: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    flex: "0 0 auto",
+  },
+
+  noteOk: {
+    marginTop: 12,
+    padding: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(80,120,255,.35)",
+    background: "rgba(80,120,255,.10)",
+    fontWeight: 900,
+  },
+  notePwd: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(255,140,40,.35)",
+    background: "rgba(255,140,40,.10)",
+    fontWeight: 900,
+  },
+};
