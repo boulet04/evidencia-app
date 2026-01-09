@@ -187,7 +187,13 @@ export default function Admin() {
       body: JSON.stringify({ userId: selectedUserId, agentId, assign }),
     });
 
-    const data = await res.json().catch(() => ({}));
+  let data = {};
+try {
+  data = await res.json();
+} catch {
+  data = {};
+}
+
     if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
 
     await refreshAll({ keepSelection: true });
