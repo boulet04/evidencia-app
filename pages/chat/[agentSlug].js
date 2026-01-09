@@ -10,25 +10,21 @@ function safeStr(v) {
 function extractFirstNameFromSystemPrompt(systemPrompt) {
   const sp = safeStr(systemPrompt);
 
-  // Tolère :
-  // - tu travail pour Chloé
-  // - tu travailles pour "Chloé"
-  // - Tu travailles pour: Chloé
-  // - tu travaille pour prénom de la personne
-  const m = sp.match(/tu\s+travail(?:les)?\s+pour\s*:?\s*"?([^"\n\r]+)"?/i);
+  // Exemples acceptés :
+  // "Tu travailles pour Jean Baptiste"
+  // "Tu travailles pour \"Jean Baptiste\""
+  // "Tu travailles pour: Jean Baptiste"
+  const m = sp.match(/tu\s+travail(?:les)?\s+pour\s*:?\s*"?([^\n\r"]+)"?/i);
   const name = (m?.[1] || "").trim();
 
   if (!name) return "";
-  if (name.length > 40) return ""; // garde-fou
-  // Capitalisation simple
+  if (name.length > 40) return "";
   return name.charAt(0).toUpperCase() + name.slice(1);
 }
 
 function buildGreeting(systemPrompt) {
   const firstName = extractFirstNameFromSystemPrompt(systemPrompt);
-  return firstName
-    ? `Bonjour ${firstName}, comment puis-je vous aider ?`
-    : "Bonjour, comment puis-je vous aider ?";
+  return firstName ? `Bonjour ${firstName}, comment puis-je vous aider ?` : "Bonjour, comment puis-je vous aider ?";
 }
 
 export default function ChatAgentSlugPage() {
@@ -41,19 +37,21 @@ export default function ChatAgentSlugPage() {
   const [email, setEmail] = useState("");
   const [userId, setUserId] = useState("");
 
-  const [agent, setAgent] = useState(null); // { id, slug, name, description, avatar_url }
-  const [conversations, setConversations] = useState([]); // [{id, created_at, title}]
+  const [agent, setAgent] = useState(null);
+  const [conversations, setConversations] = useState([]);
   const [conversationId, setConversationId] = useState(null);
 
-  const [messages, setMessages] = useState([]); // [{id, role, content, created_at}]
+  const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [errMsg, setErrMsg] = useState("");
 
-  // Mobile sidebar (historique)
   const [sidebarOpen, setSidebarOpen] = useState(false);
-
   const endRef = useRef(null);
+
+  // Greeting UI (toujours affiché si conversation vide)
+  const [systemPromptForGreeting, setSystemPromptForGreeting] = useState("");
+  const greetingText = useMemo(() => buildGreeting(systemPromptForGreeting), [systemPromptForGreeting]);
 
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
@@ -76,11 +74,11 @@ export default function ChatAgentSlugPage() {
     window.location.href = "/login";
   }
 
-  async function goAdmin() {
+  function goAdmin() {
     window.location.href = "/admin";
   }
 
-  async function goAgents() {
+  function goAgents() {
     window.location.href = "/agents";
   }
 
@@ -97,6 +95,7 @@ export default function ChatAgentSlugPage() {
 
   async function loadAgent(slug) {
     if (!slug) return null;
+
     const { data, error } = await supabase
       .from("agents")
       .select("id,slug,name,description,avatar_url")
@@ -109,11 +108,11 @@ export default function ChatAgentSlugPage() {
     return data;
   }
 
-  async function loadConversations(slug) {
-    // conversations stockent agent_slug dans ton schéma
+  async function loadConversations(uid, slug) {
     const { data, error } = await supabase
       .from("conversations")
-      .select("id,created_at,title,agent_slug,archived")
+      .select("id,created_at,title,agent_slug,archived,user_id")
+      .eq("user_id", uid)
       .eq("agent_slug", slug)
       .eq("archived", false)
       .order("created_at", { ascending: false });
@@ -123,16 +122,18 @@ export default function ChatAgentSlugPage() {
     return data || [];
   }
 
-  async function createConversation(slug) {
+  async function createConversation(uid, slug) {
     const title = `Conversation — ${new Date().toLocaleString()}`;
+
     const { data, error } = await supabase
       .from("conversations")
       .insert({
+        user_id: uid,
         agent_slug: slug,
         title,
         archived: false,
       })
-      .select("id,created_at,title,agent_slug,archived")
+      .select("id,created_at,title,agent_slug,archived,user_id")
       .maybeSingle();
 
     if (error) throw error;
@@ -156,94 +157,65 @@ export default function ChatAgentSlugPage() {
     }
   }
 
-  async function fetchUserSystemPromptForAgent(agentId) {
-    // Récupère system_prompt dans client_agent_configs (si RLS OK).
-    // Sinon, fallback vide => greeting générique.
+  async function fetchUserSystemPromptForAgent(uid, agentId) {
+    // Si RLS bloque la lecture, on revient vide (=> greeting générique).
     const { data, error } = await supabase
       .from("client_agent_configs")
       .select("system_prompt")
-      .eq("user_id", userId)
+      .eq("user_id", uid)
       .eq("agent_id", agentId)
       .maybeSingle();
 
-    if (error) {
-      // RLS ou autre : on n’empêche pas l’app, on fallback.
-      return "";
-    }
+    if (error) return "";
     return safeStr(data?.system_prompt).trim();
   }
 
-  async function ensureGreetingIfEmpty(convId, agentId) {
-    // 1) relire messages (source de vérité)
-    const current = await loadMessages(convId);
-    if (current.length > 0) return;
-
-    // 2) calcul greeting (avec prénom si trouvable)
-    const sp = await fetchUserSystemPromptForAgent(agentId);
-    const greeting = buildGreeting(sp);
-
-    // 3) insert en DB
-    const { data, error } = await supabase
-      .from("messages")
-      .insert({
-        conversation_id: convId,
-        role: "assistant",
-        content: greeting,
-      })
-      .select("id,role,content,created_at")
-      .maybeSingle();
-
-    if (!error && data) {
-      setMessages([data]);
-    } else {
-      // fallback UI si insert refusée (RLS), sans casser
-      setMessages([
-        {
-          id: "local-greeting",
-          role: "assistant",
-          content: greeting,
-          created_at: new Date().toISOString(),
-        },
-      ]);
+  async function primeGreetingPrompt(uid, agentId) {
+    if (!uid || !agentId) {
+      setSystemPromptForGreeting("");
+      return;
     }
+    const sp = await fetchUserSystemPromptForAgent(uid, agentId);
+    setSystemPromptForGreeting(sp || "");
   }
 
-  async function selectConversation(convId) {
+  async function selectConversation(uid, convId) {
     setConversationId(convId);
     await loadMessages(convId);
     if (agent?.id) {
-      await ensureGreetingIfEmpty(convId, agent.id);
+      await primeGreetingPrompt(uid, agent.id);
     }
   }
 
   async function refreshAll() {
     setErrMsg("");
     setLoading(true);
+
     try {
       const slug = safeStr(agentSlug);
       if (!slug) return;
 
-      await loadMe();
+      const me = await loadMe();
+      if (!me?.id) return;
+
       const a = await loadAgent(slug);
 
-      const convs = await loadConversations(slug);
-
-      // Conversation par défaut :
-      // - si déjà une conversation, prendre la première
-      // - sinon créer une nouvelle conversation
+      let convs = await loadConversations(me.id, slug);
       let convId = convs?.[0]?.id || null;
+
       if (!convId) {
-        const created = await createConversation(slug);
+        const created = await createConversation(me.id, slug);
         convId = created?.id || null;
-        // recharge la liste pour inclure la nouvelle
-        await loadConversations(slug);
+        convs = await loadConversations(me.id, slug);
       }
 
       setConversationId(convId);
 
+      // IMPORTANT : on "prime" le greeting prompt ici
+      await primeGreetingPrompt(me.id, a.id);
+
       if (convId) {
         await loadMessages(convId);
-        await ensureGreetingIfEmpty(convId, a.id);
       }
     } catch (e) {
       setErrMsg(e?.message || "Erreur interne.");
@@ -264,20 +236,23 @@ export default function ChatAgentSlugPage() {
       const slug = safeStr(agentSlug);
       if (!slug) return;
 
-      const created = await createConversation(slug);
-      await loadConversations(slug);
+      const me = await supabase.auth.getUser();
+      const uid = me?.data?.user?.id;
+      if (!uid) return (window.location.href = "/login");
+
+      const created = await createConversation(uid, slug);
+      await loadConversations(uid, slug);
 
       if (created?.id) {
         setConversationId(created.id);
-        // On force greeting
-        if (agent?.id) {
-          await ensureGreetingIfEmpty(created.id, agent.id);
-        } else {
-          await loadMessages(created.id);
-        }
+
+        // Très important : conversation neuve => messages vides
+        setMessages([]);
+
+        // On prime le greeting prompt (pour personnaliser)
+        if (agent?.id) await primeGreetingPrompt(uid, agent.id);
       }
 
-      // Mobile : referme l’historique
       setSidebarOpen(false);
     } catch (e) {
       setErrMsg(e?.message || "Erreur création conversation.");
@@ -295,7 +270,7 @@ export default function ChatAgentSlugPage() {
     setText("");
 
     try {
-      // 1) insert user message
+      // Message user en DB
       const { data: insertedUser, error: insErr } = await supabase
         .from("messages")
         .insert({
@@ -310,16 +285,13 @@ export default function ChatAgentSlugPage() {
 
       setMessages((prev) => [...prev, insertedUser]);
 
-      // 2) call API (Mistral) + conversationId pour historique côté serveur
+      // Réponse agent via API
       const token = await getAccessToken();
       if (!token) throw new Error("Non authentifié.");
 
       const resp = await fetch("/api/chat", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           message: content,
           agentSlug: agent.slug,
@@ -328,13 +300,11 @@ export default function ChatAgentSlugPage() {
       });
 
       const json = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        throw new Error(json?.error || `Erreur API (${resp.status})`);
-      }
+      if (!resp.ok) throw new Error(json?.error || `Erreur API (${resp.status})`);
 
       const reply = safeStr(json?.reply).trim() || "Réponse vide.";
 
-      // 3) insert assistant reply
+      // Message assistant en DB
       const { data: insertedAsst, error: asstErr } = await supabase
         .from("messages")
         .insert({
@@ -348,9 +318,6 @@ export default function ChatAgentSlugPage() {
       if (asstErr) throw asstErr;
 
       setMessages((prev) => [...prev, insertedAsst]);
-
-      // 4) optionnel : mettre à jour le titre si vide
-      // (non bloquant)
     } catch (e) {
       setErrMsg(e?.message || "Erreur interne.");
     } finally {
@@ -363,11 +330,11 @@ export default function ChatAgentSlugPage() {
     return agent.name ? `${agent.name} — Chat` : "Chat";
   }, [agent]);
 
-  const sidebarStyle = useMemo(() => {
-    if (!styles.sidebarBase) return {};
-    if (!sidebarOpen) return styles.sidebarBase;
-    return { ...styles.sidebarBase, ...styles.sidebarMobileOpen };
-  }, [sidebarOpen]);
+  // Greet visible only if conversation has zero persisted messages
+  const showGreeting = useMemo(() => {
+    if (loading || loadingMsgs) return false;
+    return (messages?.length || 0) === 0;
+  }, [loading, loadingMsgs, messages?.length]);
 
   if (loading) {
     return (
@@ -419,8 +386,7 @@ export default function ChatAgentSlugPage() {
       </div>
 
       <div style={styles.wrap}>
-        {/* SIDEBAR */}
-        <aside style={sidebarStyle}>
+        <aside style={styles.sidebar}>
           <div style={styles.box}>
             <div style={styles.sideTop}>
               <div style={styles.boxTitle}>Conversations</div>
@@ -449,28 +415,20 @@ export default function ChatAgentSlugPage() {
                     key={c.id}
                     style={{ ...styles.convItem, ...(active ? styles.convItemActive : {}) }}
                     onClick={() => {
-                      selectConversation(c.id);
-                      setSidebarOpen(false);
+                      selectConversation(userId, c.id);
                     }}
                     title={c.title || ""}
                   >
-                    <div style={{ fontWeight: 900, fontSize: 13 }}>
-                      {c.title || "Conversation"}
-                    </div>
-                    <div style={styles.tiny}>
-                      {new Date(c.created_at).toLocaleString()}
-                    </div>
+                    <div style={{ fontWeight: 900, fontSize: 13 }}>{c.title || "Conversation"}</div>
+                    <div style={styles.tiny}>{new Date(c.created_at).toLocaleString()}</div>
                   </button>
                 );
               })}
-              {conversations.length === 0 && (
-                <div style={styles.muted}>Aucune conversation.</div>
-              )}
+              {conversations.length === 0 && <div style={styles.muted}>Aucune conversation.</div>}
             </div>
           </div>
         </aside>
 
-        {/* CHAT */}
         <section style={styles.main}>
           <div style={styles.boxChat}>
             <div style={styles.chatTop}>
@@ -501,15 +459,23 @@ export default function ChatAgentSlugPage() {
                 <div style={styles.muted}>Chargement des messages…</div>
               ) : (
                 <div style={styles.msgList}>
+                  {/* Greeting UI (toujours affiché si conversation vide) */}
+                  {showGreeting && (
+                    <div style={{ ...styles.msgRow, justifyContent: "flex-start" }}>
+                      <div style={{ ...styles.bubble, ...styles.bubbleAsst }}>
+                        <div style={styles.bubbleText}>{greetingText}</div>
+                        <div style={styles.bubbleMeta}>{new Date().toLocaleTimeString()}</div>
+                      </div>
+                    </div>
+                  )}
+
                   {messages.map((m) => {
                     const isUser = m.role === "user";
                     return (
                       <div key={m.id} style={{ ...styles.msgRow, justifyContent: isUser ? "flex-end" : "flex-start" }}>
                         <div style={{ ...styles.bubble, ...(isUser ? styles.bubbleUser : styles.bubbleAsst) }}>
                           <div style={styles.bubbleText}>{m.content}</div>
-                          <div style={styles.bubbleMeta}>
-                            {new Date(m.created_at).toLocaleTimeString()}
-                          </div>
+                          <div style={styles.bubbleMeta}>{new Date(m.created_at).toLocaleTimeString()}</div>
                         </div>
                       </div>
                     );
@@ -531,18 +497,14 @@ export default function ChatAgentSlugPage() {
               />
 
               <div style={styles.composerActions}>
-                <button
-                  style={!sending ? styles.btnPrimary : styles.btnDisabled}
-                  onClick={sendMessage}
-                  disabled={sending}
-                >
+                <button style={!sending ? styles.btnPrimary : styles.btnDisabled} onClick={sendMessage} disabled={sending}>
                   {sending ? "Envoi…" : "Envoyer"}
                 </button>
               </div>
             </div>
 
             <div style={styles.tiny}>
-              Astuce : le message d’accueil est inséré automatiquement uniquement si la conversation est vide.
+              La phrase d’accueil est affichée automatiquement quand la conversation est vide (sans dépendre de la base).
             </div>
           </div>
         </section>
@@ -600,6 +562,8 @@ const styles = {
     padding: 18,
   },
 
+  sidebar: { position: "relative", zIndex: 2 },
+
   box: {
     border: "1px solid rgba(255,255,255,.12)",
     borderRadius: 16,
@@ -621,19 +585,6 @@ const styles = {
   },
 
   boxTitle: { fontWeight: 900, marginBottom: 6 },
-
-  // Sidebar responsive
-  sidebarBase: {
-    position: "relative",
-    zIndex: 2,
-  },
-  sidebarMobileOpen: {
-    // Sur mobile, on passera en overlay via media (ci-dessous),
-    // mais on garde un style safe si nécessaire.
-  },
-
-  left: {},
-  main: {},
 
   sideTop: {
     display: "flex",
@@ -757,10 +708,7 @@ const styles = {
     textAlign: "right",
   },
 
-  composer: {
-    display: "grid",
-    gap: 10,
-  },
+  composer: { display: "grid", gap: 10 },
 
   textarea: {
     width: "100%",
@@ -777,11 +725,7 @@ const styles = {
     fontWeight: 700,
   },
 
-  composerActions: {
-    display: "flex",
-    justifyContent: "flex-end",
-    gap: 10,
-  },
+  composerActions: { display: "flex", justifyContent: "flex-end", gap: 10 },
 
   btnPrimary: {
     padding: "12px 16px",
@@ -819,8 +763,6 @@ const styles = {
   },
 
   center: {
-    position: "relative",
-    zIndex: 1,
     minHeight: "100vh",
     display: "grid",
     placeItems: "center",
