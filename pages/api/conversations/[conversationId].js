@@ -6,17 +6,45 @@ function getBearerToken(req) {
   return m ? m[1] : null;
 }
 
-export default async function handler(req, res) {
-  const { conversationId } = req.query;
+function capitalize(s) {
+  if (!s) return "";
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
-  // Only DELETE for this endpoint
-  if (req.method !== "DELETE") {
-    res.setHeader("Allow", "DELETE");
-    return res.status(405).json({ error: "Method Not Allowed" });
+function guessFirstNameFromEmail(email) {
+  if (!email) return "";
+  const local = email.split("@")[0] || "";
+  // jb.bernier -> jb / bernier ; on prend le 1er segment "humain"
+  const parts = local.split(/[._-]+/).filter(Boolean);
+  if (parts.length === 0) return "";
+  // si le premier segment est très court (ex: jb), tenter le second
+  const cand = parts[0].length <= 2 && parts[1] ? parts[1] : parts[0];
+  return capitalize(cand);
+}
+
+function extractFirstName(user) {
+  const md = user?.user_metadata || {};
+  const direct =
+    md.first_name ||
+    md.prenom ||
+    md.firstname ||
+    md.given_name ||
+    md.name ||
+    md.full_name ||
+    md.fullName;
+
+  if (typeof direct === "string" && direct.trim()) {
+    const first = direct.trim().split(/\s+/)[0];
+    return capitalize(first);
   }
 
-  if (!conversationId || typeof conversationId !== "string") {
-    return res.status(400).json({ error: "Missing conversationId" });
+  return guessFirstNameFromEmail(user?.email || "");
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST");
+    return res.status(405).json({ error: "Method Not Allowed" });
   }
 
   const token = getBearerToken(req);
@@ -33,42 +61,61 @@ export default async function handler(req, res) {
 
   const supabaseAdmin = createClient(supabaseUrl, serviceKey);
 
-  // Auth user from access token
-  const { data: userData, error: userError } = await supabaseAdmin.auth.getUser(
-    token
-  );
-
+  const { data: userData, error: userError } = await supabaseAdmin.auth.getUser(token);
   if (userError || !userData?.user) {
     return res.status(401).json({ error: "Invalid token" });
   }
 
-  const userId = userData.user.id;
+  const user = userData.user;
+  const userId = user.id;
 
-  // Ensure ownership
-  const { data: conv, error: convError } = await supabaseAdmin
-    .from("conversations")
-    .select("id,user_id")
-    .eq("id", conversationId)
+  const { agent_slug } = req.body || {};
+  if (!agent_slug || typeof agent_slug !== "string") {
+    return res.status(400).json({ error: "Missing agent_slug" });
+  }
+
+  // Optionnel : charger le nom d’agent pour titre
+  const { data: agent } = await supabaseAdmin
+    .from("agents")
+    .select("name")
+    .eq("slug", agent_slug)
     .maybeSingle();
 
-  if (convError) return res.status(500).json({ error: convError.message });
-  if (!conv) return res.status(404).json({ error: "Conversation not found" });
-  if (conv.user_id !== userId) return res.status(403).json({ error: "Forbidden" });
+  const title = agent?.name ? `Discussion avec ${agent.name}` : "Nouvelle conversation";
 
-  // Delete messages first (safe even if FK cascade exists)
-  const { error: delMsgErr } = await supabaseAdmin
-    .from("messages")
-    .delete()
-    .eq("conversation_id", conversationId);
-
-  if (delMsgErr) return res.status(500).json({ error: delMsgErr.message });
-
-  const { error: delConvErr } = await supabaseAdmin
+  // 1) create conversation
+  const { data: conv, error: convErr } = await supabaseAdmin
     .from("conversations")
-    .delete()
-    .eq("id", conversationId);
+    .insert({
+      user_id: userId,
+      agent_slug,
+      title,
+      archived: false,
+    })
+    .select("id,title,created_at,agent_slug")
+    .single();
 
-  if (delConvErr) return res.status(500).json({ error: delConvErr.message });
+  if (convErr) return res.status(500).json({ error: convErr.message });
 
-  return res.status(204).end();
+  // 2) create welcome message
+  const firstName = extractFirstName(user);
+  const welcome = firstName
+    ? `Bonjour ${firstName}, comment puis-je vous aider ?`
+    : "Bonjour, comment puis-je vous aider ?";
+
+  const { error: msgErr } = await supabaseAdmin.from("messages").insert({
+    conversation_id: conv.id,
+    role: "assistant",
+    content: welcome,
+  });
+
+  // Si insertion message échoue, on retourne quand même la conversation
+  if (msgErr) {
+    return res.status(201).json({
+      conversation: conv,
+      warning: `Conversation created but welcome message failed: ${msgErr.message}`,
+    });
+  }
+
+  return res.status(201).json({ conversation: conv });
 }
