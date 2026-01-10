@@ -73,14 +73,13 @@ export default function ChatPage() {
   const [sending, setSending] = useState(false);
 
   const accessToken = useMemo(() => session?.access_token || null, [session]);
-
-  const fallbackFirstName = useMemo(() => extractFirstNameFromUser(user), [user]);
+  const firstName = useMemo(() => extractFirstNameFromUser(user), [user]);
   const [welcomeNameFromPrompt, setWelcomeNameFromPrompt] = useState("");
 
   const messagesEndRef = useRef(null);
 
   function welcomeText() {
-    const name = welcomeNameFromPrompt || fallbackFirstName;
+    const name = welcomeNameFromPrompt || firstName;
     return name
       ? `Bonjour ${name}, comment puis-je vous aider ?`
       : "Bonjour, comment puis-je vous aider ?";
@@ -232,8 +231,8 @@ export default function ChatPage() {
 
   // Création via API
   async function createConversationViaApi() {
-    if (!accessToken) throw new Error("Missing access token");
-    if (!agentSlug) throw new Error("Missing agent slug");
+    if (!accessToken) throw new Error("Session invalide");
+    if (!agentSlug) throw new Error("Agent manquant");
 
     const resp = await fetch("/api/conversations", {
       method: "POST",
@@ -263,8 +262,7 @@ export default function ChatPage() {
       setSelectedConversationId(conv.id);
 
       const title = (conv.title || "").trim();
-      const needsTitle =
-        !title || title.toLowerCase().includes("nouvelle conversation");
+      const needsTitle = !title || title.toLowerCase().includes("nouvelle conversation");
 
       if (needsTitle) {
         const newTitle = defaultConversationTitle();
@@ -295,7 +293,6 @@ export default function ChatPage() {
     try {
       setCreatingConv(true);
       const conv = await createConversationViaApi();
-
       setConversations((prev) => [conv, ...prev]);
       setSelectedConversationId(conv.id);
     } catch (e) {
@@ -347,12 +344,19 @@ export default function ChatPage() {
       return;
     }
 
+    if (!agentSlug) {
+      alert("Aucun agent sélectionné (paramètre manquant).");
+      return;
+    }
+
     try {
       setSending(true);
       setInput("");
 
+      // 1) crée une conversation si besoin
       const convId = await ensureConversationSelected();
 
+      // 2) enregistre le message user (ça marche déjà chez toi)
       const { data: userMsg, error: userMsgErr } = await supabase
         .from("messages")
         .insert({
@@ -363,12 +367,20 @@ export default function ChatPage() {
         .select("id,role,content,created_at")
         .single();
 
-      if (userMsgErr) {
-        console.error("Insert user message error:", userMsgErr);
-        throw userMsgErr;
-      }
-
+      if (userMsgErr) throw userMsgErr;
       setMessages((prev) => [...prev, userMsg]);
+
+      // 3) appelle l’API chat en envoyant L’AGENT sous plusieurs noms
+      const payload = {
+        conversation_id: convId,
+        message: content,
+
+        // IMPORTANT: on envoie plusieurs clés pour matcher ton /api/chat.js
+        agent_slug: agentSlug,
+        agentSlug: agentSlug,
+        agent: agentSlug,
+        slug: agentSlug,
+      };
 
       const resp = await fetch("/api/chat", {
         method: "POST",
@@ -376,21 +388,17 @@ export default function ChatPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${accessToken}`,
         },
-        body: JSON.stringify({
-          conversation_id: convId,
-          agent_slug: agentSlug,
-          message: content,
-        }),
+        body: JSON.stringify(payload),
       });
 
+      const j = await resp.json().catch(() => null);
+
       if (!resp.ok) {
-        const j = await resp.json().catch(() => null);
-        console.error("Chat API error payload:", j);
+        console.error("Chat API error:", j);
         throw new Error(j?.error || "Chat API error");
       }
 
-      const data = await resp.json();
-      const assistantText = data?.reply || data?.content || "";
+      const assistantText = j?.reply || j?.content || j?.message || "";
 
       if (assistantText) {
         const { data: asstMsg, error: asstErr } = await supabase
@@ -403,11 +411,7 @@ export default function ChatPage() {
           .select("id,role,content,created_at")
           .single();
 
-        if (asstErr) {
-          console.error("Insert assistant message error:", asstErr);
-        } else if (asstMsg) {
-          setMessages((prev) => [...prev, asstMsg]);
-        }
+        if (!asstErr && asstMsg) setMessages((prev) => [...prev, asstMsg]);
       }
     } catch (e) {
       console.error("Send error:", e);
@@ -417,6 +421,7 @@ export default function ChatPage() {
     }
   }
 
+  // Afficher l’accueil même si aucune conversation n’existe encore
   const showWelcome =
     !loadingMsgs &&
     ((selectedConversationId && (messages?.length || 0) === 0) || !selectedConversationId);
@@ -549,7 +554,6 @@ export default function ChatPage() {
                 disabled={sending}
               />
 
-              {/* ICÔNE MICRO SVG (plus lisible et toujours affichée) */}
               <button className="btn mic" type="button" title="Dictée vocale (à connecter)">
                 <svg
                   className="micIcon"
@@ -574,9 +578,7 @@ export default function ChatPage() {
             </div>
 
             <div className="chatFooter">
-              <div className="mutedSmall">
-                {selectedConversationId ? `Conversation: ${selectedConversationId}` : ""}
-              </div>
+              <div className="mutedSmall">{selectedConversationId ? `Conversation: ${selectedConversationId}` : ""}</div>
             </div>
           </div>
         </main>
@@ -594,13 +596,7 @@ export default function ChatPage() {
         .btn.logout { border-color: rgba(255,80,80,0.35); }
 
         .brand { display: flex; align-items: center; justify-content: center; flex: 1; text-align: center; }
-        .brandLogo {
-          height: 26px;
-          width: auto;
-          max-width: 320px;
-          object-fit: contain;
-          display: block;
-        }
+        .brandLogo { height: 26px; width: auto; max-width: 320px; object-fit: contain; display: block; }
 
         .topbarRight { display: flex; gap: 10px; align-items: center; }
         .pill { border: 1px solid rgba(255,255,255,0.12); padding: 8px 10px; border-radius: 999px; font-size: 12px; opacity: 0.9; }
@@ -628,7 +624,12 @@ export default function ChatPage() {
         .agentLeft { display: flex; gap: 12px; align-items: center; }
         .agentAvatar { width: 44px; height: 44px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
           background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; }
-        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; }
+        .agentAvatar img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          object-position: center 20%;
+        }
         .avatarFallback { font-weight: 900; opacity: 0.85; }
         .agentName { font-weight: 900; }
         .agentRole { font-size: 12px; color: rgba(233,238,246,0.65); margin-top: 2px; }
@@ -647,8 +648,6 @@ export default function ChatPage() {
           background: rgba(0,0,0,0.25); color: #e9eef6; padding: 0 14px; outline: none; }
         .btn.send { border-color: rgba(255,130,30,0.35); background: rgba(255,130,30,0.12); }
         .btn.mic { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; padding: 0; }
-
-        /* Taille/visibilité du micro */
         .micIcon { width: 20px; height: 20px; display: block; }
 
         .chatFooter { padding: 10px 14px 14px; }
