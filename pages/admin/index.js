@@ -61,6 +61,20 @@ export default function Admin() {
     window.location.href = "/agents";
   }
 
+  // NOUVEAU: ouvrir la page de liste/suppression avec présélection
+  function goConversationDeletion(agentSlug) {
+    if (!selectedClientId) return alert("Sélectionnez un client.");
+    if (!selectedUserId) return alert("Sélectionnez un utilisateur.");
+    if (!agentSlug) return alert("Agent manquant.");
+
+    const params = new URLSearchParams();
+    params.set("client_id", selectedClientId);
+    params.set("user_id", selectedUserId);
+    params.set("agent_slug", agentSlug);
+
+    window.location.href = `/admin/conversations?${params.toString()}`;
+  }
+
   async function refreshAll({ keepSelection = true } = {}) {
     setLoading(true);
     setMsg("");
@@ -335,31 +349,6 @@ export default function Admin() {
 
     closePromptModal();
     await refreshAll({ keepSelection: true });
-  }
-
-  async function deleteAgentConversations(agentSlug, agentName) {
-    if (!selectedUserId) return alert("Sélectionnez un utilisateur.");
-    const ok = window.confirm(`Supprimer toutes les conversations de "${agentName}" pour cet utilisateur ?`);
-    if (!ok) return;
-
-    const token = await getAccessToken();
-    if (!token) return alert("Non authentifié.");
-
-    const res = await fetch("/api/admin/delete-agent-conversations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ userId: selectedUserId, agentSlug }),
-    });
-
-    let data = {};
-    try {
-      data = await res.json();
-    } catch {
-      data = {};
-    }
-    if (!res.ok) return alert(`Erreur (${res.status}) : ${data?.error || "?"}`);
-
-    alert(`OK. Conversations supprimées: ${data?.deleted ?? 0}`);
   }
 
   // --- CREATE CLIENT / USER ---
@@ -707,7 +696,8 @@ export default function Admin() {
                           Prompt, données & workflows
                         </button>
 
-                        <button style={styles.btnDangerGhost} onClick={() => deleteAgentConversations(a.slug, a.name)}>
+                        {/* CHANGEMENT UNIQUE: ouvre la liste et permet sélection + suppression définitive */}
+                        <button style={styles.btnDangerGhost} onClick={() => goConversationDeletion(a.slug)}>
                           Supprimer conversations
                         </button>
                       </div>
