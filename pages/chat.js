@@ -51,7 +51,6 @@ function extractNameFromPrompt(prompt) {
   if (!m || !m[1]) return "";
 
   let name = m[1].trim();
-  // Si tu as "Antoine (directeur commercial ...)" on garde "Antoine"
   name = name.split("(")[0].trim();
 
   return name;
@@ -60,15 +59,10 @@ function extractNameFromPrompt(prompt) {
 export default function ChatPage() {
   const router = useRouter();
 
-  // Selon ton app, l’agent peut venir :
-  // - d’un paramètre d’URL ?agent=emma
-  // - d’un state global
-  // - d’un localStorage
-  // Ici on prend query.agent, fallback "emma" (à adapter)
   const agentSlug = useMemo(() => {
     const q = router.query?.agent;
     if (typeof q === "string" && q.trim()) return q.trim();
-    return "emma"; // <= adapte si besoin
+    return "emma";
   }, [router.query]);
 
   const [session, setSession] = useState(null);
@@ -89,16 +83,12 @@ export default function ChatPage() {
 
   const accessToken = useMemo(() => session?.access_token || null, [session]);
 
-  // Ancien prénom (email / user_metadata) — on le garde seulement en fallback.
   const fallbackFirstName = useMemo(() => extractFirstNameFromUser(user), [user]);
-
-  // NOUVEAU : prénom “métier” depuis le prompt perso de l’agent
   const [welcomeNameFromPrompt, setWelcomeNameFromPrompt] = useState("");
 
   const messagesEndRef = useRef(null);
 
   function welcomeText() {
-    // Priorité prompt ("Tu travailles pour Antoine"), sinon fallback (email)
     const name = welcomeNameFromPrompt || fallbackFirstName;
     return name
       ? `Bonjour ${name}, comment puis-je vous aider ?`
@@ -139,7 +129,7 @@ export default function ChatPage() {
     })();
   }, [agentSlug]);
 
-  // NOUVEAU : lire le prompt perso agent et extraire "Tu travailles pour X"
+  // Lire prompt perso agent et extraire "Tu travailles pour X"
   useEffect(() => {
     if (!user?.id) return;
     if (!agentSlug) return;
@@ -148,7 +138,6 @@ export default function ChatPage() {
       try {
         setWelcomeNameFromPrompt("");
 
-        // 1) agent_id depuis agents.slug
         const { data: agentRow, error: agentErr } = await supabase
           .from("agents")
           .select("id")
@@ -161,7 +150,6 @@ export default function ChatPage() {
         }
         if (!agentRow?.id) return;
 
-        // 2) prompt perso depuis client_agent_configs (user_id + agent_id)
         const { data: cfg, error: cfgErr } = await supabase
           .from("client_agent_configs")
           .select("system_prompt")
@@ -246,7 +234,7 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loadingMsgs]);
 
-  // IMPORTANT: création via API (pas via supabase insert)
+  // Création via API
   async function handleNewConversation() {
     if (!accessToken) {
       alert("Session invalide. Veuillez vous reconnecter.");
@@ -389,7 +377,8 @@ export default function ChatPage() {
         </button>
 
         <div className="brand">
-          <div className="brandTitle">logolong.png</div>
+          {/* LOGO LONG À LA PLACE DU TEXTE */}
+          <img className="brandLogo" src="/logolong.png" alt="Evidenc'IA" />
         </div>
 
         <div className="topbarRight">
@@ -434,7 +423,6 @@ export default function ChatPage() {
                     >
                       <div className="convTitle">{c.title || "Conversation"}</div>
 
-                      {/* CROIX ROUGE */}
                       <button
                         className="convDelete"
                         title="Supprimer la conversation"
@@ -538,8 +526,16 @@ export default function ChatPage() {
           color: #e9eef6; padding: 10px 12px; border-radius: 14px; cursor: pointer; font-weight: 600; }
         .btn:disabled { opacity: 0.6; cursor: not-allowed; }
         .btn.logout { border-color: rgba(255,80,80,0.35); }
+
         .brand { display: flex; align-items: center; justify-content: center; flex: 1; text-align: center; }
-        .brandTitle { font-size: 20px; font-weight: 800; letter-spacing: 0.6px; }
+        .brandLogo {
+          height: 26px;
+          width: auto;
+          max-width: 320px;
+          object-fit: contain;
+          display: block;
+        }
+
         .topbarRight { display: flex; gap: 10px; align-items: center; }
         .pill { border: 1px solid rgba(255,255,255,0.12); padding: 8px 10px; border-radius: 999px; font-size: 12px; opacity: 0.9; }
 
@@ -566,7 +562,7 @@ export default function ChatPage() {
         .agentLeft { display: flex; gap: 12px; align-items: center; }
         .agentAvatar { width: 44px; height: 44px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
           background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; }
-      .agentAvatar img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; }
+        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; }
         .avatarFallback { font-weight: 900; opacity: 0.85; }
         .agentName { font-weight: 900; }
         .agentRole { font-size: 12px; color: rgba(233,238,246,0.65); margin-top: 2px; }
@@ -592,6 +588,7 @@ export default function ChatPage() {
           .layout { grid-template-columns: 1fr; }
           .sidebar { min-height: auto; }
           .main { min-height: 60vh; }
+          .brandLogo { max-width: 240px; }
         }
       `}</style>
     </div>
