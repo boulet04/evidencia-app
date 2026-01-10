@@ -1,45 +1,48 @@
+// pages/api/sendMailViaMake.js
+
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    const { to, subject, body } = req.body || {};
-
-    if (!to || !subject || !body) {
-      return res.status(400).json({
-        error: "Missing required fields",
-        missing: {
-          to: !to,
-          subject: !subject,
-          body: !body,
-        },
-      });
-    }
-
-    const webhookUrl = process.env.MAKE_WEBHOOK_URL; // ex: https://hook.eu1.make.com/xxxx
-    if (!webhookUrl) {
+    const makeWebhookUrl = process.env.MAKE_WEBHOOK_URL;
+    if (!makeWebhookUrl) {
       return res.status(500).json({ error: "MAKE_WEBHOOK_URL is not set" });
     }
 
+    const { to, subject, body } = req.body || {};
+
+    if (!isNonEmptyString(to) || !isNonEmptyString(subject) || !isNonEmptyString(body)) {
+      return res.status(400).json({
+        error: "Missing required fields",
+        required: ["to", "subject", "body"],
+        received: { to, subject, body },
+      });
+    }
+
     const url =
-      `${webhookUrl}` +
+      `${makeWebhookUrl}` +
       `?to=${encodeURIComponent(to)}` +
       `&subject=${encodeURIComponent(subject)}` +
       `&body=${encodeURIComponent(body)}`;
 
-    const makeResp = await fetch(url, { method: "GET" });
-    const text = await makeResp.text();
+    const resp = await fetch(url, { method: "GET" });
+    const text = await resp.text().catch(() => "");
 
-    if (!makeResp.ok) {
+    if (!resp.ok) {
       return res.status(502).json({
         error: "Make webhook call failed",
-        status: makeResp.status,
+        status: resp.status,
         response: text,
       });
     }
 
-    return res.status(200).json({ ok: true, makeResponse: text });
+    return res.status(200).json({ ok: true, response: text });
   } catch (e) {
     return res.status(500).json({ error: "Internal error", details: String(e) });
   }
