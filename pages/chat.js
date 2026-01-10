@@ -40,12 +40,24 @@ function extractFirstNameFromUser(user) {
 
 function extractNameFromPrompt(prompt) {
   if (typeof prompt !== "string" || !prompt.trim()) return "";
-  // On accepte plusieurs formes : "Tu travailles", "Tu travaille"
+  // Accepte "Tu travaille" ou "Tu travailles"
   const m = prompt.match(/Tu\s+travaill(?:e|es)\s+pour\s+(.+?)(?:,|\n|$)/i);
   if (!m || !m[1]) return "";
   let name = m[1].trim();
   name = name.split("(")[0].trim();
   return name;
+}
+
+function titleFromMessage(message) {
+  const clean = (message || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!clean) return "Nouvelle conversation";
+
+  const words = clean.split(" ").filter(Boolean).slice(0, 5);
+  const t = words.join(" ").trim();
+  return t || "Nouvelle conversation";
 }
 
 export default function ChatPage() {
@@ -84,11 +96,6 @@ export default function ChatPage() {
     return name
       ? `Bonjour ${name}, comment puis-je vous aider ?`
       : "Bonjour, comment puis-je vous aider ?";
-  }
-
-  function defaultConversationTitle() {
-    const agentName = agent?.name || capitalize(agentSlug);
-    return `Discussion avec ${agentName}`;
   }
 
   useEffect(() => {
@@ -230,8 +237,7 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loadingMsgs]);
 
-  // Création via API
-  async function createConversationViaApi() {
+  async function createConversationViaApi(title) {
     if (!accessToken) throw new Error("Session invalide");
     if (!agentSlug) throw new Error("Agent manquant");
 
@@ -241,8 +247,10 @@ export default function ChatPage() {
         "Content-Type": "application/json",
         Authorization: `Bearer ${accessToken}`,
       },
-      // IMPORTANT: on envoie le title pour que la conversation soit nommée directement
-      body: JSON.stringify({ agent_slug: agentSlug, title: defaultConversationTitle() }),
+      body: JSON.stringify({
+        agent_slug: agentSlug,
+        title: (title || "").toString().trim() || "Nouvelle conversation",
+      }),
     });
 
     const data = await resp.json().catch(() => null);
@@ -253,21 +261,21 @@ export default function ChatPage() {
     return conv;
   }
 
-  // Si pas de conversation sélectionnée, on en crée une automatiquement
-  async function ensureConversationSelected() {
-    if (selectedConversationId) return selectedConversationId;
+  async function renameConversationViaApi(conversationId, newTitle) {
+    if (!accessToken) throw new Error("Session invalide");
 
-    setCreatingConv(true);
-    try {
-      const conv = await createConversationViaApi();
+    const resp = await fetch(`/api/conversations/${conversationId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ title: newTitle }),
+    });
 
-      setConversations((prev) => [conv, ...prev]);
-      setSelectedConversationId(conv.id);
-
-      return conv.id;
-    } finally {
-      setCreatingConv(false);
-    }
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) throw new Error(data?.error || "Rename conversation failed");
+    return data?.conversation || null;
   }
 
   async function handleNewConversation() {
@@ -278,9 +286,10 @@ export default function ChatPage() {
 
     try {
       setCreatingConv(true);
-      const conv = await createConversationViaApi();
+      const conv = await createConversationViaApi("Nouvelle conversation");
       setConversations((prev) => [conv, ...prev]);
       setSelectedConversationId(conv.id);
+      setMessages([]);
     } catch (e) {
       console.error(e);
       alert("Impossible de créer une nouvelle conversation.");
@@ -314,6 +323,7 @@ export default function ChatPage() {
       if (selectedConversationId === conversationId) {
         const remaining = conversations.filter((c) => c.id !== conversationId);
         setSelectedConversationId(remaining[0]?.id || null);
+        setMessages([]);
       }
     } catch (e) {
       console.error(e);
@@ -339,10 +349,38 @@ export default function ChatPage() {
       setSending(true);
       setInput("");
 
-      // 1) crée une conversation si besoin
-      const convId = await ensureConversationSelected();
+      const newTitle = titleFromMessage(content);
 
-      // 2) enregistre le message user
+      // 1) Si aucune conversation sélectionnée : créer directement avec titre 5 mots
+      let convId = selectedConversationId;
+      if (!convId) {
+        setCreatingConv(true);
+        const conv = await createConversationViaApi(newTitle);
+        setConversations((prev) => [conv, ...prev]);
+        convId = conv.id;
+        setSelectedConversationId(convId);
+        setMessages([]); // important pour l’affichage
+        setCreatingConv(false);
+      }
+
+      // 2) Si conversation existe mais encore "Nouvelle conversation" et aucun message => renommer au premier envoi
+      const selectedConv = conversations.find((c) => c.id === convId);
+      const isFirstMessage = (messages?.length || 0) === 0;
+      if (isFirstMessage && selectedConv?.title === "Nouvelle conversation") {
+        try {
+          const updated = await renameConversationViaApi(convId, newTitle);
+          if (updated?.id) {
+            setConversations((prev) =>
+              prev.map((c) => (c.id === updated.id ? { ...c, title: updated.title } : c))
+            );
+          }
+        } catch (e) {
+          // On n’empêche pas l’envoi si le rename échoue, c’est un “plus”
+          console.error("Rename failed (non blocking):", e);
+        }
+      }
+
+      // 3) Insert message user
       const { data: userMsg, error: userMsgErr } = await supabase
         .from("messages")
         .insert({
@@ -356,7 +394,7 @@ export default function ChatPage() {
       if (userMsgErr) throw userMsgErr;
       setMessages((prev) => [...prev, userMsg]);
 
-      // 3) appelle l’API chat (envoie le slug sous plusieurs noms)
+      // 4) Appel /api/chat (on envoie plusieurs clés pour compatibilité)
       const payload = {
         conversation_id: convId,
         message: content,
@@ -376,14 +414,12 @@ export default function ChatPage() {
       });
 
       const j = await resp.json().catch(() => null);
-
       if (!resp.ok) {
         console.error("Chat API error:", j);
         throw new Error(j?.error || "Chat API error");
       }
 
       const assistantText = j?.reply || j?.content || j?.message || "";
-
       if (assistantText) {
         const { data: asstMsg, error: asstErr } = await supabase
           .from("messages")
@@ -402,13 +438,13 @@ export default function ChatPage() {
       alert("Erreur lors de l’envoi du message.");
     } finally {
       setSending(false);
+      setCreatingConv(false);
     }
   }
 
-  // Afficher l’accueil même si aucune conversation n’existe encore
+  // Accueil : on l’affiche même si aucune conversation n’existe encore
   const showWelcome =
-    !loadingMsgs &&
-    ((selectedConversationId && (messages?.length || 0) === 0) || !selectedConversationId);
+    !loadingMsgs && ((!selectedConversationId) || (selectedConversationId && (messages?.length || 0) === 0));
 
   return (
     <div className="page">
@@ -608,12 +644,7 @@ export default function ChatPage() {
         .agentLeft { display: flex; gap: 12px; align-items: center; }
         .agentAvatar { width: 44px; height: 44px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
           background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; }
-        .agentAvatar img {
-          width: 100%;
-          height: 100%;
-          object-fit: cover;
-          object-position: center 20%;
-        }
+        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; }
         .avatarFallback { font-weight: 900; opacity: 0.85; }
         .agentName { font-weight: 900; }
         .agentRole { font-size: 12px; color: rgba(233,238,246,0.65); margin-top: 2px; }
