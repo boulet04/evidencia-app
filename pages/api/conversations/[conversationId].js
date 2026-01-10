@@ -39,7 +39,7 @@ export default async function handler(req, res) {
 
   const userId = userData.user.id;
 
-  // Ownership check
+  // Vérifie que la conversation appartient bien à l’utilisateur
   const { data: conv, error: convError } = await supabaseAdmin
     .from("conversations")
     .select("id,user_id")
@@ -50,7 +50,7 @@ export default async function handler(req, res) {
   if (!conv) return res.status(404).json({ error: "Conversation not found" });
   if (conv.user_id !== userId) return res.status(403).json({ error: "Forbidden" });
 
-  // Delete messages then conversation
+  // Supprime d’abord les messages
   const { error: delMsgErr } = await supabaseAdmin
     .from("messages")
     .delete()
@@ -58,6 +58,7 @@ export default async function handler(req, res) {
 
   if (delMsgErr) return res.status(500).json({ error: delMsgErr.message });
 
+  // Puis la conversation
   const { error: delConvErr } = await supabaseAdmin
     .from("conversations")
     .delete()
