@@ -38,6 +38,25 @@ function extractFirstNameFromUser(user) {
   return guessFirstNameFromEmail(user?.email || "");
 }
 
+/**
+ * Extrait le nom après "Tu travailles pour ..."
+ * Fonctionne aussi si la phrase est "Tu travaille pour" (faute).
+ * Coupe à la virgule, fin de ligne, ou fin de texte.
+ * Supprime ce qui est après "(" si présent.
+ */
+function extractNameFromPrompt(prompt) {
+  if (typeof prompt !== "string" || !prompt.trim()) return "";
+
+  const m = prompt.match(/Tu\s+travaill(?:e|es)\s+pour\s+(.+?)(?:,|\n|$)/i);
+  if (!m || !m[1]) return "";
+
+  let name = m[1].trim();
+  // Si tu as "Antoine (directeur commercial ...)" on garde "Antoine"
+  name = name.split("(")[0].trim();
+
+  return name;
+}
+
 export default function ChatPage() {
   const router = useRouter();
 
@@ -69,13 +88,20 @@ export default function ChatPage() {
   const [sending, setSending] = useState(false);
 
   const accessToken = useMemo(() => session?.access_token || null, [session]);
-  const firstName = useMemo(() => extractFirstNameFromUser(user), [user]);
+
+  // Ancien prénom (email / user_metadata) — on le garde seulement en fallback.
+  const fallbackFirstName = useMemo(() => extractFirstNameFromUser(user), [user]);
+
+  // NOUVEAU : prénom “métier” depuis le prompt perso de l’agent
+  const [welcomeNameFromPrompt, setWelcomeNameFromPrompt] = useState("");
 
   const messagesEndRef = useRef(null);
 
   function welcomeText() {
-    return firstName
-      ? `Bonjour ${firstName}, comment puis-je vous aider ?`
+    // Priorité prompt ("Tu travailles pour Antoine"), sinon fallback (email)
+    const name = welcomeNameFromPrompt || fallbackFirstName;
+    return name
+      ? `Bonjour ${name}, comment puis-je vous aider ?`
       : "Bonjour, comment puis-je vous aider ?";
   }
 
@@ -112,6 +138,50 @@ export default function ChatPage() {
       setAgent(data || null);
     })();
   }, [agentSlug]);
+
+  // NOUVEAU : lire le prompt perso agent et extraire "Tu travailles pour X"
+  useEffect(() => {
+    if (!user?.id) return;
+    if (!agentSlug) return;
+
+    (async () => {
+      try {
+        setWelcomeNameFromPrompt("");
+
+        // 1) agent_id depuis agents.slug
+        const { data: agentRow, error: agentErr } = await supabase
+          .from("agents")
+          .select("id")
+          .eq("slug", agentSlug)
+          .maybeSingle();
+
+        if (agentErr) {
+          console.error("Load agent id error:", agentErr.message);
+          return;
+        }
+        if (!agentRow?.id) return;
+
+        // 2) prompt perso depuis client_agent_configs (user_id + agent_id)
+        const { data: cfg, error: cfgErr } = await supabase
+          .from("client_agent_configs")
+          .select("system_prompt")
+          .eq("user_id", user.id)
+          .eq("agent_id", agentRow.id)
+          .maybeSingle();
+
+        if (cfgErr) {
+          console.error("Load client_agent_configs error:", cfgErr.message);
+          return;
+        }
+
+        const prompt = cfg?.system_prompt || "";
+        const name = extractNameFromPrompt(prompt);
+        if (name) setWelcomeNameFromPrompt(name);
+      } catch (e) {
+        console.error("Welcome prompt parse error:", e);
+      }
+    })();
+  }, [user?.id, agentSlug]);
 
   // Load conversations for this user + agent
   useEffect(() => {
