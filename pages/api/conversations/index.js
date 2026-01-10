@@ -11,34 +11,75 @@ function capitalize(s) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function guessFirstNameFromEmail(email) {
+function guessFromEmail(email) {
   if (!email) return "";
   const local = email.split("@")[0] || "";
-  // jb.bernier -> jb / bernier ; on prend le 1er segment "humain"
   const parts = local.split(/[._-]+/).filter(Boolean);
   if (parts.length === 0) return "";
-  // si le premier segment est très court (ex: jb), tenter le second
   const cand = parts[0].length <= 2 && parts[1] ? parts[1] : parts[0];
   return capitalize(cand);
 }
 
-function extractFirstName(user) {
-  const md = user?.user_metadata || {};
-  const direct =
-    md.first_name ||
-    md.prenom ||
-    md.firstname ||
-    md.given_name ||
-    md.name ||
-    md.full_name ||
-    md.fullName;
+/**
+ * Extrait le nom après "Tu travailles pour ..."
+ * Exemples détectés :
+ *  - "Tu travailles pour Antoine"
+ *  - "Tu travaille pour Antoine" (faute)
+ *  - "Tu travailles pour Jean Baptiste, directeur..."
+ */
+function extractNameFromPrompt(prompt) {
+  if (typeof prompt !== "string" || !prompt.trim()) return "";
 
-  if (typeof direct === "string" && direct.trim()) {
-    const first = direct.trim().split(/\s+/)[0];
-    return capitalize(first);
+  const m = prompt.match(
+    /Tu\s+travaill(?:e|es)\s+pour\s+(.+?)(?:,|\n|$)/i
+  );
+
+  if (!m || !m[1]) return "";
+  return m[1].trim();
+}
+
+/**
+ * Récupère le "prénom / nom" pour le message d’accueil
+ * Priorité :
+ *  1) prompt perso agent (client_agent_configs.system_prompt) -> "Tu travailles pour X"
+ *  2) user_metadata (si tu en mets un jour)
+ *  3) fallback email (dernier recours)
+ */
+async function getWelcomeName({ supabaseAdmin, user, agent_slug }) {
+  // 1) prompt perso agent
+  const { data: agent, error: agentErr } = await supabaseAdmin
+    .from("agents")
+    .select("id")
+    .eq("slug", agent_slug)
+    .maybeSingle();
+
+  if (!agentErr && agent?.id) {
+    const { data: cfg, error: cfgErr } = await supabaseAdmin
+      .from("client_agent_configs")
+      .select("system_prompt")
+      .eq("user_id", user.id)
+      .eq("agent_id", agent.id)
+      .maybeSingle();
+
+    if (!cfgErr && cfg?.system_prompt) {
+      const fromPrompt = extractNameFromPrompt(cfg.system_prompt);
+      if (fromPrompt) return fromPrompt; // ex: "Antoine" ou "Jean Baptiste"
+    }
   }
 
-  return guessFirstNameFromEmail(user?.email || "");
+  // 2) user_metadata (optionnel)
+  const md = user?.user_metadata || {};
+  const metaName =
+    md.first_name || md.prenom || md.firstname || md.given_name;
+
+  if (typeof metaName === "string" && metaName.trim()) {
+    // on garde seulement le 1er mot si tu mets "Jean Baptiste" ici
+    // si tu veux garder tout, enlève le split
+    return metaName.trim();
+  }
+
+  // 3) fallback email
+  return guessFromEmail(user?.email || "");
 }
 
 export default async function handler(req, res) {
@@ -67,27 +108,26 @@ export default async function handler(req, res) {
   }
 
   const user = userData.user;
-  const userId = user.id;
 
   const { agent_slug } = req.body || {};
   if (!agent_slug || typeof agent_slug !== "string") {
     return res.status(400).json({ error: "Missing agent_slug" });
   }
 
-  // Optionnel : charger le nom d’agent pour titre
-  const { data: agent } = await supabaseAdmin
+  // Optionnel : titre basé sur l’agent
+  const { data: agentMeta } = await supabaseAdmin
     .from("agents")
     .select("name")
     .eq("slug", agent_slug)
     .maybeSingle();
 
-  const title = agent?.name ? `Discussion avec ${agent.name}` : "Nouvelle conversation";
+  const title = agentMeta?.name ? `Discussion avec ${agentMeta.name}` : "Nouvelle conversation";
 
-  // 1) create conversation
+  // 1) Créer la conversation
   const { data: conv, error: convErr } = await supabaseAdmin
     .from("conversations")
     .insert({
-      user_id: userId,
+      user_id: user.id,
       agent_slug,
       title,
       archived: false,
@@ -97,10 +137,11 @@ export default async function handler(req, res) {
 
   if (convErr) return res.status(500).json({ error: convErr.message });
 
-  // 2) create welcome message
-  const firstName = extractFirstName(user);
-  const welcome = firstName
-    ? `Bonjour ${firstName}, comment puis-je vous aider ?`
+  // 2) Créer le message d’accueil basé sur le prompt perso
+  const welcomeName = await getWelcomeName({ supabaseAdmin, user, agent_slug });
+
+  const welcome = welcomeName
+    ? `Bonjour ${welcomeName}, comment puis-je vous aider ?`
     : "Bonjour, comment puis-je vous aider ?";
 
   const { error: msgErr } = await supabaseAdmin.from("messages").insert({
@@ -109,7 +150,6 @@ export default async function handler(req, res) {
     content: welcome,
   });
 
-  // Si insertion message échoue, on retourne quand même la conversation
   if (msgErr) {
     return res.status(201).json({
       conversation: conv,
