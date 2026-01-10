@@ -192,13 +192,9 @@ export default function ChatPage() {
       const list = data || [];
       setConversations(list);
 
-      // Auto-select la dernière conversation s’il y en a
       if (!selectedConversationId && list.length > 0) {
         setSelectedConversationId(list[0].id);
       }
-
-      // Si aucune conversation, on laisse selectedConversationId = null :
-      // l’utilisateur pourra quand même écrire et ça créera la conversation.
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, agentSlug]);
@@ -256,7 +252,6 @@ export default function ChatPage() {
     return conv;
   }
 
-  // Assure qu’on a une conversation sélectionnée (sinon on la crée)
   async function ensureConversationSelected() {
     if (selectedConversationId) return selectedConversationId;
 
@@ -264,11 +259,9 @@ export default function ChatPage() {
     try {
       const conv = await createConversationViaApi();
 
-      // Ajout en liste + sélection
       setConversations((prev) => [conv, ...prev]);
       setSelectedConversationId(conv.id);
 
-      // Si le titre est vide ou "Nouvelle conversation", on force un titre propre
       const title = (conv.title || "").trim();
       const needsTitle =
         !title || title.toLowerCase().includes("nouvelle conversation");
@@ -358,10 +351,8 @@ export default function ChatPage() {
       setSending(true);
       setInput("");
 
-      // 1) Si aucune conversation n’existe encore, on la crée automatiquement
       const convId = await ensureConversationSelected();
 
-      // 2) On insère le message utilisateur
       const { data: userMsg, error: userMsgErr } = await supabase
         .from("messages")
         .insert({
@@ -379,7 +370,6 @@ export default function ChatPage() {
 
       setMessages((prev) => [...prev, userMsg]);
 
-      // 3) Appel IA
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: {
@@ -402,7 +392,6 @@ export default function ChatPage() {
       const data = await resp.json();
       const assistantText = data?.reply || data?.content || "";
 
-      // 4) On stocke la réponse assistant
       if (assistantText) {
         const { data: asstMsg, error: asstErr } = await supabase
           .from("messages")
@@ -428,11 +417,9 @@ export default function ChatPage() {
     }
   }
 
-  // Affichage de l’accueil :
-  // - si conversation sélectionnée ET 0 message
-  // - OU si aucune conversation sélectionnée (conversation inexistante)
   const showWelcome =
-    !loadingMsgs && ((selectedConversationId && (messages?.length || 0) === 0) || !selectedConversationId);
+    !loadingMsgs &&
+    ((selectedConversationId && (messages?.length || 0) === 0) || !selectedConversationId);
 
   return (
     <div className="page">
@@ -562,8 +549,23 @@ export default function ChatPage() {
                 disabled={sending}
               />
 
+              {/* ICÔNE MICRO SVG (plus lisible et toujours affichée) */}
               <button className="btn mic" type="button" title="Dictée vocale (à connecter)">
-                🎙
+                <svg
+                  className="micIcon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
               </button>
 
               <button className="btn send" onClick={handleSend} disabled={sending}>
@@ -644,7 +646,10 @@ export default function ChatPage() {
         .input { flex: 1; height: 48px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);
           background: rgba(0,0,0,0.25); color: #e9eef6; padding: 0 14px; outline: none; }
         .btn.send { border-color: rgba(255,130,30,0.35); background: rgba(255,130,30,0.12); }
-        .btn.mic { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; }
+        .btn.mic { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; padding: 0; }
+
+        /* Taille/visibilité du micro */
+        .micIcon { width: 20px; height: 20px; display: block; }
 
         .chatFooter { padding: 10px 14px 14px; }
 
