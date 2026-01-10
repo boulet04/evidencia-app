@@ -554,7 +554,7 @@ export default function ChatPage() {
         .agentLeft { display: flex; gap: 12px; align-items: center; }
         .agentAvatar { width: 44px; height: 44px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
           background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; }
-        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; }
+        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; }
         .avatarFallback { font-weight: 900; opacity: 0.85; }
         .agentName { font-weight: 900; }
         .agentRole { font-size: 12px; color: rgba(233,238,246,0.65); margin-top: 2px; }
