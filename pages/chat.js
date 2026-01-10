@@ -38,12 +38,6 @@ function extractFirstNameFromUser(user) {
   return guessFirstNameFromEmail(user?.email || "");
 }
 
-/**
- * Extrait le nom après "Tu travailles pour ..."
- * Fonctionne aussi si la phrase est "Tu travaille pour" (faute).
- * Coupe à la virgule, fin de ligne, ou fin de texte.
- * Supprime ce qui est après "(" si présent.
- */
 function extractNameFromPrompt(prompt) {
   if (typeof prompt !== "string" || !prompt.trim()) return "";
 
@@ -52,7 +46,6 @@ function extractNameFromPrompt(prompt) {
 
   let name = m[1].trim();
   name = name.split("(")[0].trim();
-
   return name;
 }
 
@@ -234,7 +227,6 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loadingMsgs]);
 
-  // Création via API
   async function handleNewConversation() {
     if (!accessToken) {
       alert("Session invalide. Veuillez vous reconnecter.");
@@ -377,8 +369,8 @@ export default function ChatPage() {
         </button>
 
         <div className="brand">
-          {/* LOGO LONG À LA PLACE DU TEXTE */}
-          <img className="brandLogo" src="/logolong.png" alt="Evidenc'IA" />
+          {/* Logo dans public/images/logolong.png => /images/logolong.png */}
+          <img className="brandLogo" src="/images/logolong.png" alt="Evidenc'IA" />
         </div>
 
         <div className="topbarRight">
