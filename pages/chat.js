@@ -38,26 +38,46 @@ function extractFirstNameFromUser(user) {
   return guessFirstNameFromEmail(user?.email || "");
 }
 
-function extractNameFromPrompt(prompt) {
-  if (typeof prompt !== "string" || !prompt.trim()) return "";
-  // Accepte "Tu travaille" ou "Tu travailles"
-  const m = prompt.match(/Tu\s+travaill(?:e|es)\s+pour\s+(.+?)(?:,|\n|$)/i);
-  if (!m || !m[1]) return "";
-  let name = m[1].trim();
-  name = name.split("(")[0].trim();
-  return name;
-}
-
-function titleFromMessage(message) {
-  const clean = (message || "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!clean) return "Nouvelle conversation";
-
-  const words = clean.split(" ").filter(Boolean).slice(0, 5);
-  const t = words.join(" ").trim();
-  return t || "Nouvelle conversation";
+// Icône micro (pas de dépendance)
+function MicIcon({ size = 20 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M19 11a7 7 0 0 1-14 0"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12 18v3"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 21h8"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 export default function ChatPage() {
@@ -85,16 +105,18 @@ export default function ChatPage() {
   const [creatingConv, setCreatingConv] = useState(false);
   const [sending, setSending] = useState(false);
 
+  // Dictée vocale
+  const [isRecording, setIsRecording] = useState(false);
+  const recognitionRef = useRef(null);
+
   const accessToken = useMemo(() => session?.access_token || null, [session]);
   const firstName = useMemo(() => extractFirstNameFromUser(user), [user]);
-  const [welcomeNameFromPrompt, setWelcomeNameFromPrompt] = useState("");
 
   const messagesEndRef = useRef(null);
 
   function welcomeText() {
-    const name = welcomeNameFromPrompt || firstName;
-    return name
-      ? `Bonjour ${name}, comment puis-je vous aider ?`
+    return firstName
+      ? `Bonjour ${firstName}, comment puis-je vous aider ?`
       : "Bonjour, comment puis-je vous aider ?";
   }
 
@@ -131,48 +153,6 @@ export default function ChatPage() {
       setAgent(data || null);
     })();
   }, [agentSlug]);
-
-  // Lire prompt perso agent et extraire "Tu travailles pour X"
-  useEffect(() => {
-    if (!user?.id) return;
-    if (!agentSlug) return;
-
-    (async () => {
-      try {
-        setWelcomeNameFromPrompt("");
-
-        const { data: agentRow, error: agentErr } = await supabase
-          .from("agents")
-          .select("id")
-          .eq("slug", agentSlug)
-          .maybeSingle();
-
-        if (agentErr) {
-          console.error("Load agent id error:", agentErr.message);
-          return;
-        }
-        if (!agentRow?.id) return;
-
-        const { data: cfg, error: cfgErr } = await supabase
-          .from("client_agent_configs")
-          .select("system_prompt")
-          .eq("user_id", user.id)
-          .eq("agent_id", agentRow.id)
-          .maybeSingle();
-
-        if (cfgErr) {
-          console.error("Load client_agent_configs error:", cfgErr.message);
-          return;
-        }
-
-        const prompt = cfg?.system_prompt || "";
-        const name = extractNameFromPrompt(prompt);
-        if (name) setWelcomeNameFromPrompt(name);
-      } catch (e) {
-        console.error("Welcome prompt parse error:", e);
-      }
-    })();
-  }, [user?.id, agentSlug]);
 
   // Load conversations for this user + agent
   useEffect(() => {
@@ -237,59 +217,34 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loadingMsgs]);
 
-  async function createConversationViaApi(title) {
-    if (!accessToken) throw new Error("Session invalide");
-    if (!agentSlug) throw new Error("Agent manquant");
-
-    const resp = await fetch("/api/conversations", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({
-        agent_slug: agentSlug,
-        title: (title || "").toString().trim() || "Nouvelle conversation",
-      }),
-    });
-
-    const data = await resp.json().catch(() => null);
-    if (!resp.ok) throw new Error(data?.error || "Create conversation failed");
-
-    const conv = data?.conversation;
-    if (!conv?.id) throw new Error("Missing conversation in response");
-    return conv;
-  }
-
-  async function renameConversationViaApi(conversationId, newTitle) {
-    if (!accessToken) throw new Error("Session invalide");
-
-    const resp = await fetch(`/api/conversations/${conversationId}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({ title: newTitle }),
-    });
-
-    const data = await resp.json().catch(() => null);
-    if (!resp.ok) throw new Error(data?.error || "Rename conversation failed");
-    return data?.conversation || null;
-  }
-
+  // Création via API
   async function handleNewConversation() {
     if (!accessToken) {
       alert("Session invalide. Veuillez vous reconnecter.");
       return;
     }
+    if (!agentSlug) return;
 
     try {
       setCreatingConv(true);
-      const conv = await createConversationViaApi("Nouvelle conversation");
+
+      const resp = await fetch("/api/conversations", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ agent_slug: agentSlug }),
+      });
+
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) throw new Error(data?.error || "Create conversation failed");
+
+      const conv = data?.conversation;
+      if (!conv?.id) throw new Error("Missing conversation in response");
+
       setConversations((prev) => [conv, ...prev]);
       setSelectedConversationId(conv.id);
-      setMessages([]);
     } catch (e) {
       console.error(e);
       alert("Impossible de créer une nouvelle conversation.");
@@ -323,7 +278,6 @@ export default function ChatPage() {
       if (selectedConversationId === conversationId) {
         const remaining = conversations.filter((c) => c.id !== conversationId);
         setSelectedConversationId(remaining[0]?.id || null);
-        setMessages([]);
       }
     } catch (e) {
       console.error(e);
@@ -331,60 +285,75 @@ export default function ChatPage() {
     }
   }
 
+  // Dictée vocale (Web Speech API)
+  function startDictation() {
+    if (typeof window === "undefined") return;
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      alert("Dictée vocale indisponible sur ce navigateur. Utilisez Chrome (desktop) ou un navigateur compatible.");
+      return;
+    }
+
+    // si déjà en cours, stop
+    if (recognitionRef.current && isRecording) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      return;
+    }
+
+    const rec = new SR();
+    recognitionRef.current = rec;
+
+    rec.lang = "fr-FR";
+    rec.interimResults = true;
+    rec.continuous = false;
+
+    rec.onstart = () => setIsRecording(true);
+    rec.onerror = (e) => {
+      console.error("SpeechRecognition error:", e);
+      setIsRecording(false);
+    };
+    rec.onend = () => setIsRecording(false);
+
+    rec.onresult = (event) => {
+      let transcript = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      // on remplit / complète le champ
+      setInput((prev) => {
+        const base = (prev || "").trim();
+        const add = (transcript || "").trim();
+        if (!add) return prev;
+        if (!base) return add;
+        return `${base} ${add}`.replace(/\s+/g, " ");
+      });
+    };
+
+    try {
+      rec.start();
+    } catch (e) {
+      console.error(e);
+      alert("Impossible de démarrer la dictée vocale.");
+      setIsRecording(false);
+    }
+  }
+
   async function handleSend() {
+    if (!selectedConversationId) return;
     const content = input.trim();
     if (!content) return;
-
-    if (!accessToken) {
-      alert("Session invalide. Veuillez vous reconnecter.");
-      return;
-    }
-
-    if (!agentSlug) {
-      alert("Aucun agent sélectionné (paramètre manquant).");
-      return;
-    }
 
     try {
       setSending(true);
       setInput("");
 
-      const newTitle = titleFromMessage(content);
-
-      // 1) Si aucune conversation sélectionnée : créer directement avec titre 5 mots
-      let convId = selectedConversationId;
-      if (!convId) {
-        setCreatingConv(true);
-        const conv = await createConversationViaApi(newTitle);
-        setConversations((prev) => [conv, ...prev]);
-        convId = conv.id;
-        setSelectedConversationId(convId);
-        setMessages([]); // important pour l’affichage
-        setCreatingConv(false);
-      }
-
-      // 2) Si conversation existe mais encore "Nouvelle conversation" et aucun message => renommer au premier envoi
-      const selectedConv = conversations.find((c) => c.id === convId);
-      const isFirstMessage = (messages?.length || 0) === 0;
-      if (isFirstMessage && selectedConv?.title === "Nouvelle conversation") {
-        try {
-          const updated = await renameConversationViaApi(convId, newTitle);
-          if (updated?.id) {
-            setConversations((prev) =>
-              prev.map((c) => (c.id === updated.id ? { ...c, title: updated.title } : c))
-            );
-          }
-        } catch (e) {
-          // On n’empêche pas l’envoi si le rename échoue, c’est un “plus”
-          console.error("Rename failed (non blocking):", e);
-        }
-      }
-
-      // 3) Insert message user
       const { data: userMsg, error: userMsgErr } = await supabase
         .from("messages")
         .insert({
-          conversation_id: convId,
+          conversation_id: selectedConversationId,
           role: "user",
           content,
         })
@@ -394,37 +363,32 @@ export default function ChatPage() {
       if (userMsgErr) throw userMsgErr;
       setMessages((prev) => [...prev, userMsg]);
 
-      // 4) Appel /api/chat (on envoie plusieurs clés pour compatibilité)
-      const payload = {
-        conversation_id: convId,
-        message: content,
-        agent_slug: agentSlug,
-        agentSlug: agentSlug,
-        agent: agentSlug,
-        slug: agentSlug,
-      };
-
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          conversation_id: selectedConversationId,
+          agent_slug: agentSlug,
+          message: content,
+        }),
       });
 
-      const j = await resp.json().catch(() => null);
       if (!resp.ok) {
-        console.error("Chat API error:", j);
+        const j = await resp.json().catch(() => null);
         throw new Error(j?.error || "Chat API error");
       }
 
-      const assistantText = j?.reply || j?.content || j?.message || "";
+      const data = await resp.json();
+      const assistantText = data?.reply || data?.content || "";
+
       if (assistantText) {
         const { data: asstMsg, error: asstErr } = await supabase
           .from("messages")
           .insert({
-            conversation_id: convId,
+            conversation_id: selectedConversationId,
             role: "assistant",
             content: assistantText,
           })
@@ -434,17 +398,15 @@ export default function ChatPage() {
         if (!asstErr && asstMsg) setMessages((prev) => [...prev, asstMsg]);
       }
     } catch (e) {
-      console.error("Send error:", e);
+      console.error(e);
       alert("Erreur lors de l’envoi du message.");
     } finally {
       setSending(false);
-      setCreatingConv(false);
     }
   }
 
-  // Accueil : on l’affiche même si aucune conversation n’existe encore
-  const showWelcome =
-    !loadingMsgs && ((!selectedConversationId) || (selectedConversationId && (messages?.length || 0) === 0));
+  const showWelcomeFallback =
+    !loadingMsgs && selectedConversationId && (messages?.length || 0) === 0;
 
   return (
     <div className="page">
@@ -454,7 +416,7 @@ export default function ChatPage() {
         </button>
 
         <div className="brand">
-          <img className="brandLogo" src="/images/logolong.png" alt="Evidenc'IA" />
+          <div className="brandTitle">Evidenc’IA</div>
         </div>
 
         <div className="topbarRight">
@@ -538,11 +500,13 @@ export default function ChatPage() {
 
           <div className="chat">
             <div className="chatBody">
-              {loadingMsgs ? (
+              {!selectedConversationId ? (
+                <div className="muted">Sélectionne une conversation ou clique sur “+ Nouvelle”.</div>
+              ) : loadingMsgs ? (
                 <div className="muted">Chargement des messages...</div>
               ) : (
                 <>
-                  {showWelcome && (
+                  {showWelcomeFallback && (
                     <div className="msgRow assistant">
                       <div className="msgBubble">{welcomeText()}</div>
                     </div>
@@ -571,28 +535,20 @@ export default function ChatPage() {
                     handleSend();
                   }
                 }}
-                disabled={sending}
+                disabled={!selectedConversationId || sending}
               />
 
-              <button className="btn mic" type="button" title="Dictée vocale (à connecter)">
-                <svg
-                  className="micIcon"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z" />
-                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                  <line x1="12" y1="19" x2="12" y2="23" />
-                  <line x1="8" y1="23" x2="16" y2="23" />
-                </svg>
+              <button
+                className={`btn mic ${isRecording ? "rec" : ""}`}
+                type="button"
+                title={isRecording ? "Arrêter la dictée" : "Dictée vocale"}
+                onClick={startDictation}
+                disabled={!selectedConversationId || sending}
+              >
+                <MicIcon size={20} />
               </button>
 
-              <button className="btn send" onClick={handleSend} disabled={sending}>
+              <button className="btn send" onClick={handleSend} disabled={!selectedConversationId || sending}>
                 {sending ? "Envoi..." : "Envoyer"}
               </button>
             </div>
@@ -614,10 +570,8 @@ export default function ChatPage() {
           color: #e9eef6; padding: 10px 12px; border-radius: 14px; cursor: pointer; font-weight: 600; }
         .btn:disabled { opacity: 0.6; cursor: not-allowed; }
         .btn.logout { border-color: rgba(255,80,80,0.35); }
-
         .brand { display: flex; align-items: center; justify-content: center; flex: 1; text-align: center; }
-        .brandLogo { height: 26px; width: auto; max-width: 320px; object-fit: contain; display: block; }
-
+        .brandTitle { font-size: 20px; font-weight: 800; letter-spacing: 0.6px; }
         .topbarRight { display: flex; gap: 10px; align-items: center; }
         .pill { border: 1px solid rgba(255,255,255,0.12); padding: 8px 10px; border-radius: 999px; font-size: 12px; opacity: 0.9; }
 
@@ -662,8 +616,8 @@ export default function ChatPage() {
         .input { flex: 1; height: 48px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);
           background: rgba(0,0,0,0.25); color: #e9eef6; padding: 0 14px; outline: none; }
         .btn.send { border-color: rgba(255,130,30,0.35); background: rgba(255,130,30,0.12); }
-        .btn.mic { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; padding: 0; }
-        .micIcon { width: 20px; height: 20px; display: block; }
+        .btn.mic { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; }
+        .btn.mic.rec { border-color: rgba(255,80,80,0.45); background: rgba(255,80,80,0.12); }
 
         .chatFooter { padding: 10px 14px 14px; }
 
@@ -671,7 +625,6 @@ export default function ChatPage() {
           .layout { grid-template-columns: 1fr; }
           .sidebar { min-height: auto; }
           .main { min-height: 60vh; }
-          .brandLogo { max-width: 240px; }
         }
       `}</style>
     </div>
