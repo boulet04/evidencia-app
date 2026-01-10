@@ -1,748 +1,529 @@
-// pages/chat.js
 import { useEffect, useMemo, useRef, useState } from "react";
-import { supabase } from "../lib/supabaseClient";
+import { useRouter } from "next/router";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
+);
+
+function capitalize(s) {
+  if (!s) return "";
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function guessFirstNameFromEmail(email) {
+  if (!email) return "";
+  const local = email.split("@")[0] || "";
+  const parts = local.split(/[._-]+/).filter(Boolean);
+  if (parts.length === 0) return "";
+  const cand = parts[0].length <= 2 && parts[1] ? parts[1] : parts[0];
+  return capitalize(cand);
+}
+
+function extractFirstNameFromUser(user) {
+  const md = user?.user_metadata || {};
+  const direct =
+    md.first_name ||
+    md.prenom ||
+    md.firstname ||
+    md.given_name ||
+    md.name ||
+    md.full_name ||
+    md.fullName;
+
+  if (typeof direct === "string" && direct.trim()) {
+    return capitalize(direct.trim().split(/\s+/)[0]);
+  }
+  return guessFirstNameFromEmail(user?.email || "");
+}
 
 export default function ChatPage() {
-  const [sessionEmail, setSessionEmail] = useState("");
-  const [agentSlug, setAgentSlug] = useState("");
-  const [agentName, setAgentName] = useState("");
-  const [agentRole, setAgentRole] = useState("");
-  const [agentAvatar, setAgentAvatar] = useState("");
+  const router = useRouter();
 
-  const [isMobile, setIsMobile] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  // Selon ton app, l’agent peut venir :
+  // - d’un paramètre d’URL ?agent=emma
+  // - d’un state global
+  // - d’un localStorage
+  // Ici on prend query.agent, fallback "emma" (à adapter)
+  const agentSlug = useMemo(() => {
+    const q = router.query?.agent;
+    if (typeof q === "string" && q.trim()) return q.trim();
+    return "emma"; // <= adapte si besoin
+  }, [router.query]);
 
-  const [loading, setLoading] = useState(true);
-  const [sending, setSending] = useState(false);
+  const [session, setSession] = useState(null);
+  const [user, setUser] = useState(null);
+
+  const [agent, setAgent] = useState(null);
 
   const [conversations, setConversations] = useState([]);
-  const [selectedConvId, setSelectedConvId] = useState("");
+  const [selectedConversationId, setSelectedConversationId] = useState(null);
+
   const [messages, setMessages] = useState([]);
-
   const [input, setInput] = useState("");
-  const endRef = useRef(null);
 
-  // --- Micro / dictée ---
-  const recognitionRef = useRef(null);
-  const [micSupported, setMicSupported] = useState(false);
-  const [listening, setListening] = useState(false);
+  const [loadingConvs, setLoadingConvs] = useState(false);
+  const [loadingMsgs, setLoadingMsgs] = useState(false);
+  const [creatingConv, setCreatingConv] = useState(false);
+  const [sending, setSending] = useState(false);
 
-  async function getAccessToken() {
-    const { data } = await supabase.auth.getSession();
-    return data?.session?.access_token || "";
+  const accessToken = useMemo(() => session?.access_token || null, [session]);
+  const firstName = useMemo(() => extractFirstNameFromUser(user), [user]);
+
+  const messagesEndRef = useRef(null);
+
+  function welcomeText() {
+    return firstName
+      ? `Bonjour ${firstName}, comment puis-je vous aider ?`
+      : "Bonjour, comment puis-je vous aider ?";
   }
 
-  async function logout() {
-    await supabase.auth.signOut();
-    window.location.href = "/login";
-  }
-
-  function goBack() {
-    window.location.href = "/agents";
-  }
-
-  // Responsive
   useEffect(() => {
-    const mql = window.matchMedia("(max-width: 980px)");
-    const apply = () => setIsMobile(!!mql.matches);
-    apply();
-    mql.addEventListener?.("change", apply);
-    return () => mql.removeEventListener?.("change", apply);
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session || null);
+      setUser(data.session?.user || null);
+    });
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession || null);
+      setUser(newSession?.user || null);
+    });
+
+    return () => sub?.subscription?.unsubscribe?.();
   }, []);
 
-  // Init dictée (Web Speech API)
+  // Load agent meta
   useEffect(() => {
-    const SR =
-      typeof window !== "undefined"
-        ? window.SpeechRecognition || window.webkitSpeechRecognition
-        : null;
+    if (!agentSlug) return;
 
-    if (!SR) {
-      setMicSupported(false);
-      return;
-    }
-
-    setMicSupported(true);
-    const rec = new SR();
-    rec.lang = "fr-FR";
-    rec.continuous = false; // évite répétitions
-    rec.interimResults = false; // évite doublons incrémentaux
-    rec.maxAlternatives = 1;
-
-    rec.onstart = () => setListening(true);
-    rec.onend = () => setListening(false);
-    rec.onerror = () => setListening(false);
-
-    rec.onresult = (event) => {
-      try {
-        const transcript = (event?.results?.[0]?.[0]?.transcript || "").trim();
-        if (!transcript) return;
-
-        setInput((prev) => {
-          const p = (prev || "").trim();
-          return p ? `${p} ${transcript}` : transcript;
-        });
-      } catch {
-        // no-op
-      }
-    };
-
-    recognitionRef.current = rec;
-
-    return () => {
-      try {
-        rec.onresult = null;
-        rec.onstart = null;
-        rec.onend = null;
-        rec.onerror = null;
-        rec.stop?.();
-      } catch {
-        // no-op
-      }
-      recognitionRef.current = null;
-    };
-  }, []);
-
-  function toggleMic() {
-    if (!micSupported || !recognitionRef.current) {
-      alert("Micro non supporté sur ce navigateur.");
-      return;
-    }
-    try {
-      if (listening) recognitionRef.current.stop();
-      else recognitionRef.current.start();
-    } catch {
-      // start() peut throw si appelé trop vite
-    }
-  }
-
-  // Boot: session + agent + conversations/messages
-  useEffect(() => {
     (async () => {
-      setLoading(true);
-
-      const { data: sess } = await supabase.auth.getSession();
-      const email = sess?.session?.user?.email || "";
-      setSessionEmail(email);
-
-      // agent depuis querystring ?agent=emma sinon localStorage
-      const params = new URLSearchParams(window.location.search);
-      const qsAgent = (params.get("agent") || "").trim().toLowerCase();
-      const stored = (window.localStorage.getItem("selected_agent_slug") || "").trim().toLowerCase();
-
-      const slug = (qsAgent || stored || "emma").trim().toLowerCase();
-      window.localStorage.setItem("selected_agent_slug", slug);
-      setAgentSlug(slug);
-
-      // Charger infos agent
-      const { data: agent } = await supabase
+      const { data, error } = await supabase
         .from("agents")
-        .select("slug,name,description,avatar_url")
-        .eq("slug", slug)
+        .select("id,slug,name,description,avatar_url")
+        .eq("slug", agentSlug)
         .maybeSingle();
 
-      setAgentName(agent?.name || slug);
-      setAgentRole(agent?.description || "");
-      setAgentAvatar(agent?.avatar_url || "");
+      if (error) {
+        console.error("Load agent error:", error.message);
+        setAgent(null);
+        return;
+      }
+      setAgent(data || null);
+    })();
+  }, [agentSlug]);
 
-      // Charger conversations (SANS archived)
-      const { data: convs, error: convErr } = await supabase
+  // Load conversations for this user + agent
+  useEffect(() => {
+    if (!user?.id) return;
+    if (!agentSlug) return;
+
+    (async () => {
+      setLoadingConvs(true);
+      const { data, error } = await supabase
         .from("conversations")
-        .select("id,user_id,created_at,agent_slug,title")
-        .eq("agent_slug", slug)
+        .select("id,title,created_at,agent_slug")
+        .eq("user_id", user.id)
+        .eq("agent_slug", agentSlug)
         .order("created_at", { ascending: false });
 
-      if (convErr) {
-        console.error("Erreur fetch conversations:", convErr);
+      setLoadingConvs(false);
+
+      if (error) {
+        console.error("Load conversations error:", error.message);
+        setConversations([]);
+        return;
       }
 
-      const list = convs || [];
+      const list = data || [];
       setConversations(list);
 
-      const firstId = list?.[0]?.id || "";
-      setSelectedConvId(firstId);
+      if (!selectedConversationId && list.length > 0) {
+        setSelectedConversationId(list[0].id);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, agentSlug]);
 
-      // Charger messages
-      if (firstId) {
-        const { data: msgs } = await supabase
-          .from("messages")
-          .select("id,conversation_id,role,content,created_at")
-          .eq("conversation_id", firstId)
-          .order("created_at", { ascending: true });
+  // Load messages
+  useEffect(() => {
+    if (!selectedConversationId) {
+      setMessages([]);
+      return;
+    }
 
-        setMessages(msgs || []);
-      } else {
+    (async () => {
+      setLoadingMsgs(true);
+      const { data, error } = await supabase
+        .from("messages")
+        .select("id,role,content,created_at")
+        .eq("conversation_id", selectedConversationId)
+        .order("created_at", { ascending: true });
+
+      setLoadingMsgs(false);
+
+      if (error) {
+        console.error("Load messages error:", error.message);
         setMessages([]);
+        return;
       }
 
-      setLoading(false);
+      setMessages(data || []);
     })();
-  }, []);
+  }, [selectedConversationId]);
 
-  // Scroll to bottom on messages change
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loadingMsgs]);
 
-  const selectedConversation = useMemo(() => {
-    return conversations.find((c) => c.id === selectedConvId) || null;
-  }, [conversations, selectedConvId]);
+  // IMPORTANT: création via API (pas via supabase insert)
+  async function handleNewConversation() {
+    if (!accessToken) {
+      alert("Session invalide. Veuillez vous reconnecter.");
+      return;
+    }
+    if (!agentSlug) return;
 
-  async function selectConversation(id) {
-    setSelectedConvId(id);
-    setDrawerOpen(false);
-
-    const { data: msgs } = await supabase
-      .from("messages")
-      .select("id,conversation_id,role,content,created_at")
-      .eq("conversation_id", id)
-      .order("created_at", { ascending: true });
-
-    setMessages(msgs || []);
-  }
-
-  async function newConversationInternal(title = "Nouvelle conversation") {
-    const { data: sess } = await supabase.auth.getSession();
-    const userId = sess?.session?.user?.id;
-    if (!userId) throw new Error("Non authentifié.");
-
-    // INSERT SANS archived
-    const { data: conv, error } = await supabase
-      .from("conversations")
-      .insert([{ user_id: userId, agent_slug: agentSlug, title }])
-      .select("id,user_id,created_at,agent_slug,title")
-      .maybeSingle();
-
-    if (error) throw new Error(error.message);
-    return conv;
-  }
-
-  async function newConversation() {
     try {
-      const conv = await newConversationInternal("Nouvelle conversation");
-      const next = [conv, ...conversations];
-      setConversations(next);
-      setSelectedConvId(conv.id);
-      setMessages([]);
-      setDrawerOpen(false);
+      setCreatingConv(true);
+
+      const resp = await fetch("/api/conversations", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ agent_slug: agentSlug }),
+      });
+
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) throw new Error(data?.error || "Create conversation failed");
+
+      const conv = data?.conversation;
+      if (!conv?.id) throw new Error("Missing conversation in response");
+
+      setConversations((prev) => [conv, ...prev]);
+      setSelectedConversationId(conv.id);
     } catch (e) {
-      alert(String(e?.message || e));
+      console.error(e);
+      alert("Impossible de créer une nouvelle conversation.");
+    } finally {
+      setCreatingConv(false);
     }
   }
 
-  function buildAutoTitleFromFirstMessage(text) {
-    const t = (text || "").trim().replace(/\s+/g, " ");
-    if (!t) return "Conversation";
-    const words = t.split(" ").slice(0, 7).join(" ");
-    return words.length < t.length ? `${words}…` : words;
-  }
+  async function handleDeleteConversation(conversationId) {
+    if (!accessToken) {
+      alert("Session invalide. Veuillez vous reconnecter.");
+      return;
+    }
 
-  async function ensureConversationSelected(forFirstMessageText) {
-    if (selectedConvId) return selectedConvId;
-
-    // Aucune conversation: on en crée une automatiquement
-    const autoTitle = buildAutoTitleFromFirstMessage(forFirstMessageText);
-    const conv = await newConversationInternal(autoTitle);
-    setConversations((prev) => [conv, ...prev]);
-    setSelectedConvId(conv.id);
-    setMessages([]);
-    setDrawerOpen(false);
-    return conv.id;
-  }
-
-  async function maybeUpdateConversationTitleIfDefault(convId, firstUserText) {
-    const conv = conversations.find((c) => c.id === convId) || null;
-    const currentTitle = (conv?.title || "").trim();
-
-    if (currentTitle && currentTitle !== "Nouvelle conversation") return;
-
-    const newTitle = buildAutoTitleFromFirstMessage(firstUserText);
-
-    await supabase.from("conversations").update({ title: newTitle }).eq("id", convId);
-
-    setConversations((prev) => prev.map((c) => (c.id === convId ? { ...c, title: newTitle } : c)));
-  }
-
-  async function sendMessage() {
-    const text = (input || "").trim();
-    if (!text) return;
-
-    setSending(true);
-    setInput("");
+    const ok = confirm("Supprimer cette conversation ? Cette action est irréversible.");
+    if (!ok) return;
 
     try {
-      const convId = await ensureConversationSelected(text);
-
-      // 1) Sauvegarde message user
-      await supabase.from("messages").insert([{ conversation_id: convId, role: "user", content: text }]);
-
-      // 1b) Auto-titre si première interaction
-      if ((messages || []).length === 0) {
-        await maybeUpdateConversationTitleIfDefault(convId, text);
-      }
-
-      // 2) Refresh messages
-      const { data: msgs1 } = await supabase
-        .from("messages")
-        .select("id,conversation_id,role,content,created_at")
-        .eq("conversation_id", convId)
-        .order("created_at", { ascending: true });
-
-      setMessages(msgs1 || []);
-
-      // 3) Appel agent
-      const token = await getAccessToken();
-      if (!token) throw new Error("Non authentifié.");
-
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ message: text, agentSlug }),
+      const resp = await fetch(`/api/conversations/${conversationId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
 
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
-
-      const reply = (data.reply || data.answer || data.content || "").toString().trim();
-
-      // 4) Sauvegarde message assistant
-      await supabase
-        .from("messages")
-        .insert([{ conversation_id: convId, role: "assistant", content: reply || "Réponse vide." }]);
-
-      const { data: msgs2 } = await supabase
-        .from("messages")
-        .select("id,conversation_id,role,content,created_at")
-        .eq("conversation_id", convId)
-        .order("created_at", { ascending: true });
-
-      setMessages(msgs2 || []);
-    } catch (e) {
-      const msg = `Erreur: ${String(e?.message || e)}`;
-      const convId = selectedConvId || null;
-      if (convId) {
-        await supabase.from("messages").insert([{ conversation_id: convId, role: "assistant", content: msg }]);
-        const { data: msgs2 } = await supabase
-          .from("messages")
-          .select("id,conversation_id,role,content,created_at")
-          .eq("conversation_id", convId)
-          .order("created_at", { ascending: true });
-        setMessages(msgs2 || []);
-      } else {
-        alert(msg);
+      if (!resp.ok && resp.status !== 204) {
+        const j = await resp.json().catch(() => null);
+        throw new Error(j?.error || "Delete failed");
       }
+
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+
+      if (selectedConversationId === conversationId) {
+        const remaining = conversations.filter((c) => c.id !== conversationId);
+        setSelectedConversationId(remaining[0]?.id || null);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Impossible de supprimer la conversation.");
+    }
+  }
+
+  async function handleSend() {
+    if (!selectedConversationId) return;
+    const content = input.trim();
+    if (!content) return;
+
+    try {
+      setSending(true);
+      setInput("");
+
+      const { data: userMsg, error: userMsgErr } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: selectedConversationId,
+          role: "user",
+          content,
+        })
+        .select("id,role,content,created_at")
+        .single();
+
+      if (userMsgErr) throw userMsgErr;
+      setMessages((prev) => [...prev, userMsg]);
+
+      const resp = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({
+          conversation_id: selectedConversationId,
+          agent_slug: agentSlug,
+          message: content,
+        }),
+      });
+
+      if (!resp.ok) {
+        const j = await resp.json().catch(() => null);
+        throw new Error(j?.error || "Chat API error");
+      }
+
+      const data = await resp.json();
+      const assistantText = data?.reply || data?.content || "";
+
+      if (assistantText) {
+        const { data: asstMsg, error: asstErr } = await supabase
+          .from("messages")
+          .insert({
+            conversation_id: selectedConversationId,
+            role: "assistant",
+            content: assistantText,
+          })
+          .select("id,role,content,created_at")
+          .single();
+
+        if (!asstErr && asstMsg) setMessages((prev) => [...prev, asstMsg]);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Erreur lors de l’envoi du message.");
     } finally {
       setSending(false);
     }
   }
 
+  const showWelcomeFallback =
+    !loadingMsgs && selectedConversationId && (messages?.length || 0) === 0;
+
   return (
-    <main style={styles.page}>
-      {/* HEADER */}
-      <div style={styles.header}>
-        <div style={styles.headerLeft}>
-          <button style={styles.headerBtn} onClick={goBack}>
-            ← Retour
-          </button>
+    <div className="page">
+      <div className="topbar">
+        <button className="btn back" onClick={() => router.push("/agents")}>
+          ← Retour
+        </button>
 
-          <div style={styles.agentBlock}>
-            <div style={styles.agentAvatarWrap}>
-              {agentAvatar ? <img src={agentAvatar} alt={agentName} style={styles.agentAvatar} /> : <div style={styles.agentAvatarFallback} />}
-            </div>
-            <div style={{ lineHeight: 1.1 }}>
-              <div style={styles.agentName}>{agentName || "Agent"}</div>
-              <div style={styles.agentRole}>{agentRole || "Assistant"}</div>
-            </div>
-          </div>
+        <div className="brand">
+          <div className="brandTitle">Evidenc’IA</div>
         </div>
 
-        <div style={styles.headerCenter}>
-          <img
-            src="/images/logolong.png"
-            alt="Evidenc'IA"
-            style={styles.logo}
-            onError={(e) => {
-              e.currentTarget.style.display = "none";
+        <div className="topbarRight">
+          <div className="pill">{user?.email || "—"}</div>
+          <button
+            className="btn logout"
+            onClick={async () => {
+              await supabase.auth.signOut();
+              router.push("/login");
             }}
-          />
-        </div>
-
-        <div style={styles.headerRight}>
-          <div style={styles.emailPill}>{sessionEmail || ""}</div>
-
-          <button style={styles.headerBtnDanger} onClick={logout}>
+          >
             Déconnexion
           </button>
-
-          {isMobile && (
-            <button style={styles.headerBtn} onClick={() => setDrawerOpen((v) => !v)}>
-              Historique
-            </button>
-          )}
         </div>
       </div>
 
-      {/* LAYOUT */}
-      <div style={styles.layout}>
-        {/* SIDEBAR desktop */}
-        {!isMobile && (
-          <aside style={styles.sidebar}>
-            <div style={styles.sidebarHead}>
-              <div style={styles.sidebarTitle}>Historique</div>
-              <button style={styles.newBtn} onClick={newConversation}>
-                + Nouvelle
+      <div className="layout">
+        <aside className="sidebar">
+          <div className="sidebarHeader">
+            <div className="sidebarTitle">Historique</div>
+            <button className="btn new" onClick={handleNewConversation} disabled={creatingConv}>
+              + Nouvelle
+            </button>
+          </div>
+
+          <div className="sidebarBody">
+            {loadingConvs ? (
+              <div className="muted">Chargement...</div>
+            ) : conversations.length === 0 ? (
+              <div className="muted">Aucune conversation.</div>
+            ) : (
+              <div className="convList">
+                {conversations.map((c) => {
+                  const active = c.id === selectedConversationId;
+                  return (
+                    <div
+                      key={c.id}
+                      className={`convItem ${active ? "active" : ""}`}
+                      onClick={() => setSelectedConversationId(c.id)}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div className="convTitle">{c.title || "Conversation"}</div>
+
+                      {/* CROIX ROUGE */}
+                      <button
+                        className="convDelete"
+                        title="Supprimer la conversation"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleDeleteConversation(c.id);
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </aside>
+
+        <main className="main">
+          <div className="agentHeader">
+            <div className="agentLeft">
+              <div className="agentAvatar">
+                {agent?.avatar_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={agent.avatar_url} alt={agent.name || "Agent"} />
+                ) : (
+                  <div className="avatarFallback">{(agent?.name || "A").slice(0, 1)}</div>
+                )}
+              </div>
+              <div className="agentMeta">
+                <div className="agentName">{agent?.name || "Agent"}</div>
+                <div className="agentRole">{agent?.description || ""}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="chat">
+            <div className="chatBody">
+              {!selectedConversationId ? (
+                <div className="muted">Sélectionne une conversation ou clique sur “+ Nouvelle”.</div>
+              ) : loadingMsgs ? (
+                <div className="muted">Chargement des messages...</div>
+              ) : (
+                <>
+                  {showWelcomeFallback && (
+                    <div className="msgRow assistant">
+                      <div className="msgBubble">{welcomeText()}</div>
+                    </div>
+                  )}
+
+                  {(messages || []).map((m) => (
+                    <div key={m.id} className={`msgRow ${m.role === "user" ? "user" : "assistant"}`}>
+                      <div className="msgBubble">{m.content}</div>
+                    </div>
+                  ))}
+
+                  <div ref={messagesEndRef} />
+                </>
+              )}
+            </div>
+
+            <div className="chatInput">
+              <input
+                className="input"
+                placeholder="Écrire…"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                disabled={!selectedConversationId || sending}
+              />
+
+              <button className="btn mic" type="button" title="Dictée vocale (à connecter)">
+                🎙
+              </button>
+
+              <button className="btn send" onClick={handleSend} disabled={!selectedConversationId || sending}>
+                {sending ? "Envoi..." : "Envoyer"}
               </button>
             </div>
 
-            <div style={styles.sidebarList}>
-              {conversations.map((c) => {
-                const active = c.id === selectedConvId;
-                return (
-                  <button
-                    key={c.id}
-                    style={{ ...styles.convItem, ...(active ? styles.convItemActive : {}) }}
-                    onClick={() => selectConversation(c.id)}
-                    title={c.title || "Conversation"}
-                  >
-                    {c.title || "Conversation"}
-                  </button>
-                );
-              })}
-              {conversations.length === 0 && <div style={styles.muted}>Aucune conversation.</div>}
-            </div>
-          </aside>
-        )}
-
-        {/* Drawer mobile */}
-        {isMobile && drawerOpen && (
-          <div style={styles.drawerOverlay} onClick={() => setDrawerOpen(false)}>
-            <div style={styles.drawer} onClick={(e) => e.stopPropagation()}>
-              <div style={styles.sidebarHead}>
-                <div style={styles.sidebarTitle}>Historique</div>
-                <button style={styles.newBtn} onClick={newConversation}>
-                  + Nouvelle
-                </button>
-              </div>
-              <div style={styles.sidebarList}>
-                {conversations.map((c) => {
-                  const active = c.id === selectedConvId;
-                  return (
-                    <button
-                      key={c.id}
-                      style={{ ...styles.convItem, ...(active ? styles.convItemActive : {}) }}
-                      onClick={() => selectConversation(c.id)}
-                    >
-                      {c.title || "Conversation"}
-                    </button>
-                  );
-                })}
-                {conversations.length === 0 && <div style={styles.muted}>Aucune conversation.</div>}
-              </div>
+            <div className="chatFooter">
+              <div className="mutedSmall">{selectedConversationId ? `Conversation: ${selectedConversationId}` : ""}</div>
             </div>
           </div>
-        )}
-
-        {/* CHAT */}
-        <section style={styles.chat}>
-          <div style={styles.chatInner}>
-            {loading ? (
-              <div style={styles.muted}>Chargement…</div>
-            ) : (
-              <>
-                <div style={styles.msgList}>
-                  {messages.map((m) => {
-                    const isUser = m.role === "user";
-                    return (
-                      <div key={m.id} style={{ ...styles.msgRow, justifyContent: isUser ? "flex-end" : "flex-start" }}>
-                        <div style={{ ...styles.bubble, ...(isUser ? styles.bubbleUser : styles.bubbleAssistant) }}>
-                          <div style={styles.bubbleText}>{m.content}</div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <div ref={endRef} />
-                </div>
-
-                <div style={styles.composer}>
-                  <textarea
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    placeholder="Écrire…"
-                    style={styles.input}
-                    rows={isMobile ? 2 : 3}
-                    onKeyDown={(e) => {
-                      // Entrée => envoyer | Shift+Entrée => nouvelle ligne
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        if (!sending) sendMessage();
-                      }
-                    }}
-                  />
-
-                  {/* Micro à droite, juste avant Envoyer */}
-                  <button
-                    type="button"
-                    onClick={toggleMic}
-                    title={micSupported ? (listening ? "Arrêter la dictée" : "Dicter (micro)") : "Micro non supporté"}
-                    style={{
-                      ...styles.micBtn,
-                      ...(listening ? styles.micBtnActive : {}),
-                      ...(micSupported ? {} : styles.micBtnDisabled),
-                    }}
-                    disabled={!micSupported}
-                  >
-                    <MicIcon />
-                  </button>
-
-                  <button style={styles.sendBtn} onClick={sendMessage} disabled={sending}>
-                    {sending ? "…" : "Envoyer"}
-                  </button>
-                </div>
-
-                {!!selectedConversation && (
-                  <div style={styles.tinyNote}>
-                    Conversation: <span style={{ fontFamily: "monospace" }}>{selectedConversation.id.slice(0, 8)}…</span>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </section>
+        </main>
       </div>
-    </main>
+
+      <style jsx>{`
+        .page { min-height: 100vh; background: #050608; color: #e9eef6; }
+        .topbar { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px;
+          border-bottom: 1px solid rgba(255,255,255,0.06);
+          background: radial-gradient(1200px 200px at 50% -20%, rgba(255,130,30,0.18), transparent);
+        }
+        .btn { border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.04);
+          color: #e9eef6; padding: 10px 12px; border-radius: 14px; cursor: pointer; font-weight: 600; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .btn.logout { border-color: rgba(255,80,80,0.35); }
+        .brand { display: flex; align-items: center; justify-content: center; flex: 1; text-align: center; }
+        .brandTitle { font-size: 20px; font-weight: 800; letter-spacing: 0.6px; }
+        .topbarRight { display: flex; gap: 10px; align-items: center; }
+        .pill { border: 1px solid rgba(255,255,255,0.12); padding: 8px 10px; border-radius: 999px; font-size: 12px; opacity: 0.9; }
+
+        .layout { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px; }
+        .sidebar { border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; background: rgba(255,255,255,0.02); overflow: hidden; min-height: calc(100vh - 96px); }
+        .sidebarHeader { display: flex; align-items: center; justify-content: space-between; padding: 14px 14px 10px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+        .sidebarTitle { font-size: 16px; font-weight: 800; }
+        .sidebarBody { padding: 10px; }
+        .muted { color: rgba(233,238,246,0.65); font-size: 14px; padding: 8px; }
+        .mutedSmall { color: rgba(233,238,246,0.55); font-size: 12px; }
+
+        .convList { display: flex; flex-direction: column; gap: 10px; }
+        .convItem { position: relative; border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 12px 44px 12px 12px; background: rgba(255,255,255,0.03); cursor: pointer; }
+        .convItem.active { border-color: rgba(255,130,30,0.35); background: rgba(255,130,30,0.07); }
+        .convTitle { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .convDelete { position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+          width: 30px; height: 30px; border-radius: 12px; border: 1px solid rgba(255,60,60,0.35);
+          background: rgba(255,60,60,0.12); color: rgba(255,210,210,0.95);
+          font-size: 20px; line-height: 28px; cursor: pointer; }
+
+        .main { border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; background: rgba(255,255,255,0.02);
+          min-height: calc(100vh - 96px); display: flex; flex-direction: column; overflow: hidden; }
+        .agentHeader { padding: 14px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+        .agentLeft { display: flex; gap: 12px; align-items: center; }
+        .agentAvatar { width: 44px; height: 44px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
+          background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; }
+        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; }
+        .avatarFallback { font-weight: 900; opacity: 0.85; }
+        .agentName { font-weight: 900; }
+        .agentRole { font-size: 12px; color: rgba(233,238,246,0.65); margin-top: 2px; }
+
+        .chat { display: flex; flex-direction: column; flex: 1; }
+        .chatBody { flex: 1; padding: 16px; overflow: auto; }
+        .msgRow { display: flex; margin-bottom: 10px; }
+        .msgRow.user { justify-content: flex-end; }
+        .msgRow.assistant { justify-content: flex-start; }
+        .msgBubble { max-width: 820px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);
+          border-radius: 18px; padding: 12px 14px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+        .msgRow.user .msgBubble { border-color: rgba(255,130,30,0.25); background: rgba(255,130,30,0.08); }
+
+        .chatInput { display: flex; gap: 10px; padding: 14px; border-top: 1px solid rgba(255,255,255,0.06); align-items: center; }
+        .input { flex: 1; height: 48px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);
+          background: rgba(0,0,0,0.25); color: #e9eef6; padding: 0 14px; outline: none; }
+        .btn.send { border-color: rgba(255,130,30,0.35); background: rgba(255,130,30,0.12); }
+        .btn.mic { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; }
+
+        .chatFooter { padding: 10px 14px 14px; }
+
+        @media (max-width: 980px) {
+          .layout { grid-template-columns: 1fr; }
+          .sidebar { min-height: auto; }
+          .main { min-height: 60vh; }
+        }
+      `}</style>
+    </div>
   );
 }
-
-function MicIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path
-        fill="currentColor"
-        d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a1 1 0 1 1 2 0a7 7 0 0 1-6 6.92V20h2a1 1 0 1 1 0 2H9a1 1 0 1 1 0-2h2v-2.08A7 7 0 0 1 5 11a1 1 0 1 1 2 0a5 5 0 0 0 10 0z"
-      />
-    </svg>
-  );
-}
-
-const styles = {
-  page: {
-    minHeight: "100vh",
-    background: "linear-gradient(135deg,#05060a,#0a0d16)",
-    color: "rgba(238,242,255,.92)",
-    fontFamily: '"Segoe UI", Arial, sans-serif',
-    overflow: "hidden",
-  },
-
-  header: {
-    display: "flex",
-    gap: 12,
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "12px 12px 0",
-    flexWrap: "wrap",
-  },
-  headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 280 },
-  headerCenter: { display: "flex", alignItems: "center", justifyContent: "center", flex: 1, minWidth: 140 },
-  headerRight: { display: "flex", alignItems: "center", gap: 10, justifyContent: "flex-end", minWidth: 280, flexWrap: "wrap" },
-
-  headerBtn: {
-    borderRadius: 999,
-    padding: "10px 12px",
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(0,0,0,.25)",
-    color: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
-    whiteSpace: "nowrap",
-  },
-  headerBtnDanger: {
-    borderRadius: 999,
-    padding: "10px 12px",
-    border: "1px solid rgba(255,80,80,.35)",
-    background: "rgba(255,80,80,.10)",
-    color: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
-    whiteSpace: "nowrap",
-  },
-  emailPill: {
-    padding: "8px 10px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.12)",
-    background: "rgba(255,255,255,.06)",
-    fontWeight: 800,
-    fontSize: 12,
-    opacity: 0.9,
-    maxWidth: 240,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-  },
-
-  logo: { height: 28, width: "auto", opacity: 0.95, display: "block" },
-
-  agentBlock: { display: "flex", alignItems: "center", gap: 10 },
-  agentAvatarWrap: { width: 44, height: 44, borderRadius: 999, overflow: "hidden", border: "1px solid rgba(255,255,255,.12)" },
-  agentAvatar: { width: "100%", height: "100%", objectFit: "cover", objectPosition: "center 15%" },
-  agentAvatarFallback: { width: "100%", height: "100%", background: "rgba(255,255,255,.06)" },
-  agentName: { fontWeight: 900, fontSize: 16 },
-  agentRole: { fontWeight: 800, opacity: 0.75, fontSize: 12 },
-
-  layout: {
-    display: "grid",
-    gridTemplateColumns: "360px 1fr",
-    gap: 14,
-    padding: 12,
-    height: "calc(100vh - 64px)",
-  },
-
-  sidebar: {
-    border: "1px solid rgba(255,255,255,.12)",
-    borderRadius: 16,
-    background: "rgba(0,0,0,.35)",
-    backdropFilter: "blur(10px)",
-    boxShadow: "0 18px 45px rgba(0,0,0,.55)",
-    overflow: "hidden",
-    display: "flex",
-    flexDirection: "column",
-  },
-  sidebarHead: {
-    padding: 12,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-    borderBottom: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(0,0,0,.12)",
-  },
-  sidebarTitle: { fontWeight: 900 },
-  newBtn: {
-    borderRadius: 999,
-    padding: "10px 12px",
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(255,255,255,.10)",
-    color: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
-  },
-  sidebarList: { padding: 12, display: "grid", gap: 10, overflow: "auto" },
-
-  convItem: {
-    textAlign: "left",
-    padding: 12,
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(255,255,255,.03)",
-    color: "rgba(238,242,255,.92)",
-    fontWeight: 900,
-    cursor: "pointer",
-  },
-  convItemActive: { borderColor: "rgba(255,140,40,.35)", background: "rgba(255,140,40,.10)" },
-
-  chat: {
-    border: "1px solid rgba(255,255,255,.12)",
-    borderRadius: 16,
-    background: "rgba(0,0,0,.35)",
-    backdropFilter: "blur(10px)",
-    boxShadow: "0 18px 45px rgba(0,0,0,.55)",
-    overflow: "hidden",
-    display: "flex",
-    flexDirection: "column",
-  },
-  chatInner: { display: "flex", flexDirection: "column", height: "100%" },
-  msgList: { padding: 12, overflow: "auto", flex: 1 },
-
-  msgRow: { display: "flex", marginBottom: 10 },
-  bubble: {
-    maxWidth: "min(820px, 92%)",
-    borderRadius: 16,
-    border: "1px solid rgba(255,255,255,.12)",
-    padding: 12,
-    boxShadow: "0 10px 24px rgba(0,0,0,.35)",
-  },
-  bubbleUser: { background: "rgba(255,255,255,.08)" },
-  bubbleAssistant: { background: "rgba(0,0,0,.20)" },
-  bubbleText: {
-    whiteSpace: "pre-wrap",
-    lineHeight: 1.35,
-    fontWeight: 650,
-    fontSize: 14,
-  },
-
-  composer: {
-    display: "flex",
-    gap: 10,
-    padding: 12,
-    borderTop: "1px solid rgba(255,255,255,.10)",
-    background: "rgba(0,0,0,.12)",
-    alignItems: "flex-end",
-  },
-  input: {
-    flex: 1,
-    resize: "none",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(255,255,255,.06)",
-    color: "rgba(238,242,255,.92)",
-    padding: 12,
-    outline: "none",
-    fontWeight: 800,
-    lineHeight: 1.3,
-  },
-
-  // Micro (juste avant Envoyer)
-  micBtn: {
-    width: 46,
-    height: 46,
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,.14)",
-    background: "rgba(255,255,255,.06)",
-    color: "rgba(238,242,255,.92)",
-    fontWeight: 900,
-    cursor: "pointer",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    flex: "0 0 auto",
-  },
-  micBtnActive: {
-    borderColor: "rgba(255,80,80,.45)",
-    background: "rgba(255,80,80,.12)",
-  },
-  micBtnDisabled: {
-    opacity: 0.5,
-    cursor: "not-allowed",
-  },
-
-  // Envoyer orange
-  sendBtn: {
-    borderRadius: 14,
-    padding: "12px 14px",
-    border: "1px solid rgba(255,140,40,.45)",
-    background: "rgba(255,140,40,.18)",
-    color: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
-    minWidth: 104,
-  },
-
-  tinyNote: { padding: "0 12px 10px", opacity: 0.7, fontWeight: 800, fontSize: 12 },
-  muted: { opacity: 0.75, fontWeight: 800 },
-
-  drawerOverlay: {
-    position: "fixed",
-    inset: 0,
-    background: "rgba(0,0,0,.65)",
-    zIndex: 9999,
-    display: "flex",
-  },
-  drawer: {
-    width: "min(420px, 86vw)",
-    height: "100%",
-    background: "rgba(0,0,0,.85)",
-    borderRight: "1px solid rgba(255,255,255,.12)",
-    padding: 12,
-    display: "flex",
-    flexDirection: "column",
-  },
-};
