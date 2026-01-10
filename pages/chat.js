@@ -389,7 +389,7 @@ export default function ChatPage() {
         </button>
 
         <div className="brand">
-          <div className="brandTitle">Evidenc’IA</div>
+          <div className="brandTitle">logolong.png</div>
         </div>
 
         <div className="topbarRight">
