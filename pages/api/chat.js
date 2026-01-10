@@ -1,188 +1,213 @@
-// pages/api/chat.js
+// /pages/api/chat.js
+
 import { Mistral } from "@mistralai/mistralai";
 import { createClient } from "@supabase/supabase-js";
+import agentPrompts from "../../lib/agentPrompts";
 
-/**
- * Evidencia-app - API Chat
- * - Auth via Bearer token (supabaseAdmin.auth.getUser)
- * - Vérifie agent + assignation user_agents
- * - Charge prompt personnalisé via client_agent_configs (system_prompt / context)
- * - Fallback sur lib/agentPrompts (si présent)
- * - Appel Mistral chat.complete
- * - Si la réponse de l'IA est un JSON strict {to, subject, body}, déclenche Make (webhook) pour envoyer l'email.
- */
+const {
+  MISTRAL_API_KEY,
+  SUPABASE_SERVICE_ROLE_KEY,
+  NEXT_PUBLIC_SUPABASE_URL,
+  MAKE_WEBHOOK_URL,
+  MISTRAL_MODEL,
+} = process.env;
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const mistralApiKey = process.env.MISTRAL_API_KEY;
-const makeWebhookUrl = process.env.MAKE_WEBHOOK_URL;
-
-if (!supabaseUrl || !serviceRoleKey) {
-  // Ne pas throw au top-level sur Vercel (cold start) : on gère en runtime.
+if (!NEXT_PUBLIC_SUPABASE_URL) {
+  throw new Error("Missing env NEXT_PUBLIC_SUPABASE_URL");
 }
-if (!mistralApiKey) {
-  // idem
+if (!SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("Missing env SUPABASE_SERVICE_ROLE_KEY");
+}
+if (!MISTRAL_API_KEY) {
+  throw new Error("Missing env MISTRAL_API_KEY");
 }
 
-const supabaseAdmin = createClient(supabaseUrl || "", serviceRoleKey || "", {
-  auth: { persistSession: false },
-});
+const supabaseAdmin = createClient(
+  NEXT_PUBLIC_SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  { auth: { persistSession: false } }
+);
+
+const mistral = new Mistral({ apiKey: MISTRAL_API_KEY });
 
 function getBearerToken(req) {
   const auth = req.headers.authorization || "";
-  const [type, token] = auth.split(" ");
-  if (type !== "Bearer" || !token) return null;
-  return token;
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
 }
 
-function safeJsonParse(str) {
+function stripCodeFences(text) {
+  const t = (text || "").trim();
+  // ```json ... ```
+  const fenced = t.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenced) return fenced[1].trim();
+  return t;
+}
+
+function tryParseEmailJson(text) {
+  const raw = stripCodeFences(text);
+  if (!raw.startsWith("{") || !raw.endsWith("}")) return null;
   try {
-    return { ok: true, value: JSON.parse(str) };
-  } catch {
-    return { ok: false, value: null };
-  }
-}
-
-function isStrictEmailJson(obj) {
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
-  const keys = Object.keys(obj);
-  if (keys.length !== 3) return false;
-  if (!("to" in obj) || !("subject" in obj) || !("body" in obj)) return false;
-  if (typeof obj.to !== "string" || typeof obj.subject !== "string" || typeof obj.body !== "string") return false;
-  if (!obj.to.trim() || !obj.subject.trim() || !obj.body.trim()) return false;
-  return true;
-}
-
-async function sendToMakeEmail({ to, subject, body }) {
-  if (!makeWebhookUrl) {
-    return { ok: false, error: "MAKE_WEBHOOK_URL is not set" };
-  }
-
-  // Webhook Make en GET (query params) : simple et robuste
-  const url =
-    `${makeWebhookUrl}` +
-    `?to=${encodeURIComponent(to)}` +
-    `&subject=${encodeURIComponent(subject)}` +
-    `&body=${encodeURIComponent(body)}`;
-
-  const resp = await fetch(url, { method: "GET" });
-  const text = await resp.text().catch(() => "");
-  if (!resp.ok) {
-    return { ok: false, error: `Make webhook failed (${resp.status})`, details: text };
-  }
-  return { ok: true, details: text };
-}
-
-async function loadAgentFallbackPrompt(agentSlug) {
-  // Fallback facultatif : lib/agentPrompts.js (ou .ts) si vous l’avez
-  // Doit exporter un objet { [slug]: { systemPrompt, context } } ou similaire
-  try {
-    // eslint-disable-next-line import/no-unresolved
-    const mod = await import("../../lib/agentPrompts");
-    const prompts = mod?.default || mod?.agentPrompts || mod || null;
-    if (!prompts) return null;
-
-    const entry = prompts[agentSlug];
-    if (!entry) return null;
-
-    // Support de plusieurs formats
-    const systemPrompt =
-      entry.systemPrompt || entry.system_prompt || entry.prompt || entry.system || null;
-    const context = entry.context || null;
-
-    if (!systemPrompt) return null;
-    return { systemPrompt, context };
+    const obj = JSON.parse(raw);
+    if (
+      obj &&
+      typeof obj === "object" &&
+      typeof obj.to === "string" &&
+      typeof obj.subject === "string" &&
+      typeof obj.body === "string"
+    ) {
+      return { to: obj.to.trim(), subject: obj.subject, body: obj.body };
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
+async function sendEmailViaMake({ to, subject, body }) {
+  if (!MAKE_WEBHOOK_URL) {
+    throw new Error("MAKE_WEBHOOK_URL is not configured on server");
+  }
+
+  const resp = await fetch(MAKE_WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // Webhook Make: attend {to, subject, body}
+    body: JSON.stringify({ to, subject, body }),
+  });
+
+  const text = await resp.text().catch(() => "");
+  if (!resp.ok) {
+    throw new Error(`Make webhook error (${resp.status}): ${text || "no body"}`);
+  }
+  return { ok: true, status: resp.status, body: text };
+}
+
 export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
   try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed" });
-    }
-
-    if (!supabaseUrl || !serviceRoleKey) {
-      return res.status(500).json({ error: "Supabase env vars missing" });
-    }
-    if (!mistralApiKey) {
-      return res.status(500).json({ error: "MISTRAL_API_KEY is missing" });
-    }
-
     const token = getBearerToken(req);
-    if (!token) {
-      return res.status(401).json({ error: "Missing Bearer token" });
+    if (!token) return res.status(401).json({ error: "Missing Bearer token" });
+
+    const {
+      conversationId,
+      agentSlug,
+      message,
+      title,
+    } = req.body || {};
+
+    if (!agentSlug || typeof agentSlug !== "string") {
+      return res.status(400).json({ error: "Missing agentSlug" });
+    }
+    if (!message || typeof message !== "string") {
+      return res.status(400).json({ error: "Missing message" });
     }
 
-    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-    if (userErr || !userData?.user) {
+    // Auth user
+    const { data: authData, error: authErr } =
+      await supabaseAdmin.auth.getUser(token);
+
+    if (authErr || !authData?.user) {
       return res.status(401).json({ error: "Invalid token" });
     }
 
-    const user = userData.user;
+    const user = authData.user;
 
-    // Body attendu
-    // {
-    //   agent_slug: string,
-    //   messages: [{role:"user"|"assistant"|"system", content:string}, ...],
-    //   conversation_id?: string
-    // }
-    const body = req.body || {};
-    const agentSlug = body.agent_slug || body.agentSlug;
-    const messages = Array.isArray(body.messages) ? body.messages : [];
+    // Check license expiration (profiles.expires_at)
+    const { data: profile, error: profErr } = await supabaseAdmin
+      .from("profiles")
+      .select("expires_at, role")
+      .eq("user_id", user.id)
+      .maybeSingle();
 
-    if (!agentSlug) {
-      return res.status(400).json({ error: "agent_slug is required" });
-    }
-    if (!messages.length) {
-      return res.status(400).json({ error: "messages[] is required" });
+    if (profErr) {
+      return res.status(500).json({ error: "Failed to load profile" });
     }
 
-    // 1) Vérifier l’agent existe
+    if (profile?.expires_at) {
+      const exp = new Date(profile.expires_at).getTime();
+      if (!Number.isNaN(exp) && Date.now() > exp && profile?.role !== "admin") {
+        return res.status(403).json({
+          error:
+            "Abonnement expiré. Veuillez contacter Evidenc'IA pour renouveler votre abonnement.",
+        });
+      }
+    }
+
+    // Ensure conversation exists (or create)
+    let convId = conversationId;
+    if (!convId) {
+      const { data: created, error: convErr } = await supabaseAdmin
+        .from("conversations")
+        .insert({
+          user_id: user.id,
+          agent_slug: agentSlug,
+          title: title || null,
+          archived: false,
+        })
+        .select("id")
+        .single();
+
+      if (convErr) {
+        return res.status(500).json({ error: "Failed to create conversation" });
+      }
+      convId = created.id;
+    }
+
+    // Store user message
+    const { error: insUserErr } = await supabaseAdmin.from("messages").insert({
+      conversation_id: convId,
+      role: "user",
+      content: message,
+    });
+
+    if (insUserErr) {
+      return res.status(500).json({ error: "Failed to save user message" });
+    }
+
+    // Load recent messages for context
+    const { data: history, error: histErr } = await supabaseAdmin
+      .from("messages")
+      .select("role, content, created_at")
+      .eq("conversation_id", convId)
+      .order("created_at", { ascending: true })
+      .limit(50);
+
+    if (histErr) {
+      return res.status(500).json({ error: "Failed to load message history" });
+    }
+
+    // Load agent config (client_agent_configs) if any (by agent_id via agents.slug)
     const { data: agentRow, error: agentErr } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
       .eq("slug", agentSlug)
       .maybeSingle();
 
-    if (agentErr) {
-      return res.status(500).json({ error: "Failed to read agents", details: agentErr.message });
-    }
-    if (!agentRow) {
-      return res.status(404).json({ error: `Unknown agent_slug: ${agentSlug}` });
+    if (agentErr || !agentRow?.id) {
+      return res.status(400).json({ error: "Unknown agent slug" });
     }
 
-    // 2) Vérifier assignation user_agents (ou admin)
-    const { data: profileRow } = await supabaseAdmin
-      .from("profiles")
-      .select("role")
+    // Ensure user has access (user_agents)
+    const { data: ua, error: uaErr } = await supabaseAdmin
+      .from("user_agents")
+      .select("id")
       .eq("user_id", user.id)
+      .eq("agent_id", agentRow.id)
       .maybeSingle();
 
-    const isAdmin = profileRow?.role === "admin";
-
-    if (!isAdmin) {
-      const { data: uaRow, error: uaErr } = await supabaseAdmin
-        .from("user_agents")
-        .select("id")
-        .eq("user_id", user.id)
-        .eq("agent_id", agentRow.id)
-        .maybeSingle();
-
-      if (uaErr) {
-        return res.status(500).json({ error: "Failed to read user_agents", details: uaErr.message });
-      }
-      if (!uaRow) {
-        return res.status(403).json({ error: "Agent not assigned to this user" });
-      }
+    if (uaErr) {
+      return res.status(500).json({ error: "Failed to check user agent access" });
+    }
+    if (!ua && profile?.role !== "admin") {
+      return res.status(403).json({ error: "Agent not assigned to this user" });
     }
 
-    // 3) Charger config personnalisée éventuelle
-    let systemPrompt = null;
-    let context = null;
-
-    const { data: cfgRow, error: cfgErr } = await supabaseAdmin
+    // Custom system prompt (client_agent_configs)
+    const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
       .eq("user_id", user.id)
@@ -190,109 +215,85 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     if (cfgErr) {
-      return res.status(500).json({
-        error: "Failed to read client_agent_configs",
-        details: cfgErr.message,
-      });
+      return res.status(500).json({ error: "Failed to load agent config" });
     }
 
-    if (cfgRow?.system_prompt) {
-      systemPrompt = cfgRow.system_prompt;
-      context = cfgRow.context || null;
-    } else {
-      // fallback lib/agentPrompts
-      const fallback = await loadAgentFallbackPrompt(agentSlug);
-      if (fallback?.systemPrompt) {
-        systemPrompt = fallback.systemPrompt;
-        context = fallback.context || null;
-      }
-    }
+    const basePrompt =
+      (cfg?.system_prompt && String(cfg.system_prompt).trim()) ||
+      agentPrompts?.[agentSlug] ||
+      `Tu es l'agent ${agentRow.name || agentSlug}.`;
 
-    // 4) Construire le "system" final
-    // On injecte context si présent (JSON -> texte)
-    const systemParts = [];
-    if (systemPrompt) systemParts.push(systemPrompt);
+    const contextJson = cfg?.context ? JSON.stringify(cfg.context) : "";
 
-    if (context) {
-      systemParts.push(
-        `Contexte (JSON):\n${typeof context === "string" ? context : JSON.stringify(context, null, 2)}`
-      );
-    }
+    const systemPrompt = contextJson
+      ? `${basePrompt}\n\nCONTEXTE (json):\n${contextJson}`
+      : basePrompt;
 
-    const finalSystem = systemParts.length ? systemParts.join("\n\n") : null;
+    // Build messages for Mistral
+    const mistralMessages = [
+      { role: "system", content: systemPrompt },
+      ...(history || []).map((m) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content,
+      })),
+    ];
 
-    // 5) Appel Mistral
-    const mistral = new Mistral({ apiKey: mistralApiKey });
-
-    const mistralMessages = [];
-    if (finalSystem) {
-      mistralMessages.push({ role: "system", content: finalSystem });
-    }
-
-    for (const m of messages) {
-      if (!m || typeof m !== "object") continue;
-      const role = m.role;
-      const content = m.content;
-      if (!role || typeof content !== "string") continue;
-      if (!["system", "user", "assistant"].includes(role)) continue;
-      mistralMessages.push({ role, content });
-    }
+    const model = MISTRAL_MODEL || "mistral-large-latest";
 
     const completion = await mistral.chat.complete({
-      model: "mistral-large-latest",
+      model,
       messages: mistralMessages,
       temperature: 0.2,
     });
 
-    const content =
+    const assistantRaw =
+      completion?.choices?.[0]?.message?.content?.toString?.() ??
       completion?.choices?.[0]?.message?.content ??
-      completion?.choices?.[0]?.message?.content?.[0]?.text ??
       "";
 
-    const assistantText = typeof content === "string" ? content : JSON.stringify(content);
+    // 1) Detect JSON email command
+    const emailCmd = tryParseEmailJson(assistantRaw);
 
-    // 6) Si l'IA renvoie un JSON strict {to, subject, body} => on déclenche Make
-    const parsed = safeJsonParse(assistantText.trim());
-    if (parsed.ok && isStrictEmailJson(parsed.value)) {
-      const email = parsed.value;
+    let finalAssistantText = assistantRaw;
+    let emailSent = false;
+    let emailError = null;
 
-      const makeResult = await sendToMakeEmail(email);
+    if (emailCmd) {
+      try {
+        await sendEmailViaMake(emailCmd);
+        emailSent = true;
 
-      if (!makeResult.ok) {
-        // On renvoie une erreur exploitable côté front (mais sans casser l'agent)
-        return res.status(200).json({
-          ok: true,
-          agent_slug: agentSlug,
-          emailRequested: true,
-          emailSent: false,
-          email,
-          error: "EMAIL_SEND_FAILED",
-          details: makeResult,
-          content:
-            "Je n'ai pas pu déclencher l'envoi de l'email via Make. Vérifiez MAKE_WEBHOOK_URL et le scénario Make.",
-        });
+        // On remplace la réponse brute (JSON) par un message UI clair
+        finalAssistantText =
+          `L’email a été envoyé à ${emailCmd.to} avec l’objet "${emailCmd.subject}".`;
+      } catch (e) {
+        emailError = e?.message || String(e);
+        finalAssistantText =
+          `Erreur lors de l’envoi de l’email via Make : ${emailError}`;
       }
-
-      return res.status(200).json({
-        ok: true,
-        agent_slug: agentSlug,
-        emailRequested: true,
-        emailSent: true,
-        email,
-        content: `Email envoyé à ${email.to}.`,
-      });
     }
 
-    // Sinon, réponse standard
-    return res.status(200).json({
-      ok: true,
-      agent_slug: agentSlug,
-      content: assistantText,
+    // Store assistant message
+    const { error: insAsstErr } = await supabaseAdmin.from("messages").insert({
+      conversation_id: convId,
+      role: "assistant",
+      content: finalAssistantText,
     });
-  } catch (e) {
+
+    if (insAsstErr) {
+      return res.status(500).json({ error: "Failed to save assistant message" });
+    }
+
+    return res.status(200).json({
+      conversationId: convId,
+      assistant: finalAssistantText,
+      emailSent,
+      emailError,
+    });
+  } catch (err) {
     return res.status(500).json({
-      error: "Internal server error",
-      details: String(e?.message || e),
+      error: "Server error",
+      details: err?.message || String(err),
     });
   }
 }
