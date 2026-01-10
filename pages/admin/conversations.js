@@ -1,326 +1,549 @@
 // pages/admin/conversations.js
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/router";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "../../lib/supabaseClient";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || "",
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
-);
+export default function AdminConversations() {
+  const [loading, setLoading] = useState(true);
+  const [checkingAdmin, setCheckingAdmin] = useState(true);
+  const [msg, setMsg] = useState("");
 
-export default function AdminConversationsPage() {
-  const router = useRouter();
-
-  const [session, setSession] = useState(null);
-  const accessToken = useMemo(() => session?.access_token || null, [session]);
-
+  // Data
   const [clients, setClients] = useState([]);
-  const [selectedClientId, setSelectedClientId] = useState("");
-
   const [clientUsers, setClientUsers] = useState([]);
-  const [selectedUserId, setSelectedUserId] = useState("");
-
+  const [profiles, setProfiles] = useState([]);
   const [agents, setAgents] = useState([]);
-  const [selectedAgentSlug, setSelectedAgentSlug] = useState("");
 
+  // Filters
+  const [selectedClientId, setSelectedClientId] = useState("");
+  const [selectedUserId, setSelectedUserId] = useState(""); // "" = tous
+  const [selectedAgentSlug, setSelectedAgentSlug] = useState(""); // "" = tous
+
+  // Conversations list
   const [conversations, setConversations] = useState([]);
-  const [selectedIds, setSelectedIds] = useState(new Set());
-  const [loading, setLoading] = useState(false);
+  const [loadingConvs, setLoadingConvs] = useState(false);
+
+  // Selection
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session || null));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s || null));
-    return () => sub?.subscription?.unsubscribe?.();
-  }, []);
+  async function getAccessToken() {
+    const { data } = await supabase.auth.getSession();
+    return data?.session?.access_token || "";
+  }
 
+  function goBack() {
+    window.location.href = "/admin";
+  }
+
+  async function logout() {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
+  }
+
+  // --- Guard admin (best practice)
   useEffect(() => {
     (async () => {
-      const { data, error } = await supabase.from("clients").select("id,name").order("name");
-      if (error) {
-        console.error(error);
-        setClients([]);
-        return;
+      try {
+        setCheckingAdmin(true);
+        const { data } = await supabase.auth.getSession();
+        const session = data?.session;
+        if (!session?.user?.id) {
+          window.location.href = "/login";
+          return;
+        }
+
+        // role admin via profiles.role = 'admin'
+        const { data: p, error } = await supabase
+          .from("profiles")
+          .select("role")
+          .eq("user_id", session.user.id)
+          .maybeSingle();
+
+        if (error) throw error;
+
+        if ((p?.role || "") !== "admin") {
+          window.location.href = "/agents";
+          return;
+        }
+      } catch (e) {
+        console.error(e);
+        window.location.href = "/login";
+      } finally {
+        setCheckingAdmin(false);
       }
-      setClients(data || []);
     })();
   }, []);
 
-  useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase.from("agents").select("slug,name").order("name");
-      if (error) {
-        console.error(error);
-        setAgents([]);
-        return;
-      }
-      setAgents(data || []);
-    })();
-  }, []);
+  // --- Load base data
+  async function refreshAll() {
+    setLoading(true);
+    setMsg("");
+
+    const [cRes, cuRes, pRes, aRes] = await Promise.all([
+      supabase.from("clients").select("id,name,created_at").order("created_at", { ascending: false }),
+      supabase.from("client_users").select("client_id,user_id,created_at"),
+      supabase.from("profiles").select("user_id,email,role"),
+      supabase.from("agents").select("id,slug,name,description,avatar_url").order("name", { ascending: true }),
+    ]);
+
+    const errors = [cRes.error, cuRes.error, pRes.error, aRes.error].filter(Boolean);
+    if (errors.length) setMsg(errors.map((e) => e.message).join(" | "));
+
+    const newClients = cRes.data || [];
+    setClients(newClients);
+    setClientUsers(cuRes.data || []);
+    setProfiles(pRes.data || []);
+    setAgents(aRes.data || []);
+
+    // default selection: first client
+    setSelectedClientId((cur) => cur || newClients[0]?.id || "");
+    setLoading(false);
+  }
 
   useEffect(() => {
-    if (!selectedClientId) {
-      setClientUsers([]);
-      setSelectedUserId("");
-      return;
+    if (checkingAdmin) return;
+    refreshAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkingAdmin]);
+
+  // --- USERS LIST FOR CLIENT (FIX: mapping correct via client_users.user_id <-> profiles.user_id)
+  const usersForClient = useMemo(() => {
+    if (!selectedClientId) return [];
+
+    const links = (clientUsers || []).filter((x) => String(x.client_id) === String(selectedClientId));
+
+    // dedupe user_ids
+    const seen = new Set();
+    const ids = [];
+    for (const l of links) {
+      const uid = String(l?.user_id || "");
+      if (!uid) continue;
+      if (seen.has(uid)) continue;
+      seen.add(uid);
+      ids.push(uid);
     }
 
-    (async () => {
-      const { data, error } = await supabase
-        .from("client_users")
-        .select("user_id,profiles:profiles!client_users_user_id_fkey(email)")
-        .eq("client_id", selectedClientId);
+    return ids
+      .map((uid) => {
+        const p = (profiles || []).find((pp) => String(pp?.user_id || "") === uid);
+        const email = (p?.email || "").trim();
+        return {
+          user_id: uid,
+          email: email || "",
+          label: email ? email : `${uid.slice(0, 8)}…`,
+        };
+      })
+      .sort((a, b) => (a.label || "").localeCompare(b.label || "", "fr", { sensitivity: "base" }));
+  }, [selectedClientId, clientUsers, profiles]);
 
-      if (error) {
-        console.error(error);
-        setClientUsers([]);
-        return;
-      }
-
-      const list = (data || []).map((r) => ({
-        user_id: r.user_id,
-        email: r.profiles?.email || r.user_id,
-      }));
-
-      // Tri par email
-      list.sort((a, b) => (a.email || "").localeCompare(b.email || ""));
-
-      setClientUsers(list);
-    })();
+  // Reset user filter when client changes (keep safe)
+  useEffect(() => {
+    setSelectedUserId("");
+    setSelectedIds(new Set());
+    setConversations([]);
   }, [selectedClientId]);
 
-  async function loadConversations() {
-    if (!accessToken) {
-      alert("Session invalide. Reconnectez-vous.");
-      return;
-    }
+  // --- Fetch conversations via API (server-side verifies admin + applies RLS safely)
+  async function fetchConversations() {
     if (!selectedClientId) {
       alert("Choisissez un client.");
       return;
     }
-
-    setLoading(true);
+    setMsg("");
+    setLoadingConvs(true);
     setSelectedIds(new Set());
-    try {
-      const params = new URLSearchParams();
-      params.set("client_id", selectedClientId);
-      if (selectedUserId) params.set("user_id", selectedUserId);
-      if (selectedAgentSlug) params.set("agent_slug", selectedAgentSlug);
 
-      const resp = await fetch(`/api/admin/conversations?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        alert("Non authentifié.");
+        return;
+      }
+
+      const params = new URLSearchParams();
+      params.set("clientId", selectedClientId);
+      if (selectedUserId) params.set("userId", selectedUserId);
+      if (selectedAgentSlug) params.set("agentSlug", selectedAgentSlug);
+
+      const res = await fetch(`/api/admin/conversations?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
       });
 
-      const j = await resp.json().catch(() => null);
-      if (!resp.ok) throw new Error(j?.error || "Erreur chargement conversations");
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || "Erreur chargement conversations");
 
-      setConversations(j?.conversations || []);
+      const list = Array.isArray(data?.conversations) ? data.conversations : Array.isArray(data) ? data : [];
+      setConversations(list);
     } catch (e) {
       console.error(e);
-      alert("Impossible de charger les conversations.");
+      setMsg(e?.message || "Erreur lors du chargement.");
       setConversations([]);
     } finally {
-      setLoading(false);
+      setLoadingConvs(false);
     }
   }
 
-  function toggleOne(id) {
+  function toggleOne(id, checked) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (checked) next.add(id);
+      else next.delete(id);
       return next;
     });
   }
 
   function toggleAll() {
     setSelectedIds((prev) => {
-      const allIds = conversations.map((c) => c.id);
-      const allSelected = prev.size === allIds.length && allIds.length > 0;
-      if (allSelected) return new Set();
-      return new Set(allIds);
+      const allIds = (conversations || []).map((c) => c.id).filter(Boolean);
+      if (allIds.length === 0) return new Set();
+      const allSelected = prev.size === allIds.length;
+      return allSelected ? new Set() : new Set(allIds);
     });
   }
 
   async function deleteSelected() {
-    if (!accessToken) return;
-
-    const ids = Array.from(selectedIds);
+    const ids = Array.from(selectedIds || []);
     if (ids.length === 0) {
       alert("Sélectionnez au moins une conversation.");
       return;
     }
 
-    const ok = confirm(`Supprimer définitivement ${ids.length} conversation(s) ? (messages inclus)`);
+    const ok = window.confirm(`Supprimer définitivement ${ids.length} conversation(s) ? Cette action est irréversible.`);
     if (!ok) return;
 
     setDeleting(true);
-    try {
-      // Suppression en série (simple et fiable)
-      for (const id of ids) {
-        const resp = await fetch(`/api/admin/conversations/${id}`, {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
+    setMsg("");
 
-        if (!resp.ok && resp.status !== 204) {
-          const j = await resp.json().catch(() => null);
-          throw new Error(j?.error || `Erreur suppression ${id}`);
-        }
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        alert("Non authentifié.");
+        return;
       }
 
-      // Nettoyage UI
-      setConversations((prev) => prev.filter((c) => !selectedIds.has(c.id)));
-      setSelectedIds(new Set());
-      alert("Suppression terminée.");
+      // Best practice: supprimer via l’API, une par une (robuste même si pas de batch côté serveur).
+      // Si votre API supporte un batch, on pourra l’optimiser plus tard.
+      let deleted = 0;
+      for (const conversationId of ids) {
+        const res = await fetch(`/api/admin/conversations/${conversationId}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (!res.ok && res.status !== 204) {
+          const data = await res.json().catch(() => null);
+          throw new Error(data?.error || `Erreur suppression conversation ${conversationId}`);
+        }
+        deleted += 1;
+      }
+
+      setMsg(`OK : ${deleted} conversation(s) supprimée(s).`);
+      await fetchConversations();
     } catch (e) {
       console.error(e);
-      alert("Suppression interrompue (une erreur est survenue).");
+      setMsg(e?.message || "Erreur suppression.");
     } finally {
       setDeleting(false);
+      setSelectedIds(new Set());
     }
   }
 
-  const allChecked = conversations.length > 0 && selectedIds.size === conversations.length;
+  const selectedCount = selectedIds.size;
+  const totalCount = (conversations || []).length;
 
   return (
-    <div style={{ padding: 18, color: "#e9eef6", background: "#050608", minHeight: "100vh" }}>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14 }}>
-        <button onClick={() => router.push("/admin")} style={btn}>
-          ← Retour admin
-        </button>
-        <div style={{ fontWeight: 900 }}>Supprimer conversations</div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, marginBottom: 12 }}>
-        <select style={select} value={selectedClientId} onChange={(e) => setSelectedClientId(e.target.value)}>
-          <option value="">— Choisir un client (obligatoire) —</option>
-          {clients.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-
-        <select style={select} value={selectedUserId} onChange={(e) => setSelectedUserId(e.target.value)} disabled={!selectedClientId}>
-          <option value="">— Tous les utilisateurs —</option>
-          {clientUsers.map((u) => (
-            <option key={u.user_id} value={u.user_id}>
-              {u.email}
-            </option>
-          ))}
-        </select>
-
-        <select style={select} value={selectedAgentSlug} onChange={(e) => setSelectedAgentSlug(e.target.value)}>
-          <option value="">— Tous les agents —</option>
-          {agents.map((a) => (
-            <option key={a.slug} value={a.slug}>
-              {a.name} ({a.slug})
-            </option>
-          ))}
-        </select>
-
-        <button style={btnPrimary} onClick={loadConversations} disabled={loading}>
-          {loading ? "Chargement..." : "Afficher"}
-        </button>
-      </div>
-
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10 }}>
-        <button style={btn} onClick={toggleAll} disabled={conversations.length === 0}>
-          {allChecked ? "Tout désélectionner" : "Tout sélectionner"}
-        </button>
-
-        <div style={{ color: "rgba(233,238,246,0.7)" }}>
-          Sélection : <b>{selectedIds.size}</b> / {conversations.length}
+    <main style={styles.page}>
+      <div style={styles.header}>
+        <div style={styles.headerLeft}>
+          <button style={styles.headerBtn} onClick={goBack} title="Retour admin">
+            ← Retour admin
+          </button>
+          <div style={styles.headerTitle}>Supprimer conversations</div>
         </div>
 
-        <div style={{ flex: 1 }} />
-
-        <button style={btnDanger} onClick={deleteSelected} disabled={deleting || selectedIds.size === 0}>
-          {deleting ? "Suppression..." : "Supprimer définitivement"}
-        </button>
+        <div style={styles.headerRight}>
+          <button style={styles.headerBtnDanger} onClick={logout}>
+            Déconnexion
+          </button>
+        </div>
       </div>
 
-      <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, overflow: "hidden" }}>
-        <div style={{ padding: 12, borderBottom: "1px solid rgba(255,255,255,0.06)", fontWeight: 800 }}>
-          Conversations
-        </div>
-
-        {conversations.length === 0 ? (
-          <div style={{ padding: 12, color: "rgba(233,238,246,0.65)" }}>
-            Aucune conversation (ou cliquez “Afficher”).
-          </div>
-        ) : (
-          <div>
-            {conversations.map((c) => {
-              const checked = selectedIds.has(c.id);
-              return (
-                <div
-                  key={c.id}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "44px 1fr",
-                    gap: 8,
-                    alignItems: "center",
-                    padding: 12,
-                    borderTop: "1px solid rgba(255,255,255,0.06)",
-                  }}
+      <div style={styles.wrap}>
+        <div style={styles.box}>
+          {checkingAdmin ? (
+            <div style={styles.muted}>Vérification des droits…</div>
+          ) : loading ? (
+            <div style={styles.muted}>Chargement…</div>
+          ) : (
+            <>
+              <div style={styles.filtersRow}>
+                {/* Client mandatory */}
+                <select
+                  value={selectedClientId}
+                  onChange={(e) => setSelectedClientId(e.target.value)}
+                  style={styles.select}
+                  name="client_select"
                 >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleOne(c.id)}
-                    style={{ width: 18, height: 18 }}
-                  />
+                  <option value="">— Choisir un client (obligatoire) —</option>
+                  {(clients || []).map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
 
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <div style={{ fontWeight: 800 }}>
-                      {c.title || "Conversation"}{" "}
-                      <span style={{ fontWeight: 600, color: "rgba(233,238,246,0.6)", fontSize: 12 }}>
-                        — {c.agent_slug} — {c.user_email}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: 12, color: "rgba(233,238,246,0.55)" }}>{c.id}</div>
-                  </div>
+                {/* User optional */}
+                <select
+                  value={selectedUserId}
+                  onChange={(e) => setSelectedUserId(e.target.value)}
+                  style={styles.select}
+                  name="user_select"
+                  disabled={!selectedClientId}
+                  title={!selectedClientId ? "Choisissez d'abord un client" : ""}
+                >
+                  <option value="">— Tous les utilisateurs —</option>
+                  {(usersForClient || []).map((u) => (
+                    <option key={u.user_id} value={u.user_id}>
+                      {u.label}
+                    </option>
+                  ))}
+                </select>
+
+                {/* Agent optional */}
+                <select
+                  value={selectedAgentSlug}
+                  onChange={(e) => setSelectedAgentSlug(e.target.value)}
+                  style={styles.select}
+                  name="agent_select"
+                >
+                  <option value="">— Tous les agents —</option>
+                  {(agents || []).map((a) => (
+                    <option key={a.slug} value={a.slug}>
+                      {a.name} ({a.slug})
+                    </option>
+                  ))}
+                </select>
+
+                <button style={styles.btnAction} onClick={fetchConversations} disabled={!selectedClientId || loadingConvs}>
+                  {loadingConvs ? "Chargement…" : "Afficher"}
+                </button>
+              </div>
+
+              <div style={styles.actionsRow}>
+                <button style={styles.btnGhost} onClick={toggleAll} disabled={totalCount === 0 || loadingConvs}>
+                  Tout sélectionner
+                </button>
+                <div style={styles.small}>
+                  Sélection : <b>{selectedCount}</b> / {totalCount}
                 </div>
-              );
-            })}
-          </div>
-        )}
+
+                <div style={{ flex: 1 }} />
+
+                <button style={styles.btnDanger} onClick={deleteSelected} disabled={selectedCount === 0 || deleting || loadingConvs}>
+                  {deleting ? "Suppression…" : "Supprimer définitivement"}
+                </button>
+              </div>
+
+              <div style={styles.listBox}>
+                <div style={styles.listTitle}>Conversations</div>
+
+                {loadingConvs ? (
+                  <div style={styles.muted}>Chargement des conversations…</div>
+                ) : totalCount === 0 ? (
+                  <div style={styles.muted}>Aucune conversation (ou cliquez “Afficher”).</div>
+                ) : (
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {conversations.map((c) => {
+                      const id = c?.id;
+                      const checked = selectedIds.has(id);
+
+                      // robust labels (selon ce que renvoie l’API)
+                      const title = c?.title || "Conversation";
+                      const agentSlug = c?.agent_slug || c?.agentSlug || "";
+                      const createdAt = c?.created_at || c?.createdAt || "";
+                      const userEmail = c?.user_email || c?.userEmail || ""; // si l’API renvoie l’email
+                      const userId = c?.user_id || c?.userId || "";
+
+                      return (
+                        <label key={id} style={styles.row}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => toggleOne(id, e.target.checked)}
+                            style={styles.checkbox}
+                          />
+                          <div style={{ flex: 1 }}>
+                            <div style={styles.rowTitle}>{title}</div>
+                            <div style={styles.rowMeta}>
+                              {agentSlug ? `agent: ${agentSlug}` : "agent: —"} •{" "}
+                              {userEmail ? `user: ${userEmail}` : userId ? `user: ${String(userId).slice(0, 8)}…` : "user: —"} •{" "}
+                              {createdAt ? `créé: ${String(createdAt).slice(0, 19).replace("T", " ")}` : "créé: —"} • id:{" "}
+                              <span style={{ fontFamily: "monospace" }}>{String(id).slice(0, 8)}…</span>
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {!!msg && <div style={styles.alert}>{msg}</div>}
+            </>
+          )}
+        </div>
       </div>
-    </div>
+    </main>
   );
 }
 
-const btn = {
-  border: "1px solid rgba(255,255,255,0.14)",
-  background: "rgba(255,255,255,0.04)",
-  color: "#e9eef6",
-  padding: "10px 12px",
-  borderRadius: 12,
-  cursor: "pointer",
-  fontWeight: 700,
-};
+const styles = {
+  page: {
+    minHeight: "100vh",
+    background: "#050608",
+    color: "rgba(238,242,255,.92)",
+    fontFamily: '"Segoe UI", Arial, sans-serif',
+  },
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "14px 16px 0",
+    flexWrap: "wrap",
+  },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 280, flexWrap: "wrap" },
+  headerRight: { display: "flex", alignItems: "center", gap: 10 },
 
-const btnPrimary = {
-  ...btn,
-  border: "1px solid rgba(255,130,30,0.35)",
-  background: "rgba(255,130,30,0.12)",
-};
+  headerTitle: { fontWeight: 900, opacity: 0.95 },
 
-const btnDanger = {
-  ...btn,
-  border: "1px solid rgba(255,60,60,0.35)",
-  background: "rgba(255,60,60,0.12)",
-  color: "rgba(255,210,210,0.95)",
-};
+  headerBtn: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.25)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  headerBtnDanger: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
 
-const select = {
-  height: 42,
-  borderRadius: 12,
-  border: "1px solid rgba(255,255,255,0.14)",
-  background: "rgba(255,255,255,0.04)",
-  color: "#e9eef6",
-  padding: "0 10px",
-  outline: "none",
+  wrap: { padding: 18 },
+  box: {
+    border: "1px solid rgba(255,255,255,.12)",
+    borderRadius: 16,
+    background: "rgba(0,0,0,.35)",
+    backdropFilter: "blur(10px)",
+    padding: 14,
+    boxShadow: "0 18px 45px rgba(0,0,0,.55)",
+  },
+
+  muted: { opacity: 0.75, fontWeight: 800, fontSize: 13 },
+
+  filtersRow: {
+    display: "grid",
+    gridTemplateColumns: "1.2fr 1fr 1fr auto",
+    gap: 10,
+    alignItems: "center",
+    marginBottom: 10,
+  },
+
+  select: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(255,255,255,.06)",
+    color: "rgba(238,242,255,.92)",
+    outline: "none",
+    fontWeight: 800,
+  },
+
+  btnAction: {
+    borderRadius: 999,
+    padding: "10px 14px",
+    border: "1px solid rgba(255,140,40,.35)",
+    background: "rgba(255,140,40,.12)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+
+  actionsRow: {
+    display: "flex",
+    gap: 12,
+    alignItems: "center",
+    padding: "10px 2px",
+  },
+
+  btnGhost: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,255,255,.14)",
+    background: "rgba(0,0,0,.20)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+
+  btnDanger: {
+    borderRadius: 999,
+    padding: "10px 12px",
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+
+  small: { fontSize: 12, opacity: 0.8, fontWeight: 800 },
+
+  listBox: {
+    marginTop: 10,
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(255,255,255,.03)",
+    padding: 12,
+    minHeight: 120,
+  },
+
+  listTitle: { fontWeight: 900, marginBottom: 10 },
+
+  row: {
+    display: "flex",
+    gap: 12,
+    alignItems: "flex-start",
+    padding: 12,
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,.10)",
+    background: "rgba(0,0,0,.15)",
+    cursor: "pointer",
+  },
+
+  checkbox: { marginTop: 3, transform: "scale(1.05)" },
+
+  rowTitle: { fontWeight: 900, marginBottom: 4 },
+  rowMeta: { fontSize: 12, opacity: 0.78, fontWeight: 800 },
+
+  alert: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(255,80,80,.35)",
+    background: "rgba(255,80,80,.10)",
+    fontWeight: 900,
+  },
 };
