@@ -1,403 +1,298 @@
 // pages/api/chat.js
 import { Mistral } from "@mistralai/mistralai";
-import agentPrompts from "../../lib/agentPrompts";
 import { createClient } from "@supabase/supabase-js";
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+/**
+ * Evidencia-app - API Chat
+ * - Auth via Bearer token (supabaseAdmin.auth.getUser)
+ * - Vérifie agent + assignation user_agents
+ * - Charge prompt personnalisé via client_agent_configs (system_prompt / context)
+ * - Fallback sur lib/agentPrompts (si présent)
+ * - Appel Mistral chat.complete
+ * - Si la réponse de l'IA est un JSON strict {to, subject, body}, déclenche Make (webhook) pour envoyer l'email.
+ */
+
+const supabaseUrl = process.env.SUPABASE_URL;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const mistralApiKey = process.env.MISTRAL_API_KEY;
+const makeWebhookUrl = process.env.MAKE_WEBHOOK_URL;
+
+if (!supabaseUrl || !serviceRoleKey) {
+  // Ne pas throw au top-level sur Vercel (cold start) : on gère en runtime.
+}
+if (!mistralApiKey) {
+  // idem
 }
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  { auth: { persistSession: false } }
-);
+const supabaseAdmin = createClient(supabaseUrl || "", serviceRoleKey || "", {
+  auth: { persistSession: false },
+});
 
 function getBearerToken(req) {
-  const h = req.headers?.authorization || "";
-  const m = h.match(/^Bearer\s+(.+)$/i);
-  return m ? m[1] : "";
+  const auth = req.headers.authorization || "";
+  const [type, token] = auth.split(" ");
+  if (type !== "Bearer" || !token) return null;
+  return token;
 }
 
-function safeStr(v) {
-  return (v ?? "").toString();
-}
-
-function parseMaybeJson(v) {
-  if (!v) return null;
-  if (typeof v === "object") return v;
-  if (typeof v === "string") {
-    try {
-      return JSON.parse(v);
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-async function getGlobalBasePrompt() {
+function safeJsonParse(str) {
   try {
-    const { data, error } = await supabaseAdmin
-      .from("app_settings")
-      .select("value")
-      .eq("key", "base_system_prompt")
-      .maybeSingle();
-
-    if (error) return "";
-    return safeStr(data?.value).trim();
+    return { ok: true, value: JSON.parse(str) };
   } catch {
-    return "";
+    return { ok: false, value: null };
   }
 }
 
-function safeJsonParse(s) {
+function isStrictEmailJson(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+  const keys = Object.keys(obj);
+  if (keys.length !== 3) return false;
+  if (!("to" in obj) || !("subject" in obj) || !("body" in obj)) return false;
+  if (typeof obj.to !== "string" || typeof obj.subject !== "string" || typeof obj.body !== "string") return false;
+  if (!obj.to.trim() || !obj.subject.trim() || !obj.body.trim()) return false;
+  return true;
+}
+
+async function sendToMakeEmail({ to, subject, body }) {
+  if (!makeWebhookUrl) {
+    return { ok: false, error: "MAKE_WEBHOOK_URL is not set" };
+  }
+
+  // Webhook Make en GET (query params) : simple et robuste
+  const url =
+    `${makeWebhookUrl}` +
+    `?to=${encodeURIComponent(to)}` +
+    `&subject=${encodeURIComponent(subject)}` +
+    `&body=${encodeURIComponent(body)}`;
+
+  const resp = await fetch(url, { method: "GET" });
+  const text = await resp.text().catch(() => "");
+  if (!resp.ok) {
+    return { ok: false, error: `Make webhook failed (${resp.status})`, details: text };
+  }
+  return { ok: true, details: text };
+}
+
+async function loadAgentFallbackPrompt(agentSlug) {
+  // Fallback facultatif : lib/agentPrompts.js (ou .ts) si vous l’avez
+  // Doit exporter un objet { [slug]: { systemPrompt, context } } ou similaire
   try {
-    return JSON.parse(s);
+    // eslint-disable-next-line import/no-unresolved
+    const mod = await import("../../lib/agentPrompts");
+    const prompts = mod?.default || mod?.agentPrompts || mod || null;
+    if (!prompts) return null;
+
+    const entry = prompts[agentSlug];
+    if (!entry) return null;
+
+    // Support de plusieurs formats
+    const systemPrompt =
+      entry.systemPrompt || entry.system_prompt || entry.prompt || entry.system || null;
+    const context = entry.context || null;
+
+    if (!systemPrompt) return null;
+    return { systemPrompt, context };
   } catch {
     return null;
   }
 }
 
-function extractJsonCommand(text) {
-  const t = safeStr(text).trim();
-  if (!t) return null;
-
-  // Supporte bloc ```json ... ```
-  const fenced = t.match(/```json\s*([\s\S]*?)\s*```/i);
-  if (fenced?.[1]) {
-    return safeJsonParse(fenced[1].trim());
-  }
-
-  // Supporte JSON brut
-  if (t.startsWith("{") && t.endsWith("}")) {
-    return safeJsonParse(t);
-  }
-
-  return null;
-}
-
-function pickMakeWorkflowUrl(workflows, kind) {
-  const list = Array.isArray(workflows) ? workflows : [];
-  const makeList = list.filter(
-    (w) =>
-      safeStr(w?.provider).toLowerCase() === "make" &&
-      /^https?:\/\//i.test(safeStr(w?.url))
-  );
-
-  if (makeList.length === 0) return null;
-
-  if (kind === "send_email") {
-    return (
-      makeList.find((w) => /mail|email/i.test(safeStr(w?.name)))?.url ||
-      makeList[0].url
-    );
-  }
-
-  if (kind === "create_event") {
-    return (
-      makeList.find((w) =>
-        /agenda|calendar|calendrier|rdv|rendez/i.test(safeStr(w?.name))
-      )?.url || makeList[0].url
-    );
-  }
-
-  return makeList[0].url;
-}
-
-async function postToMake(url, payload) {
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload || {}),
-  });
-  const text = await resp.text().catch(() => "");
-  if (!resp.ok) {
-    throw new Error(`Make webhook error (${resp.status}): ${text?.slice(0, 300)}`);
-  }
-  return text;
-}
-
 export default async function handler(req, res) {
-  setCors(res);
-
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Méthode non autorisée." });
-  }
-
   try {
-    if (!process.env.MISTRAL_API_KEY) {
-      return res.status(500).json({ error: "MISTRAL_API_KEY manquant sur Vercel." });
-    }
-    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
-      return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant sur Vercel." });
-    }
-    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant sur Vercel." });
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
     }
 
-    const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
+    if (!supabaseUrl || !serviceRoleKey) {
+      return res.status(500).json({ error: "Supabase env vars missing" });
+    }
+    if (!mistralApiKey) {
+      return res.status(500).json({ error: "MISTRAL_API_KEY is missing" });
+    }
 
     const token = getBearerToken(req);
     if (!token) {
-      return res.status(401).json({ error: "Non authentifié (token manquant)." });
+      return res.status(401).json({ error: "Missing Bearer token" });
     }
 
     const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
     if (userErr || !userData?.user) {
-      return res.status(401).json({ error: "Session invalide. Reconnectez-vous." });
+      return res.status(401).json({ error: "Invalid token" });
     }
-    const userId = userData.user.id;
 
-    // Compat : supporte agentSlug OU agent_slug
+    const user = userData.user;
+
+    // Body attendu
+    // {
+    //   agent_slug: string,
+    //   messages: [{role:"user"|"assistant"|"system", content:string}, ...],
+    //   conversation_id?: string
+    // }
     const body = req.body || {};
-    const message = safeStr(body.message).trim();
-    const agentSlugRaw = safeStr(body.agentSlug || body.agent_slug).trim().toLowerCase();
-    const conversationId = safeStr(body.conversation_id || body.conversationId).trim();
+    const agentSlug = body.agent_slug || body.agentSlug;
+    const messages = Array.isArray(body.messages) ? body.messages : [];
 
-    if (!agentSlugRaw) return res.status(400).json({ error: "Aucun agent sélectionné." });
-    if (!message) return res.status(400).json({ error: "Message vide." });
-    if (!conversationId) return res.status(400).json({ error: "conversation_id manquant." });
-
-    // Vérifie que la conversation appartient à l'utilisateur
-    const { data: conv, error: convErr } = await supabaseAdmin
-      .from("conversations")
-      .select("id,user_id,agent_slug")
-      .eq("id", conversationId)
-      .maybeSingle();
-
-    if (convErr || !conv) {
-      return res.status(404).json({ error: "Conversation introuvable." });
+    if (!agentSlug) {
+      return res.status(400).json({ error: "agent_slug is required" });
     }
-    if (safeStr(conv.user_id) !== userId) {
-      return res.status(403).json({ error: "Accès interdit : conversation non autorisée." });
+    if (!messages.length) {
+      return res.status(400).json({ error: "messages[] is required" });
     }
 
-    // Optionnel : cohérence agent
-    if (safeStr(conv.agent_slug).trim() && safeStr(conv.agent_slug).trim() !== agentSlugRaw) {
-      // On ne bloque pas forcément, mais c'est plus sain de bloquer :
-      return res.status(400).json({ error: "Agent incohérent avec la conversation." });
-    }
-
-    // Agent
-    const { data: agent, error: agentErr } = await supabaseAdmin
+    // 1) Vérifier l’agent existe
+    const { data: agentRow, error: agentErr } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
-      .eq("slug", agentSlugRaw)
+      .eq("slug", agentSlug)
       .maybeSingle();
 
-    if (agentErr || !agent) {
-      return res.status(404).json({ error: "Agent introuvable." });
+    if (agentErr) {
+      return res.status(500).json({ error: "Failed to read agents", details: agentErr.message });
+    }
+    if (!agentRow) {
+      return res.status(404).json({ error: `Unknown agent_slug: ${agentSlug}` });
     }
 
-    // Vérifie assignation user_agents
-    const { data: assignment, error: assignErr } = await supabaseAdmin
-      .from("user_agents")
-      .select("user_id, agent_id")
-      .eq("user_id", userId)
-      .eq("agent_id", agent.id)
+    // 2) Vérifier assignation user_agents (ou admin)
+    const { data: profileRow } = await supabaseAdmin
+      .from("profiles")
+      .select("role")
+      .eq("user_id", user.id)
       .maybeSingle();
 
-    if (assignErr) return res.status(500).json({ error: "Erreur assignation (user_agents)." });
-    if (!assignment) return res.status(403).json({ error: "Accès interdit : agent non assigné." });
+    const isAdmin = profileRow?.role === "admin";
 
-    // Config perso agent (prompt + context)
-    const { data: cfg, error: cfgErr } = await supabaseAdmin
+    if (!isAdmin) {
+      const { data: uaRow, error: uaErr } = await supabaseAdmin
+        .from("user_agents")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("agent_id", agentRow.id)
+        .maybeSingle();
+
+      if (uaErr) {
+        return res.status(500).json({ error: "Failed to read user_agents", details: uaErr.message });
+      }
+      if (!uaRow) {
+        return res.status(403).json({ error: "Agent not assigned to this user" });
+      }
+    }
+
+    // 3) Charger config personnalisée éventuelle
+    let systemPrompt = null;
+    let context = null;
+
+    const { data: cfgRow, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
-      .eq("user_id", userId)
-      .eq("agent_id", agent.id)
+      .eq("user_id", user.id)
+      .eq("agent_id", agentRow.id)
       .maybeSingle();
 
-    const ctxObj = !cfgErr ? parseMaybeJson(cfg?.context) : null;
-
-    const customPrompt =
-      safeStr(cfg?.system_prompt).trim() ||
-      safeStr(ctxObj?.prompt).trim() ||
-      safeStr(ctxObj?.systemPrompt).trim() ||
-      safeStr(ctxObj?.customPrompt).trim() ||
-      "";
-
-    const workflows = Array.isArray(ctxObj?.workflows) ? ctxObj.workflows : [];
-    const sources = Array.isArray(ctxObj?.sources) ? ctxObj.sources : [];
-
-    const basePrompt =
-      safeStr(agentPrompts?.[agentSlugRaw]?.systemPrompt).trim() ||
-      `Tu es ${agent.name}${agent.description ? `, ${agent.description}` : ""}.`;
-
-    const globalBasePrompt = await getGlobalBasePrompt();
-
-    const workflowsListText = workflows
-      .map((w) => `- provider=${safeStr(w?.provider)} name=${safeStr(w?.name)} url=${safeStr(w?.url) ? "[set]" : "[missing]"}`)
-      .join("\n");
-
-    const sourcesListText = sources
-      .slice(0, 20)
-      .map((s) => {
-        const t = safeStr(s?.type);
-        const name = safeStr(s?.name || s?.url || s?.path);
-        return `- ${t || "source"}: ${name}`;
-      })
-      .join("\n");
-
-    const actionPolicy = `
-Tu peux exécuter des actions via des workflows Make configurés.
-
-WORKFLOWS DISPONIBLES (Make) :
-${workflowsListText || "- (aucun)"}
-
-SOURCES (si besoin pour répondre) :
-${sourcesListText || "- (aucune)"}
-
-RÈGLES D'ACTION :
-- Si l'utilisateur demande d'envoyer un email, réponds UNIQUEMENT par un JSON (sans texte autour) :
-{"action":"send_email","to":"email@domaine.fr","subject":"Sujet","text":"Contenu"}
-
-- Si l'utilisateur demande de créer un rendez-vous / évènement agenda, réponds UNIQUEMENT par un JSON :
-{"action":"create_event","title":"Titre","start":"YYYY-MM-DDTHH:mm:ss","end":"YYYY-MM-DDTHH:mm:ss","notes":"optionnel"}
-
-Si un champ est manquant, pose une question au lieu d'inventer.
-`;
-
-    const finalSystemPrompt = [
-      globalBasePrompt
-        ? `INSTRUCTIONS GÉNÉRALES (communes à tous les agents)\n${globalBasePrompt}`
-        : "",
-      basePrompt,
-      customPrompt ? `INSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}` : "",
-      actionPolicy,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-
-    // Historique conversation (important)
-    const { data: history, error: histErr } = await supabaseAdmin
-      .from("messages")
-      .select("role, content, created_at")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true })
-      .limit(30);
-
-    if (histErr) {
-      return res.status(500).json({ error: "Erreur chargement historique (messages)." });
+    if (cfgErr) {
+      return res.status(500).json({
+        error: "Failed to read client_agent_configs",
+        details: cfgErr.message,
+      });
     }
 
-    // Appel LLM
+    if (cfgRow?.system_prompt) {
+      systemPrompt = cfgRow.system_prompt;
+      context = cfgRow.context || null;
+    } else {
+      // fallback lib/agentPrompts
+      const fallback = await loadAgentFallbackPrompt(agentSlug);
+      if (fallback?.systemPrompt) {
+        systemPrompt = fallback.systemPrompt;
+        context = fallback.context || null;
+      }
+    }
+
+    // 4) Construire le "system" final
+    // On injecte context si présent (JSON -> texte)
+    const systemParts = [];
+    if (systemPrompt) systemParts.push(systemPrompt);
+
+    if (context) {
+      systemParts.push(
+        `Contexte (JSON):\n${typeof context === "string" ? context : JSON.stringify(context, null, 2)}`
+      );
+    }
+
+    const finalSystem = systemParts.length ? systemParts.join("\n\n") : null;
+
+    // 5) Appel Mistral
+    const mistral = new Mistral({ apiKey: mistralApiKey });
+
+    const mistralMessages = [];
+    if (finalSystem) {
+      mistralMessages.push({ role: "system", content: finalSystem });
+    }
+
+    for (const m of messages) {
+      if (!m || typeof m !== "object") continue;
+      const role = m.role;
+      const content = m.content;
+      if (!role || typeof content !== "string") continue;
+      if (!["system", "user", "assistant"].includes(role)) continue;
+      mistralMessages.push({ role, content });
+    }
+
     const completion = await mistral.chat.complete({
-      model: process.env.MISTRAL_MODEL || "mistral-small-latest",
-      messages: [
-        { role: "system", content: finalSystemPrompt },
-        ...(history || []).map((m) => ({
-          role: safeStr(m.role) === "assistant" ? "assistant" : "user",
-          content: safeStr(m.content),
-        })),
-        { role: "user", content: message },
-      ],
-      // Baisse la température pour fiabiliser les actions JSON
+      model: "mistral-large-latest",
+      messages: mistralMessages,
       temperature: 0.2,
     });
 
-    const rawReply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
+    const content =
+      completion?.choices?.[0]?.message?.content ??
+      completion?.choices?.[0]?.message?.content?.[0]?.text ??
+      "";
 
-    // Détecte action JSON et appelle Make si nécessaire
-    const cmd = extractJsonCommand(rawReply);
+    const assistantText = typeof content === "string" ? content : JSON.stringify(content);
 
-    if (cmd && typeof cmd === "object" && cmd.action) {
-      const action = safeStr(cmd.action).trim();
+    // 6) Si l'IA renvoie un JSON strict {to, subject, body} => on déclenche Make
+    const parsed = safeJsonParse(assistantText.trim());
+    if (parsed.ok && isStrictEmailJson(parsed.value)) {
+      const email = parsed.value;
 
-      if (action === "send_email") {
-        const to = safeStr(cmd.to).trim();
-        const subject = safeStr(cmd.subject).trim();
-        const text = safeStr(cmd.text).trim();
+      const makeResult = await sendToMakeEmail(email);
 
-        if (!to || !subject || !text) {
-          return res.status(200).json({
-            reply: "Il manque des informations pour envoyer l’email (to, subject, text).",
-          });
-        }
-
-        const makeUrl = pickMakeWorkflowUrl(workflows, "send_email");
-        if (!makeUrl) {
-          return res.status(200).json({
-            reply:
-              "Aucun workflow Make configuré pour l’envoi d’email. Ajoutez un workflow (provider=make) dans la console admin.",
-          });
-        }
-
-        try {
-          await postToMake(makeUrl, {
-            action: "send_email",
-            to,
-            subject,
-            text,
-            meta: { user_id: userId, agent_slug: agentSlugRaw, conversation_id: conversationId },
-          });
-
-          return res.status(200).json({
-            reply: `C’est envoyé. Email à ${to} avec le sujet “${subject}”.`,
-          });
-        } catch (e) {
-          console.error("Make send_email error:", e);
-          return res.status(200).json({
-            reply:
-              "Je n’ai pas pu appeler Make pour envoyer l’email. Vérifiez : scénario Make ON, module Webhook correct, URL https://hook..., et droits Microsoft 365.",
-          });
-        }
+      if (!makeResult.ok) {
+        // On renvoie une erreur exploitable côté front (mais sans casser l'agent)
+        return res.status(200).json({
+          ok: true,
+          agent_slug: agentSlug,
+          emailRequested: true,
+          emailSent: false,
+          email,
+          error: "EMAIL_SEND_FAILED",
+          details: makeResult,
+          content:
+            "Je n'ai pas pu déclencher l'envoi de l'email via Make. Vérifiez MAKE_WEBHOOK_URL et le scénario Make.",
+        });
       }
 
-      if (action === "create_event") {
-        const title = safeStr(cmd.title).trim();
-        const start = safeStr(cmd.start).trim();
-        const end = safeStr(cmd.end).trim();
-        const notes = safeStr(cmd.notes).trim();
-
-        if (!title || !start || !end) {
-          return res.status(200).json({
-            reply: "Il manque des informations pour créer le rendez-vous (title, start, end).",
-          });
-        }
-
-        const makeUrl = pickMakeWorkflowUrl(workflows, "create_event");
-        if (!makeUrl) {
-          return res.status(200).json({
-            reply:
-              "Aucun workflow Make configuré pour l’agenda. Ajoutez un workflow (provider=make) dans la console admin.",
-          });
-        }
-
-        try {
-          await postToMake(makeUrl, {
-            action: "create_event",
-            title,
-            start,
-            end,
-            notes,
-            meta: { user_id: userId, agent_slug: agentSlugRaw, conversation_id: conversationId },
-          });
-
-          return res.status(200).json({
-            reply: `Rendez-vous créé : “${title}” (${start} → ${end}).`,
-          });
-        } catch (e) {
-          console.error("Make create_event error:", e);
-          return res.status(200).json({
-            reply:
-              "Je n’ai pas pu appeler Make pour créer le rendez-vous. Vérifiez : scénario Make ON, URL webhook, et module agenda.",
-          });
-        }
-      }
+      return res.status(200).json({
+        ok: true,
+        agent_slug: agentSlug,
+        emailRequested: true,
+        emailSent: true,
+        email,
+        content: `Email envoyé à ${email.to}.`,
+      });
     }
 
-    // Réponse normale
-    return res.status(200).json({ reply: rawReply });
-  } catch (err) {
-    console.error("Erreur API /api/chat :", err);
-    return res.status(500).json({ error: "Erreur interne de l’agent." });
+    // Sinon, réponse standard
+    return res.status(200).json({
+      ok: true,
+      agent_slug: agentSlug,
+      content: assistantText,
+    });
+  } catch (e) {
+    return res.status(500).json({
+      error: "Internal server error",
+      details: String(e?.message || e),
+    });
   }
 }
