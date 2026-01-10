@@ -40,6 +40,7 @@ function extractFirstNameFromUser(user) {
 
 function extractNameFromPrompt(prompt) {
   if (typeof prompt !== "string" || !prompt.trim()) return "";
+  // On accepte plusieurs formes : "Tu travailles", "Tu travaille"
   const m = prompt.match(/Tu\s+travaill(?:e|es)\s+pour\s+(.+?)(?:,|\n|$)/i);
   if (!m || !m[1]) return "";
   let name = m[1].trim();
@@ -240,7 +241,8 @@ export default function ChatPage() {
         "Content-Type": "application/json",
         Authorization: `Bearer ${accessToken}`,
       },
-      body: JSON.stringify({ agent_slug: agentSlug }),
+      // IMPORTANT: on envoie le title pour que la conversation soit nommée directement
+      body: JSON.stringify({ agent_slug: agentSlug, title: defaultConversationTitle() }),
     });
 
     const data = await resp.json().catch(() => null);
@@ -251,6 +253,7 @@ export default function ChatPage() {
     return conv;
   }
 
+  // Si pas de conversation sélectionnée, on en crée une automatiquement
   async function ensureConversationSelected() {
     if (selectedConversationId) return selectedConversationId;
 
@@ -260,23 +263,6 @@ export default function ChatPage() {
 
       setConversations((prev) => [conv, ...prev]);
       setSelectedConversationId(conv.id);
-
-      const title = (conv.title || "").trim();
-      const needsTitle = !title || title.toLowerCase().includes("nouvelle conversation");
-
-      if (needsTitle) {
-        const newTitle = defaultConversationTitle();
-        const { error: upErr } = await supabase
-          .from("conversations")
-          .update({ title: newTitle })
-          .eq("id", conv.id);
-
-        if (!upErr) {
-          setConversations((prev) =>
-            prev.map((c) => (c.id === conv.id ? { ...c, title: newTitle } : c))
-          );
-        }
-      }
 
       return conv.id;
     } finally {
@@ -356,7 +342,7 @@ export default function ChatPage() {
       // 1) crée une conversation si besoin
       const convId = await ensureConversationSelected();
 
-      // 2) enregistre le message user (ça marche déjà chez toi)
+      // 2) enregistre le message user
       const { data: userMsg, error: userMsgErr } = await supabase
         .from("messages")
         .insert({
@@ -370,12 +356,10 @@ export default function ChatPage() {
       if (userMsgErr) throw userMsgErr;
       setMessages((prev) => [...prev, userMsg]);
 
-      // 3) appelle l’API chat en envoyant L’AGENT sous plusieurs noms
+      // 3) appelle l’API chat (envoie le slug sous plusieurs noms)
       const payload = {
         conversation_id: convId,
         message: content,
-
-        // IMPORTANT: on envoie plusieurs clés pour matcher ton /api/chat.js
         agent_slug: agentSlug,
         agentSlug: agentSlug,
         agent: agentSlug,
