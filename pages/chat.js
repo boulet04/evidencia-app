@@ -40,10 +40,8 @@ function extractFirstNameFromUser(user) {
 
 function extractNameFromPrompt(prompt) {
   if (typeof prompt !== "string" || !prompt.trim()) return "";
-
   const m = prompt.match(/Tu\s+travaill(?:e|es)\s+pour\s+(.+?)(?:,|\n|$)/i);
   if (!m || !m[1]) return "";
-
   let name = m[1].trim();
   name = name.split("(")[0].trim();
   return name;
@@ -86,6 +84,11 @@ export default function ChatPage() {
     return name
       ? `Bonjour ${name}, comment puis-je vous aider ?`
       : "Bonjour, comment puis-je vous aider ?";
+  }
+
+  function defaultConversationTitle() {
+    const agentName = agent?.name || capitalize(agentSlug);
+    return `Discussion avec ${agentName}`;
   }
 
   useEffect(() => {
@@ -189,9 +192,13 @@ export default function ChatPage() {
       const list = data || [];
       setConversations(list);
 
+      // Auto-select la dernière conversation s’il y en a
       if (!selectedConversationId && list.length > 0) {
         setSelectedConversationId(list[0].id);
       }
+
+      // Si aucune conversation, on laisse selectedConversationId = null :
+      // l’utilisateur pourra quand même écrire et ça créera la conversation.
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, agentSlug]);
@@ -227,30 +234,74 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loadingMsgs]);
 
+  // Création via API
+  async function createConversationViaApi() {
+    if (!accessToken) throw new Error("Missing access token");
+    if (!agentSlug) throw new Error("Missing agent slug");
+
+    const resp = await fetch("/api/conversations", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ agent_slug: agentSlug }),
+    });
+
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) throw new Error(data?.error || "Create conversation failed");
+
+    const conv = data?.conversation;
+    if (!conv?.id) throw new Error("Missing conversation in response");
+    return conv;
+  }
+
+  // Assure qu’on a une conversation sélectionnée (sinon on la crée)
+  async function ensureConversationSelected() {
+    if (selectedConversationId) return selectedConversationId;
+
+    setCreatingConv(true);
+    try {
+      const conv = await createConversationViaApi();
+
+      // Ajout en liste + sélection
+      setConversations((prev) => [conv, ...prev]);
+      setSelectedConversationId(conv.id);
+
+      // Si le titre est vide ou "Nouvelle conversation", on force un titre propre
+      const title = (conv.title || "").trim();
+      const needsTitle =
+        !title || title.toLowerCase().includes("nouvelle conversation");
+
+      if (needsTitle) {
+        const newTitle = defaultConversationTitle();
+        const { error: upErr } = await supabase
+          .from("conversations")
+          .update({ title: newTitle })
+          .eq("id", conv.id);
+
+        if (!upErr) {
+          setConversations((prev) =>
+            prev.map((c) => (c.id === conv.id ? { ...c, title: newTitle } : c))
+          );
+        }
+      }
+
+      return conv.id;
+    } finally {
+      setCreatingConv(false);
+    }
+  }
+
   async function handleNewConversation() {
     if (!accessToken) {
       alert("Session invalide. Veuillez vous reconnecter.");
       return;
     }
-    if (!agentSlug) return;
 
     try {
       setCreatingConv(true);
-
-      const resp = await fetch("/api/conversations", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({ agent_slug: agentSlug }),
-      });
-
-      const data = await resp.json().catch(() => null);
-      if (!resp.ok) throw new Error(data?.error || "Create conversation failed");
-
-      const conv = data?.conversation;
-      if (!conv?.id) throw new Error("Missing conversation in response");
+      const conv = await createConversationViaApi();
 
       setConversations((prev) => [conv, ...prev]);
       setSelectedConversationId(conv.id);
@@ -295,35 +346,48 @@ export default function ChatPage() {
   }
 
   async function handleSend() {
-    if (!selectedConversationId) return;
     const content = input.trim();
     if (!content) return;
+
+    if (!accessToken) {
+      alert("Session invalide. Veuillez vous reconnecter.");
+      return;
+    }
 
     try {
       setSending(true);
       setInput("");
 
+      // 1) Si aucune conversation n’existe encore, on la crée automatiquement
+      const convId = await ensureConversationSelected();
+
+      // 2) On insère le message utilisateur
       const { data: userMsg, error: userMsgErr } = await supabase
         .from("messages")
         .insert({
-          conversation_id: selectedConversationId,
+          conversation_id: convId,
           role: "user",
           content,
         })
         .select("id,role,content,created_at")
         .single();
 
-      if (userMsgErr) throw userMsgErr;
+      if (userMsgErr) {
+        console.error("Insert user message error:", userMsgErr);
+        throw userMsgErr;
+      }
+
       setMessages((prev) => [...prev, userMsg]);
 
+      // 3) Appel IA
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+          Authorization: `Bearer ${accessToken}`,
         },
         body: JSON.stringify({
-          conversation_id: selectedConversationId,
+          conversation_id: convId,
           agent_slug: agentSlug,
           message: content,
         }),
@@ -331,35 +395,44 @@ export default function ChatPage() {
 
       if (!resp.ok) {
         const j = await resp.json().catch(() => null);
+        console.error("Chat API error payload:", j);
         throw new Error(j?.error || "Chat API error");
       }
 
       const data = await resp.json();
       const assistantText = data?.reply || data?.content || "";
 
+      // 4) On stocke la réponse assistant
       if (assistantText) {
         const { data: asstMsg, error: asstErr } = await supabase
           .from("messages")
           .insert({
-            conversation_id: selectedConversationId,
+            conversation_id: convId,
             role: "assistant",
             content: assistantText,
           })
           .select("id,role,content,created_at")
           .single();
 
-        if (!asstErr && asstMsg) setMessages((prev) => [...prev, asstMsg]);
+        if (asstErr) {
+          console.error("Insert assistant message error:", asstErr);
+        } else if (asstMsg) {
+          setMessages((prev) => [...prev, asstMsg]);
+        }
       }
     } catch (e) {
-      console.error(e);
+      console.error("Send error:", e);
       alert("Erreur lors de l’envoi du message.");
     } finally {
       setSending(false);
     }
   }
 
-  const showWelcomeFallback =
-    !loadingMsgs && selectedConversationId && (messages?.length || 0) === 0;
+  // Affichage de l’accueil :
+  // - si conversation sélectionnée ET 0 message
+  // - OU si aucune conversation sélectionnée (conversation inexistante)
+  const showWelcome =
+    !loadingMsgs && ((selectedConversationId && (messages?.length || 0) === 0) || !selectedConversationId);
 
   return (
     <div className="page">
@@ -369,7 +442,6 @@ export default function ChatPage() {
         </button>
 
         <div className="brand">
-          {/* Logo dans public/images/logolong.png => /images/logolong.png */}
           <img className="brandLogo" src="/images/logolong.png" alt="Evidenc'IA" />
         </div>
 
@@ -454,13 +526,11 @@ export default function ChatPage() {
 
           <div className="chat">
             <div className="chatBody">
-              {!selectedConversationId ? (
-                <div className="muted">Sélectionne une conversation ou clique sur “+ Nouvelle”.</div>
-              ) : loadingMsgs ? (
+              {loadingMsgs ? (
                 <div className="muted">Chargement des messages...</div>
               ) : (
                 <>
-                  {showWelcomeFallback && (
+                  {showWelcome && (
                     <div className="msgRow assistant">
                       <div className="msgBubble">{welcomeText()}</div>
                     </div>
@@ -489,20 +559,22 @@ export default function ChatPage() {
                     handleSend();
                   }
                 }}
-                disabled={!selectedConversationId || sending}
+                disabled={sending}
               />
 
               <button className="btn mic" type="button" title="Dictée vocale (à connecter)">
                 🎙
               </button>
 
-              <button className="btn send" onClick={handleSend} disabled={!selectedConversationId || sending}>
+              <button className="btn send" onClick={handleSend} disabled={sending}>
                 {sending ? "Envoi..." : "Envoyer"}
               </button>
             </div>
 
             <div className="chatFooter">
-              <div className="mutedSmall">{selectedConversationId ? `Conversation: ${selectedConversationId}` : ""}</div>
+              <div className="mutedSmall">
+                {selectedConversationId ? `Conversation: ${selectedConversationId}` : ""}
+              </div>
             </div>
           </div>
         </main>
@@ -554,7 +626,7 @@ export default function ChatPage() {
         .agentLeft { display: flex; gap: 12px; align-items: center; }
         .agentAvatar { width: 44px; height: 44px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
           background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; }
-        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; }
+        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; }
         .avatarFallback { font-weight: 900; opacity: 0.85; }
         .agentName { font-weight: 900; }
         .agentRole { font-size: 12px; color: rgba(233,238,246,0.65); margin-top: 2px; }
