@@ -16,7 +16,6 @@ async function requireAdmin(req) {
 
   const user = authData.user;
 
-  // Admin via profiles.role = 'admin'
   const { data: prof, error: profErr } = await supabaseAdmin
     .from("profiles")
     .select("role")
@@ -36,21 +35,61 @@ export default async function handler(req, res) {
 
     if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
+    const client_id = (req.query?.client_id || "").toString().trim();
     const user_id = (req.query?.user_id || "").toString().trim();
     const agent_slug = (req.query?.agent_slug || "").toString().trim();
 
-    if (!user_id) return res.status(400).json({ error: "Missing user_id" });
-    if (!agent_slug) return res.status(400).json({ error: "Missing agent_slug" });
+    if (!client_id) return res.status(400).json({ error: "Missing client_id" });
 
-    const { data, error } = await supabaseAdmin
+    // 1) Récupérer les user_ids du client (ou un seul user si filtré)
+    let userIds = [];
+    if (user_id) {
+      userIds = [user_id];
+    } else {
+      const { data: cu, error: cuErr } = await supabaseAdmin
+        .from("client_users")
+        .select("user_id")
+        .eq("client_id", client_id);
+
+      if (cuErr) return res.status(500).json({ error: cuErr.message });
+      userIds = (cu || []).map((r) => r.user_id).filter(Boolean);
+    }
+
+    if (userIds.length === 0) return res.status(200).json({ conversations: [] });
+
+    // 2) Charger les conversations
+    let q = supabaseAdmin
       .from("conversations")
       .select("id,title,created_at,agent_slug,user_id")
-      .eq("user_id", user_id)
-      .eq("agent_slug", agent_slug)
-      .order("created_at", { ascending: false });
+      .in("user_id", userIds)
+      .order("created_at", { ascending: false })
+      .limit(500);
 
-    if (error) return res.status(500).json({ error: error.message });
-    return res.status(200).json({ conversations: data || [] });
+    if (agent_slug) q = q.eq("agent_slug", agent_slug);
+
+    const { data: convs, error: convErr } = await q;
+    if (convErr) return res.status(500).json({ error: convErr.message });
+
+    const list = convs || [];
+    if (list.length === 0) return res.status(200).json({ conversations: [] });
+
+    // 3) Ajouter l’email
+    const uniqUserIds = [...new Set(list.map((c) => c.user_id))];
+    const { data: profs, error: profErr2 } = await supabaseAdmin
+      .from("profiles")
+      .select("user_id,email")
+      .in("user_id", uniqUserIds);
+
+    if (profErr2) return res.status(500).json({ error: profErr2.message });
+
+    const emailByUserId = new Map((profs || []).map((p) => [p.user_id, p.email]));
+
+    const enriched = list.map((c) => ({
+      ...c,
+      user_email: emailByUserId.get(c.user_id) || c.user_id,
+    }));
+
+    return res.status(200).json({ conversations: enriched });
   } catch (e) {
     console.error("Admin conversations list error:", e);
     return res.status(500).json({ error: "Server error" });
