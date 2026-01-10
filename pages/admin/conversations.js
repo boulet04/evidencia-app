@@ -40,7 +40,7 @@ export default function AdminConversations() {
     window.location.href = "/login";
   }
 
-  // --- Guard admin (best practice)
+  // --- Guard admin
   useEffect(() => {
     (async () => {
       try {
@@ -106,7 +106,7 @@ export default function AdminConversations() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [checkingAdmin]);
 
-  // --- USERS LIST FOR CLIENT (FIX: mapping correct via client_users.user_id <-> profiles.user_id)
+  // --- USERS LIST FOR CLIENT
   const usersForClient = useMemo(() => {
     if (!selectedClientId) return [];
 
@@ -136,14 +136,14 @@ export default function AdminConversations() {
       .sort((a, b) => (a.label || "").localeCompare(b.label || "", "fr", { sensitivity: "base" }));
   }, [selectedClientId, clientUsers, profiles]);
 
-  // Reset user filter when client changes (keep safe)
+  // Reset user filter when client changes
   useEffect(() => {
     setSelectedUserId("");
     setSelectedIds(new Set());
     setConversations([]);
   }, [selectedClientId]);
 
-  // --- Fetch conversations via API (server-side verifies admin + applies RLS safely)
+  // --- Fetch conversations via API
   async function fetchConversations() {
     if (!selectedClientId) {
       alert("Choisissez un client.");
@@ -160,10 +160,11 @@ export default function AdminConversations() {
         return;
       }
 
+      // ✅ FIX ICI : l’API attend client_id (underscore)
       const params = new URLSearchParams();
-      params.set("clientId", selectedClientId);
-      if (selectedUserId) params.set("userId", selectedUserId);
-      if (selectedAgentSlug) params.set("agentSlug", selectedAgentSlug);
+      params.set("client_id", selectedClientId); // <-- FIX
+      if (selectedUserId) params.set("user_id", selectedUserId); // cohérent si ton API utilise user_id
+      if (selectedAgentSlug) params.set("agent_slug", selectedAgentSlug); // cohérent si ton API utilise agent_slug
 
       const res = await fetch(`/api/admin/conversations?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -221,8 +222,6 @@ export default function AdminConversations() {
         return;
       }
 
-      // Best practice: supprimer via l’API, une par une (robuste même si pas de batch côté serveur).
-      // Si votre API supporte un batch, on pourra l’optimiser plus tard.
       let deleted = 0;
       for (const conversationId of ids) {
         const res = await fetch(`/api/admin/conversations/${conversationId}`, {
@@ -277,7 +276,6 @@ export default function AdminConversations() {
           ) : (
             <>
               <div style={styles.filtersRow}>
-                {/* Client mandatory */}
                 <select
                   value={selectedClientId}
                   onChange={(e) => setSelectedClientId(e.target.value)}
@@ -292,7 +290,6 @@ export default function AdminConversations() {
                   ))}
                 </select>
 
-                {/* User optional */}
                 <select
                   value={selectedUserId}
                   onChange={(e) => setSelectedUserId(e.target.value)}
@@ -309,7 +306,6 @@ export default function AdminConversations() {
                   ))}
                 </select>
 
-                {/* Agent optional */}
                 <select
                   value={selectedAgentSlug}
                   onChange={(e) => setSelectedAgentSlug(e.target.value)}
@@ -357,11 +353,10 @@ export default function AdminConversations() {
                       const id = c?.id;
                       const checked = selectedIds.has(id);
 
-                      // robust labels (selon ce que renvoie l’API)
                       const title = c?.title || "Conversation";
                       const agentSlug = c?.agent_slug || c?.agentSlug || "";
                       const createdAt = c?.created_at || c?.createdAt || "";
-                      const userEmail = c?.user_email || c?.userEmail || ""; // si l’API renvoie l’email
+                      const userEmail = c?.user_email || c?.userEmail || "";
                       const userId = c?.user_id || c?.userId || "";
 
                       return (
