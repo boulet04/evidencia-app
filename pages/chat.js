@@ -33,8 +33,16 @@ export default function ChatPage() {
   const [micSupported, setMicSupported] = useState(false);
   const [listening, setListening] = useState(false);
 
+  const DEFAULT_TITLE = "Nouvelle conversation";
+
   function safeStr(v) {
     return (v ?? "").toString();
+  }
+
+  function titleFromMessage(message) {
+    const s = safeStr(message).trim().replace(/\s+/g, " ");
+    if (!s) return DEFAULT_TITLE;
+    return s.length > 60 ? s.slice(0, 60) + "…" : s;
   }
 
   async function getAccessToken() {
@@ -56,7 +64,7 @@ export default function ChatPage() {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Init speech recognition
+  // Init speech recognition support
   useEffect(() => {
     const SR =
       typeof window !== "undefined"
@@ -114,106 +122,6 @@ export default function ChatPage() {
     setListening(false);
   }
 
-  // Read agent from URL: /chat?agent=emma
-  useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
-
-        const { data: sess } = await supabase.auth.getSession();
-        const user = sess?.session?.user;
-        if (!user) {
-          window.location.href = "/login";
-          return;
-        }
-
-        setUserId(user.id);
-        setSessionEmail(user.email || "");
-
-        const url = new URL(window.location.href);
-        const slug = safeStr(url.searchParams.get("agent")).trim().toLowerCase();
-
-        if (!slug) {
-          window.location.href = "/agents";
-          return;
-        }
-        setAgentSlug(slug);
-
-        // Load agent details
-        const { data: agent, error: agentErr } = await supabase
-          .from("agents")
-          .select("slug, name, description, avatar_url")
-          .eq("slug", slug)
-          .maybeSingle();
-
-        if (agentErr || !agent) {
-          setErrorMsg("Erreur chargement agent.");
-          setLoading(false);
-          return;
-        }
-
-        setAgentName(agent.name || slug);
-        setAgentDesc(agent.description || "");
-        setAgentAvatar(agent.avatar_url || "");
-
-        // Load conversations
-        await refreshConversations(user.id, slug);
-
-        setLoading(false);
-      } catch (e) {
-        setErrorMsg("Erreur initialisation chat.");
-        setLoading(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function refreshConversations(uid, slug) {
-    // 10 dernières conversations
-    const { data, error } = await supabase
-      .from("conversations")
-      .select("id, created_at, title, archived, agent_slug, user_id")
-      .eq("user_id", uid)
-      .eq("agent_slug", slug)
-      .order("created_at", { ascending: false })
-      .limit(10);
-
-    if (error) {
-      // fallback sans archived si colonne absente
-      const { data: data2, error: error2 } = await supabase
-        .from("conversations")
-        .select("id, created_at, title, agent_slug, user_id")
-        .eq("user_id", uid)
-        .eq("agent_slug", slug)
-        .order("created_at", { ascending: false })
-        .limit(10);
-
-      if (error2) {
-        setErrorMsg("Impossible de charger l'historique.");
-        setConversations([]);
-        setSelectedConvId("");
-        setMessages([]);
-        return;
-      }
-
-      setConversations(data2 || []);
-      const firstId = data2?.[0]?.id || "";
-      setSelectedConvId(firstId);
-      if (firstId) await loadMessages(firstId, true);
-      else setMessages([]);
-      return;
-    }
-
-    const filtered = (data || []).filter((c) => c.archived !== true);
-    setConversations(filtered);
-
-    const firstId = filtered?.[0]?.id || "";
-    setSelectedConvId(firstId);
-
-    if (firstId) await loadMessages(firstId, true);
-    else setMessages([]);
-  }
-
   async function initGreetingIfEmpty(conversationId) {
     const token = await getAccessToken();
     if (!token) return;
@@ -232,7 +140,7 @@ export default function ChatPage() {
     }
   }
 
-  async function loadMessages(conversationId, allowInit = false) {
+  async function loadMessages(conversationId) {
     const { data, error } = await supabase
       .from("messages")
       .select("id, role, content, created_at")
@@ -242,40 +150,24 @@ export default function ChatPage() {
     if (error) {
       setErrorMsg("Impossible de charger les messages.");
       setMessages([]);
-      return;
+      return [];
     }
 
     const list = data || [];
     setMessages(list);
-
-    // Si conversation vide, on injecte un message d'accueil (persisté) via /api/conversations/init
-    if (allowInit && list.length === 0) {
-      await initGreetingIfEmpty(conversationId);
-      // recharger après init
-      const { data: data2 } = await supabase
-        .from("messages")
-        .select("id, role, content, created_at")
-        .eq("conversation_id", conversationId)
-        .order("created_at", { ascending: true });
-
-      setMessages(data2 || []);
-    }
+    return list;
   }
 
-  async function createNewConversation() {
+  async function createConversationNow(initialTitle = DEFAULT_TITLE) {
     if (!userId || !agentSlug) return "";
 
-    const title = input?.trim()
-      ? input.trim().slice(0, 60) + (input.trim().length > 60 ? "…" : "")
-      : "Nouvelle conversation";
-
-    // Try with archived
+    // Try with archived (si colonne existe)
     const { data, error } = await supabase
       .from("conversations")
       .insert({
         user_id: userId,
         agent_slug: agentSlug,
-        title,
+        title: initialTitle,
         archived: false,
       })
       .select("id")
@@ -283,19 +175,169 @@ export default function ChatPage() {
 
     if (!error && data?.id) return data.id;
 
-    // Fallback without archived
+    // Fallback sans archived
     const { data: data2, error: error2 } = await supabase
       .from("conversations")
       .insert({
         user_id: userId,
         agent_slug: agentSlug,
-        title,
+        title: initialTitle,
       })
       .select("id")
       .single();
 
     if (error2 || !data2?.id) return "";
     return data2.id;
+  }
+
+  async function updateConversationTitleIfNeeded(conversationId, firstUserMessage) {
+    const conv = (conversations || []).find((c) => c.id === conversationId);
+    const currentTitle = conv?.title || DEFAULT_TITLE;
+
+    // Si la conv a été créée "vide", on la renomme au 1er message
+    if (!currentTitle || currentTitle === DEFAULT_TITLE) {
+      const newTitle = titleFromMessage(firstUserMessage);
+      try {
+        await supabase.from("conversations").update({ title: newTitle }).eq("id", conversationId);
+      } catch (_) {}
+    }
+  }
+
+  async function refreshConversations(uid, slug) {
+    const { data, error } = await supabase
+      .from("conversations")
+      .select("id, created_at, title, archived, agent_slug, user_id")
+      .eq("user_id", uid)
+      .eq("agent_slug", slug)
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    if (error) {
+      const { data: data2, error: error2 } = await supabase
+        .from("conversations")
+        .select("id, created_at, title, agent_slug, user_id")
+        .eq("user_id", uid)
+        .eq("agent_slug", slug)
+        .order("created_at", { ascending: false })
+        .limit(10);
+
+      if (error2) {
+        setErrorMsg("Impossible de charger l'historique.");
+        setConversations([]);
+        setSelectedConvId("");
+        setMessages([]);
+        return { list: [], firstId: "" };
+      }
+
+      setConversations(data2 || []);
+      const firstId = data2?.[0]?.id || "";
+      return { list: data2 || [], firstId };
+    }
+
+    const filtered = (data || []).filter((c) => c.archived !== true);
+    setConversations(filtered);
+    const firstId = filtered?.[0]?.id || "";
+    return { list: filtered, firstId };
+  }
+
+  async function ensureConversationExistsWithGreeting() {
+    // Si aucune conversation, on en crée une immédiatement + greeting
+    const { list, firstId } = await refreshConversations(userId, agentSlug);
+
+    if (firstId) {
+      setSelectedConvId(firstId);
+      await loadMessages(firstId);
+      return;
+    }
+
+    // Aucune conversation => on crée + greeting + on charge
+    const convId = await createConversationNow(DEFAULT_TITLE);
+    if (!convId) {
+      setSelectedConvId("");
+      setMessages([]);
+      return;
+    }
+
+    await refreshConversations(userId, agentSlug);
+    setSelectedConvId(convId);
+
+    // IMPORTANT : greeting avant toute action user
+    await initGreetingIfEmpty(convId);
+    await loadMessages(convId);
+  }
+
+  // Init page: session + agent + conversations
+  useEffect(() => {
+    (async () => {
+      try {
+        setLoading(true);
+
+        const { data: sess } = await supabase.auth.getSession();
+        const user = sess?.session?.user;
+        if (!user) {
+          window.location.href = "/login";
+          return;
+        }
+
+        setUserId(user.id);
+        setSessionEmail(user.email || "");
+
+        const url = new URL(window.location.href);
+        const slug = safeStr(url.searchParams.get("agent")).trim().toLowerCase();
+        if (!slug) {
+          window.location.href = "/agents";
+          return;
+        }
+        setAgentSlug(slug);
+
+        const { data: agent, error: agentErr } = await supabase
+          .from("agents")
+          .select("slug, name, description, avatar_url")
+          .eq("slug", slug)
+          .maybeSingle();
+
+        if (agentErr || !agent) {
+          setErrorMsg("Erreur chargement agent.");
+          setLoading(false);
+          return;
+        }
+
+        setAgentName(agent.name || slug);
+        setAgentDesc(agent.description || "");
+        setAgentAvatar(agent.avatar_url || "");
+
+        setLoading(false);
+      } catch (_) {
+        setErrorMsg("Erreur initialisation chat.");
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  // Une fois userId + agentSlug connus : on garantit une conversation existante + greeting
+  useEffect(() => {
+    if (!userId || !agentSlug) return;
+    (async () => {
+      setErrorMsg("");
+      await ensureConversationExistsWithGreeting();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, agentSlug]);
+
+  async function handleNewConversation() {
+    setErrorMsg("");
+    const convId = await createConversationNow(DEFAULT_TITLE);
+    if (!convId) {
+      setErrorMsg("Impossible de créer une nouvelle conversation.");
+      return;
+    }
+
+    await refreshConversations(userId, agentSlug);
+    setSelectedConvId(convId);
+
+    // Greeting doit s’afficher immédiatement
+    await initGreetingIfEmpty(convId);
+    await loadMessages(convId);
   }
 
   async function sendMessage() {
@@ -306,17 +348,19 @@ export default function ChatPage() {
     try {
       let convId = selectedConvId;
 
+      // Si aucune conv sélectionnée (cas rare), on en crée tout de suite + greeting, puis on envoie
       if (!convId) {
-        convId = await createNewConversation();
+        convId = await createConversationNow(DEFAULT_TITLE);
         if (!convId) {
           setErrorMsg("Impossible de créer une conversation.");
           setSending(false);
           return;
         }
-        setSelectedConvId(convId);
         await refreshConversations(userId, agentSlug);
-        // message d'accueil si vide
-        await loadMessages(convId, true);
+        setSelectedConvId(convId);
+
+        await initGreetingIfEmpty(convId);
+        await loadMessages(convId);
       }
 
       const token = await getAccessToken();
@@ -326,19 +370,18 @@ export default function ChatPage() {
         return;
       }
 
-      // Optimistic UI
+      const userText = input.trim();
+      setInput("");
+
+      // Optimistic UI (après greeting)
       setMessages((prev) => [
         ...(prev || []),
-        { id: "tmp-" + Date.now(), role: "user", content: input.trim(), created_at: new Date().toISOString() },
+        { id: "tmp-" + Date.now(), role: "user", content: userText, created_at: new Date().toISOString() },
       ]);
 
-      const payload = {
-        agentSlug,
-        conversationId: convId,
-        message: input.trim(),
-      };
-
-      setInput("");
+      // Renommer la conversation au 1er message (si elle était "Nouvelle conversation")
+      await updateConversationTitleIfNeeded(convId, userText);
+      await refreshConversations(userId, agentSlug);
 
       const resp = await fetch("/api/chat", {
         method: "POST",
@@ -346,35 +389,36 @@ export default function ChatPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          agentSlug,
+          conversationId: convId,
+          message: userText,
+        }),
       });
 
       const json = await resp.json().catch(() => null);
 
       if (!resp.ok) {
         setErrorMsg(json?.error || "Erreur lors de l’envoi.");
-        await loadMessages(convId, false);
+        await loadMessages(convId);
         setSending(false);
         return;
       }
 
       if (json?.conversationId && json.conversationId !== convId) {
-        setSelectedConvId(json.conversationId);
         convId = json.conversationId;
+        setSelectedConvId(convId);
       }
 
-      await loadMessages(convId, false);
+      await loadMessages(convId);
       setSending(false);
-    } catch (e) {
+    } catch (_) {
       setErrorMsg("Erreur lors de l’envoi.");
       setSending(false);
     }
   }
 
-  const headerRightLabel = useMemo(() => {
-    if (!sessionEmail) return "";
-    return sessionEmail;
-  }, [sessionEmail]);
+  const headerRightLabel = useMemo(() => sessionEmail || "", [sessionEmail]);
 
   if (loading) {
     return (
@@ -389,7 +433,6 @@ export default function ChatPage() {
     <main style={styles.page}>
       <div style={styles.bg} aria-hidden="true" />
 
-      {/* TOP BAR */}
       <header style={styles.topbar}>
         <div style={styles.topLeft}>
           <button style={styles.backBtn} onClick={goBack}>
@@ -411,21 +454,11 @@ export default function ChatPage() {
         </div>
       </header>
 
-      {/* BODY */}
       <div style={styles.shell}>
-        {/* LEFT: history */}
         <aside style={styles.sidebar}>
           <div style={styles.sideTop}>
             <div style={styles.sideTitle}>Historique</div>
-            <button
-              style={styles.newBtn}
-              onClick={async () => {
-                setSelectedConvId("");
-                setMessages([]);
-                setErrorMsg("");
-              }}
-              title="Nouvelle conversation"
-            >
+            <button style={styles.newBtn} onClick={handleNewConversation} title="Nouvelle conversation">
               + Nouvelle
             </button>
           </div>
@@ -440,7 +473,7 @@ export default function ChatPage() {
                 }}
                 onClick={async () => {
                   setSelectedConvId(c.id);
-                  await loadMessages(c.id, true);
+                  await loadMessages(c.id);
                 }}
                 title={c.title || ""}
               >
@@ -453,7 +486,6 @@ export default function ChatPage() {
           </div>
         </aside>
 
-        {/* RIGHT: chat */}
         <section style={styles.chatCol}>
           <div style={styles.agentHeader}>
             {agentAvatar ? (
@@ -492,7 +524,6 @@ export default function ChatPage() {
 
           {errorMsg ? <div style={styles.error}>{errorMsg}</div> : null}
 
-          {/* INPUT */}
           <div style={styles.inputRow}>
             <textarea
               value={input}
@@ -509,7 +540,6 @@ export default function ChatPage() {
               disabled={sending}
             />
 
-            {/* Micro button (SVG) */}
             <button
               type="button"
               onClick={() => {
@@ -577,15 +607,7 @@ function MicIcon() {
 function StopIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <rect
-        x="7"
-        y="7"
-        width="10"
-        height="10"
-        rx="2"
-        stroke="currentColor"
-        strokeWidth="2"
-      />
+      <rect x="7" y="7" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="2" />
     </svg>
   );
 }
@@ -668,7 +690,7 @@ const styles = {
     gap: 14,
     padding: 14,
     flex: "1 1 auto",
-    minHeight: 0, // CRUCIAL pour éviter l’historique coupé
+    minHeight: 0,
     overflow: "hidden",
   },
 
@@ -680,7 +702,7 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
-    minHeight: 0, // CRUCIAL
+    minHeight: 0,
   },
   sideTop: {
     padding: 12,
@@ -711,7 +733,7 @@ const styles = {
     overflowY: "auto",
     overflowX: "hidden",
     flex: "1 1 auto",
-    minHeight: 0, // CRUCIAL
+    minHeight: 0,
   },
   convItem: {
     textAlign: "left",
@@ -749,7 +771,7 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
-    minHeight: 0, // CRUCIAL
+    minHeight: 0,
   },
 
   agentHeader: {
