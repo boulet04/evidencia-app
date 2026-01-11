@@ -1,347 +1,820 @@
 // pages/chat.js
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/router";
-import { createClient } from "@supabase/supabase-js";
-
-function createBrowserSupabase() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  // IMPORTANT: ne pas throw côté serveur/build
-  if (typeof window === "undefined") return null;
-
-  if (!url || !anon) {
-    console.error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY");
-    return null;
-  }
-  return createClient(url, anon);
-}
-
-function isMeta(content) {
-  return (
-    typeof content === "string" &&
-    (content.startsWith("__META_EMAIL_DRAFT__:") || content.startsWith("__META_EMAIL_SENT__:"))
-  );
-}
+import { useEffect, useMemo, useRef, useState } from "react";
+import { supabase } from "../lib/supabaseClient";
 
 export default function ChatPage() {
-  const router = useRouter();
-  const agentSlug = typeof router.query.agent === "string" ? router.query.agent : "";
+  // --- Session / user ---
+  const [sessionEmail, setSessionEmail] = useState("");
+  const [userId, setUserId] = useState("");
 
-  const supabase = useMemo(() => createBrowserSupabase(), []);
-  const [session, setSession] = useState(null);
+  // --- Agent ---
+  const [agentSlug, setAgentSlug] = useState("");
+  const [agentName, setAgentName] = useState("");
+  const [agentDesc, setAgentDesc] = useState("");
+  const [agentAvatar, setAgentAvatar] = useState("");
 
+  // --- UI state ---
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+
+  // --- Conversations / messages ---
   const [conversations, setConversations] = useState([]);
-  const [activeConversationId, setActiveConversationId] = useState(null);
-
+  const [selectedConvId, setSelectedConvId] = useState("");
   const [messages, setMessages] = useState([]);
+
+  // --- Input ---
   const [input, setInput] = useState("");
+  const endRef = useRef(null);
 
-  const [loadingSend, setLoadingSend] = useState(false);
-  const [errorBanner, setErrorBanner] = useState("");
+  // --- Micro / dictée (Web Speech API) ---
+  const recognitionRef = useRef(null);
+  const finalTextRef = useRef("");
+  const [micSupported, setMicSupported] = useState(false);
+  const [listening, setListening] = useState(false);
 
-  // ---- Auth/session
-  useEffect(() => {
-    if (!supabase) return;
-
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data?.session || null);
-    });
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession || null);
-    });
-
-    return () => sub?.subscription?.unsubscribe?.();
-  }, [supabase]);
-
-  // ---- Load conversations
-  async function refreshConversations() {
-    if (!supabase || !session?.user?.id) return;
-
-    const { data, error } = await supabase
-      .from("conversations")
-      .select("id, title, created_at, agent_slug")
-      .eq("user_id", session.user.id)
-      .order("created_at", { ascending: false })
-      .limit(50);
-
-    if (error) {
-      console.error(error);
-      setErrorBanner("Erreur chargement conversations.");
-      return;
-    }
-    setConversations(data || []);
+  // Utils
+  function safeStr(v) {
+    return (v ?? "").toString();
   }
 
+  async function getAccessToken() {
+    const { data } = await supabase.auth.getSession();
+    return data?.session?.access_token || "";
+  }
+
+  function goBack() {
+    window.location.href = "/agents";
+  }
+
+  async function logout() {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
+  }
+
+  // Auto-scroll
   useEffect(() => {
-    if (!supabase || !session?.user?.id) return;
-    refreshConversations();
-  }, [supabase, session?.user?.id]);
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
-  // ---- Load messages of a conversation
+  // Init speech recognition
+  useEffect(() => {
+    const SR =
+      typeof window !== "undefined"
+        ? window.SpeechRecognition || window.webkitSpeechRecognition
+        : null;
+
+    if (!SR) {
+      setMicSupported(false);
+      return;
+    }
+
+    setMicSupported(true);
+  }, []);
+
+  function startMic() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      alert("Reconnaissance vocale non supportée sur ce navigateur.");
+      return;
+    }
+
+    // stop old instance to avoid duplicate listeners
+    try {
+      recognitionRef.current?.stop?.();
+    } catch (_) {}
+    recognitionRef.current = null;
+
+    const rec = new SR();
+    recognitionRef.current = rec;
+
+    rec.lang = "fr-FR";
+    rec.interimResults = true;
+    rec.continuous = false;
+
+    finalTextRef.current = "";
+    setListening(true);
+
+    rec.onresult = (event) => {
+      let interim = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const res = event.results[i];
+        const txt = res[0]?.transcript || "";
+        if (res.isFinal) finalTextRef.current += txt;
+        else interim += txt;
+      }
+
+      setInput((finalTextRef.current + interim).trim());
+    };
+
+    rec.onerror = () => {
+      setListening(false);
+    };
+
+    rec.onend = () => {
+      setListening(false);
+    };
+
+    try {
+      rec.start();
+    } catch (_) {
+      setListening(false);
+    }
+  }
+
+  function stopMic() {
+    try {
+      recognitionRef.current?.stop?.();
+    } catch (_) {}
+    recognitionRef.current = null;
+    setListening(false);
+  }
+
+  // Read agent from URL: /chat?agent=emma
+  useEffect(() => {
+    (async () => {
+      try {
+        setLoading(true);
+
+        const { data: sess } = await supabase.auth.getSession();
+        const user = sess?.session?.user;
+        if (!user) {
+          window.location.href = "/login";
+          return;
+        }
+
+        setUserId(user.id);
+        setSessionEmail(user.email || "");
+
+        const url = new URL(window.location.href);
+        const slug = safeStr(url.searchParams.get("agent")).trim().toLowerCase();
+
+        if (!slug) {
+          // fallback: if no agent param, redirect to agents list
+          window.location.href = "/agents";
+          return;
+        }
+
+        setAgentSlug(slug);
+
+        // Load agent details
+        const { data: agent, error: agentErr } = await supabase
+          .from("agents")
+          .select("slug, name, description, avatar_url")
+          .eq("slug", slug)
+          .maybeSingle();
+
+        if (agentErr) {
+          setErrorMsg("Erreur chargement agent.");
+          setLoading(false);
+          return;
+        }
+
+        if (!agent) {
+          setErrorMsg("Agent introuvable (slug).");
+          setLoading(false);
+          return;
+        }
+
+        setAgentName(agent.name || slug);
+        setAgentDesc(agent.description || "");
+        setAgentAvatar(agent.avatar_url || "");
+
+        // Load conversations for this user + agent
+        await refreshConversations(user.id, slug);
+
+        setLoading(false);
+      } catch (e) {
+        setErrorMsg("Erreur initialisation chat.");
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function refreshConversations(uid, slug) {
+    // Pull last 10 active conversations (non archived) if column exists.
+    // If your DB version doesn't have archived, Supabase will return an error -> we fallback gracefully.
+    const base = supabase
+      .from("conversations")
+      .select("id, created_at, title, archived, agent_slug, user_id")
+      .eq("user_id", uid)
+      .eq("agent_slug", slug)
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    const { data, error } = await base;
+
+    if (error) {
+      // fallback without archived selection if needed
+      const { data: data2, error: error2 } = await supabase
+        .from("conversations")
+        .select("id, created_at, title, agent_slug, user_id")
+        .eq("user_id", uid)
+        .eq("agent_slug", slug)
+        .order("created_at", { ascending: false })
+        .limit(10);
+
+      if (error2) {
+        setErrorMsg("Impossible de charger l'historique.");
+        setConversations([]);
+        setSelectedConvId("");
+        setMessages([]);
+        return;
+      }
+
+      setConversations(data2 || []);
+      const firstId = data2?.[0]?.id || "";
+      setSelectedConvId(firstId);
+      if (firstId) await loadMessages(firstId);
+      else setMessages([]);
+      return;
+    }
+
+    // Filter archived if present
+    const filtered = (data || []).filter((c) => c.archived !== true);
+    setConversations(filtered);
+    const firstId = filtered?.[0]?.id || "";
+    setSelectedConvId(firstId);
+    if (firstId) await loadMessages(firstId);
+    else setMessages([]);
+  }
+
   async function loadMessages(conversationId) {
-    if (!supabase || !conversationId) return;
-
     const { data, error } = await supabase
       .from("messages")
       .select("id, role, content, created_at")
       .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true })
-      .limit(200);
+      .order("created_at", { ascending: true });
 
     if (error) {
-      console.error(error);
-      setErrorBanner("Erreur chargement messages.");
+      setErrorMsg("Impossible de charger les messages.");
+      setMessages([]);
       return;
     }
-
-    const filtered = (data || []).filter((m) => !isMeta(m.content));
-    setMessages(filtered);
+    setMessages(data || []);
   }
 
-  // when selecting conversation
-  useEffect(() => {
-    if (!activeConversationId) return;
-    loadMessages(activeConversationId);
-  }, [activeConversationId]);
+  async function createNewConversation() {
+    if (!userId || !agentSlug) return "";
 
-  // ---- Send message
+    const title = input?.trim()
+      ? input.trim().slice(0, 60) + (input.trim().length > 60 ? "…" : "")
+      : "Nouvelle conversation";
+
+    // Try with archived
+    const { data, error } = await supabase
+      .from("conversations")
+      .insert({
+        user_id: userId,
+        agent_slug: agentSlug,
+        title,
+        archived: false,
+      })
+      .select("id")
+      .single();
+
+    if (!error && data?.id) return data.id;
+
+    // Fallback without archived if needed
+    const { data: data2, error: error2 } = await supabase
+      .from("conversations")
+      .insert({
+        user_id: userId,
+        agent_slug: agentSlug,
+        title,
+      })
+      .select("id")
+      .single();
+
+    if (error2 || !data2?.id) return "";
+    return data2.id;
+  }
+
   async function sendMessage() {
-    setErrorBanner("");
-
-    if (!agentSlug) {
-      setErrorBanner("Aucun agent sélectionné. Utilisez /chat?agent=emma (ou autre).");
-      return;
-    }
-    if (!session?.access_token) {
-      setErrorBanner("Session absente. Veuillez vous reconnecter.");
-      return;
-    }
-
-    const text = input.trim();
-    if (!text) return;
-
-    // optimistic add
-    const optimisticUser = {
-      id: `local-${Date.now()}`,
-      role: "user",
-      content: text,
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, optimisticUser]);
-    setInput("");
-    setLoadingSend(true);
+    if (!input.trim() || sending) return;
+    setErrorMsg("");
+    setSending(true);
 
     try {
-      const r = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          agent_slug: agentSlug,
-          conversation_id: activeConversationId,
-          message: text,
-        }),
-      });
+      let convId = selectedConvId;
 
-      const data = await r.json().catch(() => null);
+      // Ensure a conversation exists (avoid the “conversationId missing” issue)
+      if (!convId) {
+        convId = await createNewConversation();
+        if (!convId) {
+          setErrorMsg("Impossible de créer une conversation.");
+          setSending(false);
+          return;
+        }
+        setSelectedConvId(convId);
+        // refresh list
+        await refreshConversations(userId, agentSlug);
+      }
 
-      if (!r.ok || !data?.ok) {
-        const err = data?.error || `Erreur API (${r.status})`;
-        setErrorBanner(err);
-        setLoadingSend(false);
+      const token = await getAccessToken();
+      if (!token) {
+        setErrorMsg("Session expirée. Reconnectez-vous.");
+        setSending(false);
         return;
       }
 
-      const newConvId = data.conversation_id;
-      if (!activeConversationId && newConvId) {
-        setActiveConversationId(newConvId);
+      // Optimistic UI
+      const optimistic = [
+        ...messages,
+        { id: "tmp-" + Date.now(), role: "user", content: input.trim(), created_at: new Date().toISOString() },
+      ];
+      setMessages(optimistic);
+
+      const payload = {
+        agentSlug,
+        conversationId: convId,
+        message: input.trim(),
+      };
+
+      setInput("");
+
+      const resp = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const json = await resp.json().catch(() => null);
+
+      if (!resp.ok) {
+        setErrorMsg(json?.error || "Erreur lors de l’envoi.");
+        // reload messages from DB to get back in sync
+        await loadMessages(convId);
+        setSending(false);
+        return;
       }
 
-      // Append assistant message
-      const assistantText = data?.assistant?.text || "";
-      if (assistantText) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `asst-${Date.now()}`,
-            role: "assistant",
-            content: assistantText,
-            created_at: new Date().toISOString(),
-          },
-        ]);
+      // Server may return updated conversationId
+      if (json?.conversationId && json.conversationId !== convId) {
+        setSelectedConvId(json.conversationId);
+        convId = json.conversationId;
       }
 
-      await refreshConversations();
+      // Reload messages (source of truth)
+      await loadMessages(convId);
+      setSending(false);
     } catch (e) {
-      console.error(e);
-      setErrorBanner("Erreur réseau lors de l’envoi du message.");
-    } finally {
-      setLoadingSend(false);
+      setErrorMsg("Erreur lors de l’envoi.");
+      setSending(false);
     }
   }
 
-  function onKeyDown(e) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  }
+  const headerRightLabel = useMemo(() => {
+    if (!sessionEmail) return "";
+    return sessionEmail;
+  }, [sessionEmail]);
 
-  async function startNewConversation() {
-    setActiveConversationId(null);
-    setMessages([]);
-    setErrorBanner("");
-    setInput("");
-  }
-
-  // ---- UI
-  if (typeof window === "undefined") {
-    // rendu build/SSR : rien (évite supabaseUrl required)
-    return null;
-  }
-
-  if (!supabase) {
+  if (loading) {
     return (
-      <div style={{ padding: 24 }}>
-        <h2>Configuration Supabase manquante</h2>
-        <p>Vérifiez NEXT_PUBLIC_SUPABASE_URL et NEXT_PUBLIC_SUPABASE_ANON_KEY dans Vercel.</p>
-      </div>
-    );
-  }
-
-  if (!session) {
-    return (
-      <div style={{ padding: 24 }}>
-        <h2>Connexion requise</h2>
-        <p>Veuillez vous connecter via votre écran de login Supabase.</p>
-      </div>
+      <main style={styles.page}>
+        <div style={styles.bg} aria-hidden="true" />
+        <div style={styles.center}>Chargement…</div>
+      </main>
     );
   }
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#070707", color: "#fff" }}>
-      {/* Sidebar */}
-      <div style={{ width: 320, borderRight: "1px solid #222", padding: 16, overflowY: "auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ fontWeight: 700 }}>Historique</div>
-          <button
-            onClick={startNewConversation}
-            style={{
-              background: "transparent",
-              color: "#fff",
-              border: "1px solid #444",
-              padding: "6px 10px",
-              borderRadius: 10,
-              cursor: "pointer",
-            }}
-          >
-            + Nouvelle
+    <main style={styles.page}>
+      <div style={styles.bg} aria-hidden="true" />
+
+      {/* TOP BAR */}
+      <header style={styles.topbar}>
+        <div style={styles.topLeft}>
+          <button style={styles.backBtn} onClick={goBack}>
+            ← Retour aux agents
           </button>
         </div>
 
-        <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
-          Agent : <b>{agentSlug || "— (manquant)"}</b>
+        <div style={styles.topCenter}>
+          <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
         </div>
 
-        <div style={{ marginTop: 16 }}>
-          {conversations.map((c) => (
-            <div
-              key={c.id}
-              onClick={() => setActiveConversationId(c.id)}
-              style={{
-                padding: 10,
-                marginBottom: 8,
-                borderRadius: 12,
-                border: activeConversationId === c.id ? "1px solid #b87333" : "1px solid #222",
-                cursor: "pointer",
-              }}
-            >
-              <div style={{ fontWeight: 600, fontSize: 13 }}>{c.title || "Conversation"}</div>
-              <div style={{ fontSize: 11, opacity: 0.75 }}>
-                {c.agent_slug} • {new Date(c.created_at).toLocaleString()}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Main */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        <div style={{ padding: 16, borderBottom: "1px solid #222" }}>
-          <div style={{ fontWeight: 700 }}>Chat</div>
-          <div style={{ fontSize: 12, opacity: 0.75 }}>
-            {activeConversationId ? `Conversation: ${activeConversationId}` : "Nouvelle conversation (créée au 1er message)"}
+        <div style={styles.topRight}>
+          <div style={styles.userLabel} title={headerRightLabel}>
+            {headerRightLabel || "Utilisateur"}
           </div>
-        </div>
-
-        {errorBanner ? (
-          <div style={{ padding: 12, background: "#3a1111", borderBottom: "1px solid #552222" }}>
-            {errorBanner}
-          </div>
-        ) : null}
-
-        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              style={{
-                maxWidth: 900,
-                marginBottom: 12,
-                padding: 12,
-                borderRadius: 14,
-                background: m.role === "user" ? "#1b120a" : "#101010",
-                border: m.role === "user" ? "1px solid #b87333" : "1px solid #222",
-                marginLeft: m.role === "user" ? "auto" : 0,
-              }}
-            >
-              <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>
-                {m.role === "user" ? "Vous" : "Agent"}
-              </div>
-              <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.35 }}>{m.content}</div>
-            </div>
-          ))}
-        </div>
-
-        <div style={{ padding: 16, borderTop: "1px solid #222", display: "flex", gap: 10 }}>
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="Écrire…"
-            style={{
-              flex: 1,
-              minHeight: 44,
-              maxHeight: 140,
-              background: "#0d0d0d",
-              color: "#fff",
-              border: "1px solid #333",
-              borderRadius: 14,
-              padding: 12,
-              resize: "none",
-              outline: "none",
-            }}
-          />
-          <button
-            onClick={sendMessage}
-            disabled={loadingSend}
-            style={{
-              width: 120,
-              borderRadius: 14,
-              border: "1px solid #b87333",
-              background: loadingSend ? "#2a2a2a" : "#1b120a",
-              color: "#fff",
-              cursor: loadingSend ? "not-allowed" : "pointer",
-              fontWeight: 700,
-            }}
-          >
-            {loadingSend ? "Envoi…" : "Envoyer"}
+          <button style={styles.logoutBtn} onClick={logout}>
+            Déconnexion
           </button>
         </div>
+      </header>
+
+      {/* BODY */}
+      <div style={styles.shell}>
+        {/* LEFT: history */}
+        <aside style={styles.sidebar}>
+          <div style={styles.sideTop}>
+            <div style={styles.sideTitle}>Historique</div>
+            <button
+              style={styles.newBtn}
+              onClick={async () => {
+                setSelectedConvId("");
+                setMessages([]);
+              }}
+              title="Nouvelle conversation"
+            >
+              + Nouvelle
+            </button>
+          </div>
+
+          <div style={styles.convList}>
+            {(conversations || []).map((c) => (
+              <button
+                key={c.id}
+                style={{
+                  ...styles.convItem,
+                  ...(selectedConvId === c.id ? styles.convItemActive : {}),
+                }}
+                onClick={async () => {
+                  setSelectedConvId(c.id);
+                  await loadMessages(c.id);
+                }}
+                title={c.title || ""}
+              >
+                <div style={styles.convTitle}>{c.title || "Conversation"}</div>
+                <div style={styles.convMeta}>
+                  {c.created_at ? new Date(c.created_at).toLocaleString("fr-FR") : ""}
+                </div>
+              </button>
+            ))}
+          </div>
+        </aside>
+
+        {/* RIGHT: chat */}
+        <section style={styles.chatCol}>
+          <div style={styles.agentHeader}>
+            {agentAvatar ? (
+              <img src={agentAvatar} alt={agentName} style={styles.avatar} />
+            ) : (
+              <div style={styles.avatarFallback} />
+            )}
+
+            <div style={styles.agentMeta}>
+              <div style={styles.agentName}>{agentName || agentSlug}</div>
+              <div style={styles.agentDesc}>{agentDesc}</div>
+            </div>
+          </div>
+
+          <div style={styles.chatBox}>
+            {(messages || []).map((m, idx) => (
+              <div
+                key={m.id || idx}
+                style={{
+                  ...styles.msgRow,
+                  justifyContent: m.role === "user" ? "flex-end" : "flex-start",
+                }}
+              >
+                <div
+                  style={{
+                    ...styles.bubble,
+                    ...(m.role === "user" ? styles.bubbleUser : styles.bubbleAgent),
+                  }}
+                >
+                  {m.content}
+                </div>
+              </div>
+            ))}
+            <div ref={endRef} />
+          </div>
+
+          {errorMsg ? <div style={styles.error}>{errorMsg}</div> : null}
+
+          {/* INPUT */}
+          <div style={styles.inputRow}>
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Écrire…"
+              style={styles.textarea}
+              rows={1}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  sendMessage();
+                }
+              }}
+              disabled={sending}
+            />
+
+            {/* Micro button */}
+            <button
+              type="button"
+              onClick={() => {
+                if (!micSupported) return;
+                if (listening) stopMic();
+                else startMic();
+              }}
+              disabled={!micSupported || sending}
+              title={!micSupported ? "Micro non supporté" : listening ? "Arrêter la dictée" : "Dicter"}
+              style={{
+                ...styles.micBtn,
+                ...(listening ? styles.micBtnOn : {}),
+                ...(micSupported ? {} : styles.micBtnOff),
+              }}
+            >
+              {listening ? "■" : "🎤"}
+            </button>
+
+            <button onClick={sendMessage} disabled={sending || !input.trim()} style={styles.sendBtn}>
+              {sending ? "Envoi…" : "Envoyer"}
+            </button>
+          </div>
+        </section>
       </div>
-    </div>
+    </main>
   );
 }
+
+const styles = {
+  page: {
+    minHeight: "100vh",
+    background: "#0b0b0f",
+    color: "#fff",
+    position: "relative",
+  },
+  bg: {
+    position: "absolute",
+    inset: 0,
+    background:
+      "radial-gradient(1200px 600px at 20% 10%, rgba(255,140,0,0.10), transparent 60%), radial-gradient(1000px 700px at 80% 30%, rgba(255,255,255,0.06), transparent 55%)",
+    pointerEvents: "none",
+  },
+
+  topbar: {
+    position: "relative",
+    zIndex: 2,
+    display: "grid",
+    gridTemplateColumns: "1fr auto 1fr",
+    alignItems: "center",
+    padding: "14px 18px",
+    borderBottom: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(0,0,0,0.28)",
+    backdropFilter: "blur(10px)",
+  },
+  topLeft: { display: "flex", alignItems: "center", gap: 12 },
+  topCenter: { display: "flex", justifyContent: "center", alignItems: "center" },
+  topRight: { display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12 },
+
+  backBtn: {
+    padding: "8px 14px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(0,0,0,0.35)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  brandLogo: {
+    height: 26,
+    width: "auto",
+    opacity: 0.95,
+    filter: "drop-shadow(0 6px 18px rgba(0,0,0,.55))",
+    display: "block",
+    userSelect: "none",
+  },
+  userLabel: {
+    fontSize: 12,
+    fontWeight: 800,
+    color: "rgba(238,242,255,0.78)",
+    maxWidth: 240,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  logoutBtn: {
+    padding: "8px 14px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(0,0,0,0.35)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+
+  shell: {
+    position: "relative",
+    zIndex: 1,
+    display: "grid",
+    gridTemplateColumns: "300px 1fr",
+    gap: 14,
+    padding: 14,
+    minHeight: "calc(100vh - 64px)",
+  },
+
+  sidebar: {
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(0,0,0,0.28)",
+    backdropFilter: "blur(10px)",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+  },
+  sideTop: {
+    padding: 12,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderBottom: "1px solid rgba(255,255,255,0.10)",
+  },
+  sideTitle: {
+    fontWeight: 900,
+    fontSize: 13,
+    color: "rgba(255,255,255,0.92)",
+  },
+  newBtn: {
+    padding: "8px 10px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(255,255,255,0.06)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  convList: {
+    padding: 10,
+    display: "grid",
+    gap: 8,
+    overflow: "auto",
+  },
+  convItem: {
+    textAlign: "left",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(0,0,0,0.26)",
+    color: "#fff",
+    padding: 10,
+    cursor: "pointer",
+  },
+  convItemActive: {
+    border: "1px solid rgba(255,140,0,0.42)",
+    background: "rgba(255,140,0,0.08)",
+  },
+  convTitle: {
+    fontSize: 12,
+    fontWeight: 900,
+    marginBottom: 4,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  convMeta: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: "rgba(238,242,255,0.60)",
+  },
+
+  chatCol: {
+    borderRadius: 18,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(0,0,0,0.28)",
+    backdropFilter: "blur(10px)",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+    minHeight: 0,
+  },
+
+  agentHeader: {
+    padding: 14,
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    borderBottom: "1px solid rgba(255,255,255,0.10)",
+  },
+  avatar: {
+    width: 72,
+    height: 72,
+    borderRadius: "50%",
+    objectFit: "cover",
+    objectPosition: "center top", // visage bien cadré
+    border: "2px solid rgba(255,255,255,0.45)",
+    backgroundColor: "#000",
+    flexShrink: 0,
+  },
+  avatarFallback: {
+    width: 72,
+    height: 72,
+    borderRadius: "50%",
+    border: "2px solid rgba(255,255,255,0.20)",
+    background: "rgba(255,255,255,0.06)",
+    flexShrink: 0,
+  },
+  agentMeta: { display: "grid", gap: 6 },
+  agentName: {
+    fontSize: 18,
+    fontWeight: 900,
+    color: "#ffffff",
+    textShadow: "0 2px 12px rgba(0,0,0,0.60)",
+  },
+  agentDesc: {
+    fontSize: 13,
+    fontWeight: 800,
+    color: "rgba(238,242,255,0.75)",
+    lineHeight: 1.35,
+  },
+
+  chatBox: {
+    padding: 14,
+    overflow: "auto",
+    flex: 1,
+    minHeight: 0,
+  },
+  msgRow: {
+    display: "flex",
+    marginBottom: 10,
+  },
+  bubble: {
+    maxWidth: "78%",
+    padding: "10px 12px",
+    borderRadius: 14,
+    whiteSpace: "pre-wrap",
+    lineHeight: 1.35,
+    fontWeight: 700,
+    fontSize: 13,
+    border: "1px solid rgba(255,255,255,0.10)",
+  },
+  bubbleUser: {
+    background: "rgba(255,140,0,0.10)",
+    border: "1px solid rgba(255,140,0,0.22)",
+  },
+  bubbleAgent: {
+    background: "rgba(255,255,255,0.06)",
+  },
+
+  error: {
+    padding: "10px 14px",
+    color: "rgba(255,170,170,0.95)",
+    fontWeight: 900,
+    borderTop: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(255,0,0,0.06)",
+  },
+
+  inputRow: {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    padding: 14,
+    borderTop: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(0,0,0,0.18)",
+  },
+  textarea: {
+    flex: 1,
+    borderRadius: 12,
+    padding: "12px 12px",
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(0,0,0,0.35)",
+    color: "#fff",
+    outline: "none",
+    resize: "none",
+    minHeight: 44,
+    maxHeight: 140,
+    fontWeight: 700,
+  },
+  micBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(255,255,255,0.06)",
+    color: "#fff",
+    cursor: "pointer",
+    fontWeight: 900,
+  },
+  micBtnOn: {
+    background: "rgba(255,140,0,0.12)",
+    border: "1px solid rgba(255,140,0,0.30)",
+  },
+  micBtnOff: {
+    opacity: 0.45,
+    cursor: "not-allowed",
+  },
+  sendBtn: {
+    borderRadius: 12,
+    padding: "12px 14px",
+    border: "1px solid rgba(255,140,0,0.35)",
+    background: "rgba(255,140,0,0.18)",
+    color: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+    minWidth: 110,
+  },
+
+  center: {
+    minHeight: "70vh",
+    display: "grid",
+    placeItems: "center",
+    fontWeight: 900,
+    color: "rgba(255,255,255,0.85)",
+  },
+};
