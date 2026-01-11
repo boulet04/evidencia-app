@@ -2,360 +2,434 @@
 import { createClient } from "@supabase/supabase-js";
 import { Mistral } from "@mistralai/mistralai";
 
-const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
+const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL;
 
-const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
+const META_DRAFT_PREFIX = "__META_EMAIL_DRAFT__:";
+const META_SENT_PREFIX = "__META_EMAIL_SENT__:";
 
-const MODEL = process.env.MISTRAL_MODEL || "mistral-large-latest";
-const HISTORY_LIMIT = Number(process.env.CHAT_HISTORY_LIMIT || 30);
+// ---- Helpers
+function json(res, status, payload) {
+  res.status(status).setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(payload));
+}
 
-// Markers stockés dans messages.content pour retrouver le dernier brouillon
-const DRAFT_OPEN = "[EMAIL_DRAFT_JSON]";
-const DRAFT_CLOSE = "[/EMAIL_DRAFT_JSON]";
-
-function extractLastEmailDraft(messages) {
-  // Cherche le dernier message assistant qui contient un brouillon JSON balisé
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.role !== "assistant" || typeof m.content !== "string") continue;
-    const start = m.content.lastIndexOf(DRAFT_OPEN);
-    const end = m.content.lastIndexOf(DRAFT_CLOSE);
-    if (start === -1 || end === -1 || end <= start) continue;
-
-    const jsonStr = m.content
-      .slice(start + DRAFT_OPEN.length, end)
-      .trim();
-
-    try {
-      const draft = JSON.parse(jsonStr);
-      if (!draft || typeof draft !== "object") continue;
-      if (!draft.to || !draft.subject || !draft.body) continue;
-
-      return draft;
-    } catch (e) {
-      continue;
-    }
+function safeParseJSON(str) {
+  try {
+    return { ok: true, value: JSON.parse(str) };
+  } catch {
+    return { ok: false, value: null };
   }
-  return null;
 }
 
-function stripDraftBlock(text) {
-  if (typeof text !== "string") return "";
-  const start = text.lastIndexOf(DRAFT_OPEN);
-  const end = text.lastIndexOf(DRAFT_CLOSE);
-  if (start === -1 || end === -1 || end <= start) return text;
-  // On supprime le bloc JSON balisé de l’affichage
-  return (text.slice(0, start) + text.slice(end + DRAFT_CLOSE.length)).trim();
-}
-
-function isSendConfirmation(userText) {
-  const t = (userText || "").trim().toLowerCase();
-  // volontairement permissif
+function looksLikeSendConfirmation(text) {
+  if (!text) return false;
+  const t = text.trim().toLowerCase();
+  // confirmations typiques
   return (
     t === "envoie" ||
-    t === "envoye" ||
-    t === "envoie le" ||
+    t === "envoi" ||
+    t === "ok envoie" ||
+    t === "ok envoi" ||
+    t === "oui envoie" ||
+    t === "oui envoi" ||
+    t === "envoie le mail" ||
+    t === "envoie l'email" ||
+    t === "envoie l’email" ||
+    t === "envoie le courrier" ||
     t === "envoie-le" ||
-    t.includes("ok envoie") ||
-    t.includes("ok, envoie") ||
-    t.includes("tu peux envoyer") ||
-    t.includes("envoie le mail") ||
-    t.includes("envoi le mail") ||
-    t.includes("envoie-le par mail") ||
-    t.includes("confirme") ||
-    t.includes("vas-y envoie")
+    t.includes("envoie") ||
+    t.includes("envoyer")
   );
 }
 
-function buildEmailWorkflowSystemPrompt() {
-  return `
-Tu es un assistant professionnel. Tu DOIS appliquer un workflow strict pour les emails.
-
-OBJECTIF:
-- Préparer un email avec : destinataire (to), objet (subject), corps (body en HTML).
-- Ne JAMAIS envoyer tant que l'utilisateur ne confirme pas explicitement.
-
-RÈGLES:
-1) Si l'utilisateur demande "prépare / rédige / fais un email", tu dois COLLECTER les infos manquantes:
-   - Email destinataire (obligatoire)
-   - Objet (obligatoire)
-   - Contenu du mail (obligatoire)
-   - Signature souhaitée (optionnel)
-   - Contexte (optionnel)
-   Si une info obligatoire manque, pose UNE seule question courte et précise (la plus bloquante).
-
-2) Quand tu as TOUT:
-   - Tu affiches un brouillon lisible (avec paragraphes clairs).
-   - Puis tu ajoutes à la FIN un bloc machine lisible EXACTEMENT sous cette forme:
-
-${DRAFT_OPEN}
-{"to":"...","subject":"...","body":"<p>...HTML...</p>"}
-${DRAFT_CLOSE}
-
-3) Tu termines en demandant confirmation:
-   - "Si vous souhaitez l'envoyer, répondez : ENVOIE."
-
-IMPORTANT:
-- Le body doit être du HTML simple (<p>, <br/>, <strong>).
-- Ne mets PAS d'adresse postale si l'utilisateur ne l'a pas donnée.
-- Ne renvoie pas "Bonjour, comment puis-je vous aider ?" si une conversation est en cours: utilise l'historique.
-`;
+function isMetaMessage(content) {
+  return (
+    typeof content === "string" &&
+    (content.startsWith(META_DRAFT_PREFIX) || content.startsWith(META_SENT_PREFIX))
+  );
 }
 
-async function callMakeWebhook(payload) {
-  const url = process.env.MAKE_WEBHOOK_URL;
-  if (!url) {
-    throw new Error("MAKE_WEBHOOK_URL manquant dans Vercel.");
+function buildHumanDraftText({ to, subject, body_html, missing }) {
+  const missingLine =
+    missing && missing.length
+      ? `\n\nÉléments manquants : ${missing.join(", ")}`
+      : "";
+
+  return (
+    `Voici le brouillon prêt.\n\n` +
+    `Destinataire : ${to || "(à renseigner)"}\n` +
+    `Objet : ${subject || "(à renseigner)"}\n\n` +
+    `Corps (HTML) :\n${body_html || "(à rédiger)"}\n\n` +
+    `Souhaitez-vous que je l’envoie ? Répondez : ENVOIE` +
+    missingLine
+  );
+}
+
+async function callMakeSendEmail({ to, subject, body }) {
+  if (!MAKE_WEBHOOK_URL) {
+    return {
+      ok: false,
+      status: 500,
+      data: { ok: false, message: "MAKE_WEBHOOK_URL manquant côté serveur." },
+    };
   }
 
-  const res = await fetch(url, {
+  const r = await fetch(MAKE_WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ to, subject, body }),
   });
 
   let data = null;
   try {
-    data = await res.json();
-  } catch (e) {
-    // Make peut répondre sans JSON si mal configuré
-    data = { ok: res.ok, status: res.status, message: "non-json response" };
+    data = await r.json();
+  } catch {
+    // parfois Make renvoie vide : on gère
+    data = { ok: r.ok, message: r.ok ? "sent" : "error" };
   }
 
-  if (!res.ok) {
-    const msg = data?.error || data?.message || `Make error HTTP ${res.status}`;
-    throw new Error(msg);
-  }
-  return data;
+  return { ok: r.ok, status: r.status, data };
 }
 
+async function getUserFromBearer(supabaseAdmin, req) {
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return { ok: false, error: "Missing Bearer token" };
+
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+  if (error || !data?.user) return { ok: false, error: "Invalid token" };
+
+  return { ok: true, user: data.user };
+}
+
+async function ensureConversation({ supabaseAdmin, userId, agentSlug, conversationId, firstUserText }) {
+  if (conversationId) return { ok: true, conversationId };
+
+  const title =
+    (firstUserText || "").trim().slice(0, 60) || `Conversation avec ${agentSlug}`;
+
+  const { data, error } = await supabaseAdmin
+    .from("conversations")
+    .insert({
+      user_id: userId,
+      agent_slug: agentSlug,
+      title,
+      archived: false,
+    })
+    .select("id")
+    .single();
+
+  if (error || !data?.id) {
+    return { ok: false, error: error?.message || "Failed to create conversation" };
+  }
+
+  return { ok: true, conversationId: data.id };
+}
+
+async function loadConversationHistory({ supabaseAdmin, conversationId, limit = 30 }) {
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("role, content, created_at")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: true })
+    .limit(limit);
+
+  if (error) return { ok: false, error: error.message, messages: [] };
+
+  const filtered = (data || []).filter((m) => !isMetaMessage(m.content));
+  return { ok: true, messages: filtered };
+}
+
+async function findLastDraftMeta({ supabaseAdmin, conversationId }) {
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("content, created_at")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  if (error) return { ok: false, error: error.message, draft: null };
+
+  for (const m of data || []) {
+    if (typeof m.content === "string" && m.content.startsWith(META_DRAFT_PREFIX)) {
+      const raw = m.content.slice(META_DRAFT_PREFIX.length);
+      const parsed = safeParseJSON(raw);
+      if (parsed.ok) return { ok: true, draft: parsed.value };
+    }
+  }
+  return { ok: true, draft: null };
+}
+
+function buildSystemPrompt(agentSlug) {
+  // Base rules : email en 2 étapes + collecte obligatoire + HTML
+  return `
+Tu es l’agent "${agentSlug}" dans une application pro.
+Tu DOIS rester cohérent avec l’historique de la conversation.
+
+Règles EMAIL (strictes) :
+- Tu NE DOIS JAMAIS envoyer un email sans confirmation explicite de l’utilisateur.
+- Process obligatoire :
+  1) Préparer un brouillon en collectant : destinataire (email), objet, contenu.
+  2) Si un élément manque, tu le demandes. Tu n’inventes pas.
+  3) Quand tout est prêt, tu demandes confirmation : "Répondez ENVOIE pour l’envoyer".
+- Le corps doit être en HTML (paragraphes <p> et sauts <br/> si besoin), afin que l’email soit structuré dans Outlook.
+- Quand l’utilisateur dit ENVOIE / ok envoie / oui envoie, tu ne rédiges pas un nouveau brouillon : tu confirmes l’envoi.
+
+Format de sortie (JSON uniquement, sans markdown, sans texte autour) :
+{
+  "type": "chat" | "draft_email",
+  "text": "texte pour l’utilisateur",
+  "draft": {
+    "to": "email",
+    "subject": "objet",
+    "body_html": "<p>...</p>"
+  },
+  "missing": ["to" | "subject" | "body_html"]
+}
+
+Si ce n’est pas une demande d’email : type="chat" et text uniquement.
+`.trim();
+}
+
+async function callMistralJSON({ agentSlug, historyMessages }) {
+  const mistral = new Mistral({ apiKey: MISTRAL_API_KEY });
+
+  const system = buildSystemPrompt(agentSlug);
+
+  // Mistral attend { role, content }
+  const msgs = [
+    { role: "system", content: system },
+    ...historyMessages.map((m) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: m.content,
+    })),
+  ];
+
+  const completion = await mistral.chat.complete({
+    model: "mistral-large-latest",
+    messages: msgs,
+    temperature: 0.2,
+  });
+
+  const content = completion?.choices?.[0]?.message?.content ?? "";
+  return content;
+}
+
+// ---- Handler
 export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return json(res, 405, { ok: false, error: "Method not allowed" });
+  }
+
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return json(res, 500, { ok: false, error: "Supabase server env missing." });
+  }
+  if (!MISTRAL_API_KEY) {
+    return json(res, 500, { ok: false, error: "MISTRAL_API_KEY missing." });
+  }
+
+  const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+  const auth = await getUserFromBearer(supabaseAdmin, req);
+  if (!auth.ok) return json(res, 401, { ok: false, error: auth.error });
+
+  const user = auth.user;
+
+  let body;
   try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed" });
-    }
+    body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+  } catch {
+    return json(res, 400, { ok: false, error: "Invalid JSON body" });
+  }
 
-    // Auth Bearer Supabase
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.startsWith("Bearer ")
-      ? authHeader.slice("Bearer ".length)
-      : null;
+  const userText = (body?.message || "").toString();
+  const agentSlug = (body?.agent_slug || "").toString();
+  const incomingConversationId = body?.conversation_id ? String(body.conversation_id) : null;
 
-    if (!token) {
-      return res.status(401).json({ error: "Missing Bearer token" });
-    }
+  if (!agentSlug) return json(res, 400, { ok: false, error: "Aucun agent sélectionné." });
+  if (!userText.trim()) return json(res, 400, { ok: false, error: "Message vide." });
 
-    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(
-      token
-    );
-    if (userErr || !userData?.user) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
-    const user = userData.user;
+  // Ensure conversation exists
+  const conv = await ensureConversation({
+    supabaseAdmin,
+    userId: user.id,
+    agentSlug,
+    conversationId: incomingConversationId,
+    firstUserText: userText,
+  });
+  if (!conv.ok) return json(res, 500, { ok: false, error: conv.error });
 
-    const {
-      conversationId: conversationIdRaw,
-      agentSlug: agentSlugRaw,
-      message: userMessageRaw,
-    } = req.body || {};
+  const conversationId = conv.conversationId;
 
-    const userMessage = (userMessageRaw || "").toString().trim();
-    if (!userMessage) {
-      return res.status(400).json({ error: "Message vide" });
-    }
-
-    let conversationId = conversationIdRaw || null;
-    let agentSlug = agentSlugRaw || null;
-
-    // 1) Charger ou créer la conversation
-    if (conversationId) {
-      const { data: conv, error: convErr } = await supabaseAdmin
-        .from("conversations")
-        .select("id, user_id, agent_slug, title, archived")
-        .eq("id", conversationId)
-        .eq("user_id", user.id)
-        .maybeSingle();
-
-      if (convErr || !conv) {
-        return res.status(404).json({ error: "Conversation introuvable" });
-      }
-
-      // Si le front n'envoie pas agentSlug, on le récupère de la conversation
-      agentSlug = agentSlug || conv.agent_slug || null;
-    } else {
-      if (!agentSlug) {
-        return res.status(400).json({ error: "Aucun agent sélectionné." });
-      }
-
-      const title = userMessage.length > 60 ? userMessage.slice(0, 60) + "…" : userMessage;
-
-      const { data: newConv, error: newConvErr } = await supabaseAdmin
-        .from("conversations")
-        .insert({
-          user_id: user.id,
-          agent_slug: agentSlug,
-          title,
-          archived: false,
-        })
-        .select("id")
-        .single();
-
-      if (newConvErr || !newConv) {
-        return res.status(500).json({ error: "Impossible de créer la conversation" });
-      }
-      conversationId = newConv.id;
-    }
-
-    if (!agentSlug) {
-      return res.status(400).json({ error: "Aucun agent sélectionné." });
-    }
-
-    // 2) Charger l'historique messages
-    const { data: history, error: histErr } = await supabaseAdmin
-      .from("messages")
-      .select("id, role, content, created_at")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true })
-      .limit(HISTORY_LIMIT);
-
-    if (histErr) {
-      return res.status(500).json({ error: "Erreur chargement historique" });
-    }
-
-    // 3) Si confirmation ENVOIE -> on envoie via Make à partir du dernier brouillon
-    if (isSendConfirmation(userMessage)) {
-      const draft = extractLastEmailDraft(history || []);
-      if (!draft) {
-        // Pas de brouillon => on répond sans casser la conversation
-        const reply = "Je n’ai pas de brouillon d’email à envoyer dans cette conversation. Dites-moi : destinataire, objet et contenu, et je le prépare.";
-        await supabaseAdmin.from("messages").insert([
-          { conversation_id: conversationId, role: "user", content: userMessage },
-          { conversation_id: conversationId, role: "assistant", content: reply },
-        ]);
-        return res.status(200).json({ conversationId, reply });
-      }
-
-      // Validation minimale avant Make (Make refusera sinon)
-      const payload = {
-        to: String(draft.to).trim(),
-        subject: String(draft.subject).trim(),
-        body: String(draft.body),
-      };
-
-      if (!payload.to || !payload.subject || !payload.body) {
-        const reply =
-          "Je ne peux pas envoyer : il manque l’adresse email, l’objet ou le contenu. Je peux refaire le brouillon proprement si vous me confirmez ces éléments.";
-        await supabaseAdmin.from("messages").insert([
-          { conversation_id: conversationId, role: "user", content: userMessage },
-          { conversation_id: conversationId, role: "assistant", content: reply },
-        ]);
-        return res.status(200).json({ conversationId, reply });
-      }
-
-      // Insert user message
-      await supabaseAdmin.from("messages").insert([
-        { conversation_id: conversationId, role: "user", content: userMessage },
-      ]);
-
-      try {
-        const makeResult = await callMakeWebhook(payload);
-
-        const reply =
-          `Email envoyé ✓\n\nDétails Make : ${JSON.stringify(makeResult)}`;
-
-        await supabaseAdmin.from("messages").insert([
-          { conversation_id: conversationId, role: "assistant", content: reply },
-        ]);
-
-        return res.status(200).json({
-          conversationId,
-          reply,
-          sent: true,
-          make: makeResult,
-        });
-      } catch (e) {
-        const reply =
-          `Échec de l’envoi (Make).\n\nErreur : ${e.message}`;
-
-        await supabaseAdmin.from("messages").insert([
-          { conversation_id: conversationId, role: "assistant", content: reply },
-        ]);
-
-        return res.status(200).json({
-          conversationId,
-          reply,
-          sent: false,
-          make_error: e.message,
-        });
-      }
-    }
-
-    // 4) Sinon : appel LLM (avec historique + prompt agent)
-    // Charger agent prompt personnalisé si présent
-    const { data: cfg } = await supabaseAdmin
-      .from("client_agent_configs")
-      .select("system_prompt, context")
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    const customSystem = cfg?.system_prompt ? String(cfg.system_prompt) : "";
-    const emailWorkflow = buildEmailWorkflowSystemPrompt();
-
-    // Préparer messages pour Mistral
-    const mistralMessages = [];
-
-    // system global
-    mistralMessages.push({
-      role: "system",
-      content: [customSystem, emailWorkflow].filter(Boolean).join("\n\n"),
+  // Insert user message
+  {
+    const { error } = await supabaseAdmin.from("messages").insert({
+      conversation_id: conversationId,
+      role: "user",
+      content: userText,
     });
+    if (error) return json(res, 500, { ok: false, error: error.message });
+  }
 
-    // historique
-    for (const m of history || []) {
-      if (!m?.role || !m?.content) continue;
-      mistralMessages.push({
-        role: m.role,
-        content: String(m.content),
+  // If it's a confirmation to SEND, we send the last draft via Make (server-side)
+  if (looksLikeSendConfirmation(userText)) {
+    const lastDraft = await findLastDraftMeta({ supabaseAdmin, conversationId });
+    if (!lastDraft.ok) return json(res, 500, { ok: false, error: lastDraft.error });
+
+    if (!lastDraft.draft) {
+      const txt =
+        "Je n’ai pas de brouillon récent à envoyer. Demandez-moi d’abord de préparer le mail (destinataire, objet, corps).";
+      await supabaseAdmin.from("messages").insert({
+        conversation_id: conversationId,
+        role: "assistant",
+        content: txt,
+      });
+      return json(res, 200, {
+        ok: true,
+        conversation_id: conversationId,
+        assistant: { type: "chat", text: txt },
       });
     }
 
-    // nouveau message user
-    mistralMessages.push({
-      role: "user",
-      content: userMessage,
+    const { to, subject, body_html, missing } = lastDraft.draft || {};
+    const stillMissing = Array.isArray(missing) ? missing : [];
+
+    if (!to || !subject || !body_html || stillMissing.length) {
+      const txt =
+        "Le brouillon n’est pas envoyable : il manque des éléments (destinataire/objet/corps). Je peux le compléter si vous me donnez les infos manquantes.";
+      await supabaseAdmin.from("messages").insert({
+        conversation_id: conversationId,
+        role: "assistant",
+        content: txt,
+      });
+      return json(res, 200, {
+        ok: true,
+        conversation_id: conversationId,
+        assistant: { type: "chat", text: txt },
+      });
+    }
+
+    const make = await callMakeSendEmail({ to, subject, body: body_html });
+
+    const okText = make.ok
+      ? `✅ Email envoyé via Outlook (Make).`
+      : `❌ Échec d’envoi via Make (HTTP ${make.status}).`;
+
+    // Store assistant visible confirmation
+    await supabaseAdmin.from("messages").insert({
+      conversation_id: conversationId,
+      role: "assistant",
+      content: okText,
     });
 
-    // Enregistrer le user message en base
-    await supabaseAdmin.from("messages").insert([
-      { conversation_id: conversationId, role: "user", content: userMessage },
-    ]);
-
-    const completion = await mistral.chat.complete({
-      model: MODEL,
-      messages: mistralMessages,
-      temperature: 0.4,
+    // Store meta
+    await supabaseAdmin.from("messages").insert({
+      conversation_id: conversationId,
+      role: "assistant",
+      content: META_SENT_PREFIX + JSON.stringify({ ok: make.ok, status: make.status, data: make.data }),
     });
 
-    const assistantText =
-      completion?.choices?.[0]?.message?.content?.toString?.() ||
-      completion?.choices?.[0]?.message?.content ||
-      "";
-
-    const cleanReply = stripDraftBlock(String(assistantText));
-
-    // Sauver réponse assistant (on conserve les markers si présents)
-    await supabaseAdmin.from("messages").insert([
-      { conversation_id: conversationId, role: "assistant", content: String(assistantText) },
-    ]);
-
-    return res.status(200).json({
-      conversationId,
-      reply: cleanReply,
+    return json(res, 200, {
+      ok: true,
+      conversation_id: conversationId,
+      assistant: {
+        type: "send_result",
+        text: okText,
+        make: { ok: make.ok, status: make.status, data: make.data },
+      },
     });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
   }
+
+  // Normal path: load history, call Mistral expecting JSON
+  const history = await loadConversationHistory({ supabaseAdmin, conversationId, limit: 30 });
+  if (!history.ok) return json(res, 500, { ok: false, error: history.error });
+
+  let modelRaw = "";
+  try {
+    modelRaw = await callMistralJSON({ agentSlug, historyMessages: history.messages });
+  } catch (e) {
+    const msg = e?.message || "Mistral error";
+    return json(res, 500, { ok: false, error: msg });
+  }
+
+  // Parse model JSON
+  const parsed = safeParseJSON(modelRaw);
+  if (!parsed.ok || !parsed.value || typeof parsed.value !== "object") {
+    // Fallback: store raw
+    await supabaseAdmin.from("messages").insert({
+      conversation_id: conversationId,
+      role: "assistant",
+      content: modelRaw || "Erreur : réponse vide du modèle.",
+    });
+
+    return json(res, 200, {
+      ok: true,
+      conversation_id: conversationId,
+      assistant: { type: "chat", text: modelRaw || "Erreur : réponse vide du modèle." },
+    });
+  }
+
+  const out = parsed.value;
+  const type = out.type === "draft_email" ? "draft_email" : "chat";
+  const text = (out.text || "").toString();
+
+  if (type === "draft_email") {
+    const draft = out.draft || {};
+    const missing = Array.isArray(out.missing) ? out.missing : [];
+
+    const to = (draft.to || "").toString();
+    const subject = (draft.subject || "").toString();
+    const body_html = (draft.body_html || "").toString();
+
+    // Force HTML minimal to avoid Outlook plain block
+    const normalizedBody =
+      body_html && body_html.trim().startsWith("<")
+        ? body_html
+        : `<p>${(body_html || "").replace(/\n/g, "<br/>")}</p>`;
+
+    const draftPayload = {
+      to,
+      subject,
+      body_html: normalizedBody,
+      missing,
+    };
+
+    const human = buildHumanDraftText(draftPayload);
+
+    // Visible message
+    await supabaseAdmin.from("messages").insert({
+      conversation_id: conversationId,
+      role: "assistant",
+      content: human,
+    });
+
+    // Meta message for reliable send
+    await supabaseAdmin.from("messages").insert({
+      conversation_id: conversationId,
+      role: "assistant",
+      content: META_DRAFT_PREFIX + JSON.stringify(draftPayload),
+    });
+
+    return json(res, 200, {
+      ok: true,
+      conversation_id: conversationId,
+      assistant: { type: "draft_email", text: human, draft: draftPayload },
+    });
+  }
+
+  // Chat
+  await supabaseAdmin.from("messages").insert({
+    conversation_id: conversationId,
+    role: "assistant",
+    content: text || "…",
+  });
+
+  return json(res, 200, {
+    ok: true,
+    conversation_id: conversationId,
+    assistant: { type: "chat", text: text || "…" },
+  });
 }
