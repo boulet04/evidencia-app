@@ -38,7 +38,28 @@ function extractFirstNameFromUser(user) {
   return guessFirstNameFromEmail(user?.email || "");
 }
 
-// --- NEW: stopwords pour titre de conversation (ignorer salutations)
+// ---- NEW: extraction prénom depuis system_prompt ("tu travailles pour X")
+function extractWorksForName(promptText) {
+  const t = (promptText || "").toString();
+  if (!t.trim()) return "";
+
+  // On capte "tu travailles pour ..." jusqu’à fin de ligne / ponctuation
+  // Ex: "Tu travailles pour Jean Baptiste." => "Jean Baptiste"
+  const m = t.match(/tu\s+travailles\s+pour\s+([^\n\r,.!?]+)/i);
+  if (!m || !m[1]) return "";
+
+  const name = m[1].trim();
+  if (!name) return "";
+
+  // On normalise: capitalise chaque mot
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => capitalize(w.toLowerCase()))
+    .join(" ");
+}
+
+// --- stopwords titre conversation
 const TITLE_STOPWORDS = new Set([
   "bonjour",
   "salut",
@@ -55,23 +76,18 @@ function buildConversationTitleFromMessage(text) {
   const raw = (text || "").trim();
   if (!raw) return "Nouvelle conversation";
 
-  // normalise + retire ponctuation simple
   const tokens = raw
     .toLowerCase()
     .replace(/[“”"’'.,;:!?()[\]{}<>]/g, " ")
     .split(/\s+/)
     .filter(Boolean);
 
-  // retire salutations au début
   while (tokens.length > 0 && TITLE_STOPWORDS.has(tokens[0])) tokens.shift();
 
-  // si ça vide tout, on retombe sur le message brut
   const finalTokens = tokens.length ? tokens : raw.split(/\s+/).filter(Boolean);
 
   const first5 = finalTokens.slice(0, 5).join(" ");
   const titled = first5 ? first5 : "Nouvelle conversation";
-
-  // capitalise la 1ère lettre du titre
   return titled.charAt(0).toUpperCase() + titled.slice(1);
 }
 
@@ -101,14 +117,23 @@ export default function ChatPage() {
   const [sending, setSending] = useState(false);
 
   const accessToken = useMemo(() => session?.access_token || null, [session]);
-  const firstName = useMemo(() => extractFirstNameFromUser(user), [user]);
+
+  // Fallback prénom user (si prompt ne contient pas "tu travailles pour ...")
+  const fallbackFirstName = useMemo(() => extractFirstNameFromUser(user), [user]);
+
+  // ---- NEW: prénom “cible” issu du prompt (ex: Antoine / Jean Baptiste)
+  const [worksForName, setWorksForName] = useState("");
 
   const messagesEndRef = useRef(null);
 
   function welcomeText() {
-    return firstName
-      ? `Bonjour ${firstName}, comment puis-je vous aider ?`
-      : "Bonjour, comment puis-je vous aider ?";
+    const name = worksForName || fallbackFirstName || "";
+    const agentPart = agent?.name
+      ? `je suis ${agent.name}${agent.description ? `, ${agent.description}` : ""}. `
+      : "";
+
+    if (name) return `Bonjour ${name}, ${agentPart}Comment puis-je vous aider ?`;
+    return agentPart ? `Bonjour, ${agentPart}Comment puis-je vous aider ?` : "Bonjour, comment puis-je vous aider ?";
   }
 
   useEffect(() => {
@@ -145,6 +170,36 @@ export default function ChatPage() {
     })();
   }, [agentSlug]);
 
+  // ---- NEW: Charger system_prompt user+agent pour extraire "tu travailles pour X"
+  useEffect(() => {
+    if (!user?.id) {
+      setWorksForName("");
+      return;
+    }
+    if (!agent?.id) {
+      setWorksForName("");
+      return;
+    }
+
+    (async () => {
+      const { data, error } = await supabase
+        .from("client_agent_configs")
+        .select("system_prompt")
+        .eq("user_id", user.id)
+        .eq("agent_id", agent.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error("Load client_agent_configs error:", error.message);
+        setWorksForName("");
+        return;
+      }
+
+      const extracted = extractWorksForName(data?.system_prompt || "");
+      setWorksForName(extracted || "");
+    })();
+  }, [user?.id, agent?.id]);
+
   // Load conversations for this user + agent
   useEffect(() => {
     if (!user?.id) return;
@@ -174,8 +229,6 @@ export default function ChatPage() {
         setSelectedConversationId(list[0].id);
       }
 
-      // --- NEW: si aucune conversation, on laisse selectedConversationId = null
-      // l’utilisateur pourra taper, et on créera automatiquement.
       if (list.length === 0) {
         setSelectedConversationId(null);
         setMessages([]);
@@ -215,7 +268,6 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loadingMsgs]);
 
-  // IMPORTANT: création via API (pas via supabase insert)
   async function handleNewConversation({ title } = {}) {
     if (!accessToken) {
       alert("Session invalide. Veuillez vous reconnecter.");
@@ -285,12 +337,11 @@ export default function ChatPage() {
     }
   }
 
-  // --- NEW: dictée vocale (Web Speech API)
+  // Dictée vocale (Web Speech API)
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef(null);
 
   useEffect(() => {
-    // Initialise une seule fois
     if (typeof window === "undefined") return;
 
     const SpeechRecognition =
@@ -314,7 +365,6 @@ export default function ChatPage() {
       setListening(false);
     };
 
-    // IMPORTANT: éviter le doublon => on gère final uniquement
     rec.onresult = (event) => {
       let finalText = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -352,7 +402,6 @@ export default function ChatPage() {
       setSending(true);
       setInput("");
 
-      // --- NEW: si pas de conversation sélectionnée, on en crée une automatiquement
       let convId = selectedConversationId;
       if (!convId) {
         const title = buildConversationTitleFromMessage(content);
@@ -495,8 +544,8 @@ export default function ChatPage() {
           <div className="agentHeader">
             <div className="agentLeft">
               <div className="agentAvatar">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
                 {agent?.avatar_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
                   <img src={agent.avatar_url} alt={agent.name || "Agent"} />
                 ) : (
                   <div className="avatarFallback">{(agent?.name || "A").slice(0, 1)}</div>
@@ -553,7 +602,6 @@ export default function ChatPage() {
                 onClick={toggleMic}
                 disabled={sending}
               >
-                {/* icône plus “micro” */}
                 <span className="micIcon" aria-hidden="true">🎤</span>
               </button>
 
@@ -607,7 +655,7 @@ export default function ChatPage() {
         .agentLeft { display: flex; gap: 12px; align-items: center; }
         .agentAvatar { width: 44px; height: 44px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
           background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; }
-        /* IMPORTANT: ta modif demandée */
+        /* IMPORTANT: ta modif */
         .agentAvatar img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; }
         .avatarFallback { font-weight: 900; opacity: 0.85; }
         .agentName { font-weight: 900; }
