@@ -33,7 +33,6 @@ export default function ChatPage() {
   const [micSupported, setMicSupported] = useState(false);
   const [listening, setListening] = useState(false);
 
-  // Utils
   function safeStr(v) {
     return (v ?? "").toString();
   }
@@ -64,22 +63,13 @@ export default function ChatPage() {
         ? window.SpeechRecognition || window.webkitSpeechRecognition
         : null;
 
-    if (!SR) {
-      setMicSupported(false);
-      return;
-    }
-
-    setMicSupported(true);
+    setMicSupported(Boolean(SR));
   }, []);
 
   function startMic() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      alert("Reconnaissance vocale non supportée sur ce navigateur.");
-      return;
-    }
+    if (!SR) return;
 
-    // stop old instance to avoid duplicate listeners
     try {
       recognitionRef.current?.stop?.();
     } catch (_) {}
@@ -97,24 +87,17 @@ export default function ChatPage() {
 
     rec.onresult = (event) => {
       let interim = "";
-
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const res = event.results[i];
         const txt = res[0]?.transcript || "";
         if (res.isFinal) finalTextRef.current += txt;
         else interim += txt;
       }
-
       setInput((finalTextRef.current + interim).trim());
     };
 
-    rec.onerror = () => {
-      setListening(false);
-    };
-
-    rec.onend = () => {
-      setListening(false);
-    };
+    rec.onerror = () => setListening(false);
+    rec.onend = () => setListening(false);
 
     try {
       rec.start();
@@ -151,11 +134,9 @@ export default function ChatPage() {
         const slug = safeStr(url.searchParams.get("agent")).trim().toLowerCase();
 
         if (!slug) {
-          // fallback: if no agent param, redirect to agents list
           window.location.href = "/agents";
           return;
         }
-
         setAgentSlug(slug);
 
         // Load agent details
@@ -165,14 +146,8 @@ export default function ChatPage() {
           .eq("slug", slug)
           .maybeSingle();
 
-        if (agentErr) {
+        if (agentErr || !agent) {
           setErrorMsg("Erreur chargement agent.");
-          setLoading(false);
-          return;
-        }
-
-        if (!agent) {
-          setErrorMsg("Agent introuvable (slug).");
           setLoading(false);
           return;
         }
@@ -181,7 +156,7 @@ export default function ChatPage() {
         setAgentDesc(agent.description || "");
         setAgentAvatar(agent.avatar_url || "");
 
-        // Load conversations for this user + agent
+        // Load conversations
         await refreshConversations(user.id, slug);
 
         setLoading(false);
@@ -194,9 +169,8 @@ export default function ChatPage() {
   }, []);
 
   async function refreshConversations(uid, slug) {
-    // Pull last 10 active conversations (non archived) if column exists.
-    // If your DB version doesn't have archived, Supabase will return an error -> we fallback gracefully.
-    const base = supabase
+    // 10 dernières conversations
+    const { data, error } = await supabase
       .from("conversations")
       .select("id, created_at, title, archived, agent_slug, user_id")
       .eq("user_id", uid)
@@ -204,10 +178,8 @@ export default function ChatPage() {
       .order("created_at", { ascending: false })
       .limit(10);
 
-    const { data, error } = await base;
-
     if (error) {
-      // fallback without archived selection if needed
+      // fallback sans archived si colonne absente
       const { data: data2, error: error2 } = await supabase
         .from("conversations")
         .select("id, created_at, title, agent_slug, user_id")
@@ -227,21 +199,40 @@ export default function ChatPage() {
       setConversations(data2 || []);
       const firstId = data2?.[0]?.id || "";
       setSelectedConvId(firstId);
-      if (firstId) await loadMessages(firstId);
+      if (firstId) await loadMessages(firstId, true);
       else setMessages([]);
       return;
     }
 
-    // Filter archived if present
     const filtered = (data || []).filter((c) => c.archived !== true);
     setConversations(filtered);
+
     const firstId = filtered?.[0]?.id || "";
     setSelectedConvId(firstId);
-    if (firstId) await loadMessages(firstId);
+
+    if (firstId) await loadMessages(firstId, true);
     else setMessages([]);
   }
 
-  async function loadMessages(conversationId) {
+  async function initGreetingIfEmpty(conversationId) {
+    const token = await getAccessToken();
+    if (!token) return;
+
+    try {
+      await fetch("/api/conversations/init", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ agentSlug, conversationId }),
+      });
+    } catch (_) {
+      // Non bloquant
+    }
+  }
+
+  async function loadMessages(conversationId, allowInit = false) {
     const { data, error } = await supabase
       .from("messages")
       .select("id, role, content, created_at")
@@ -253,7 +244,22 @@ export default function ChatPage() {
       setMessages([]);
       return;
     }
-    setMessages(data || []);
+
+    const list = data || [];
+    setMessages(list);
+
+    // Si conversation vide, on injecte un message d'accueil (persisté) via /api/conversations/init
+    if (allowInit && list.length === 0) {
+      await initGreetingIfEmpty(conversationId);
+      // recharger après init
+      const { data: data2 } = await supabase
+        .from("messages")
+        .select("id, role, content, created_at")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: true });
+
+      setMessages(data2 || []);
+    }
   }
 
   async function createNewConversation() {
@@ -277,7 +283,7 @@ export default function ChatPage() {
 
     if (!error && data?.id) return data.id;
 
-    // Fallback without archived if needed
+    // Fallback without archived
     const { data: data2, error: error2 } = await supabase
       .from("conversations")
       .insert({
@@ -300,7 +306,6 @@ export default function ChatPage() {
     try {
       let convId = selectedConvId;
 
-      // Ensure a conversation exists (avoid the “conversationId missing” issue)
       if (!convId) {
         convId = await createNewConversation();
         if (!convId) {
@@ -309,8 +314,9 @@ export default function ChatPage() {
           return;
         }
         setSelectedConvId(convId);
-        // refresh list
         await refreshConversations(userId, agentSlug);
+        // message d'accueil si vide
+        await loadMessages(convId, true);
       }
 
       const token = await getAccessToken();
@@ -321,11 +327,10 @@ export default function ChatPage() {
       }
 
       // Optimistic UI
-      const optimistic = [
-        ...messages,
+      setMessages((prev) => [
+        ...(prev || []),
         { id: "tmp-" + Date.now(), role: "user", content: input.trim(), created_at: new Date().toISOString() },
-      ];
-      setMessages(optimistic);
+      ]);
 
       const payload = {
         agentSlug,
@@ -348,20 +353,17 @@ export default function ChatPage() {
 
       if (!resp.ok) {
         setErrorMsg(json?.error || "Erreur lors de l’envoi.");
-        // reload messages from DB to get back in sync
-        await loadMessages(convId);
+        await loadMessages(convId, false);
         setSending(false);
         return;
       }
 
-      // Server may return updated conversationId
       if (json?.conversationId && json.conversationId !== convId) {
         setSelectedConvId(json.conversationId);
         convId = json.conversationId;
       }
 
-      // Reload messages (source of truth)
-      await loadMessages(convId);
+      await loadMessages(convId, false);
       setSending(false);
     } catch (e) {
       setErrorMsg("Erreur lors de l’envoi.");
@@ -420,6 +422,7 @@ export default function ChatPage() {
               onClick={async () => {
                 setSelectedConvId("");
                 setMessages([]);
+                setErrorMsg("");
               }}
               title="Nouvelle conversation"
             >
@@ -437,7 +440,7 @@ export default function ChatPage() {
                 }}
                 onClick={async () => {
                   setSelectedConvId(c.id);
-                  await loadMessages(c.id);
+                  await loadMessages(c.id, true);
                 }}
                 title={c.title || ""}
               >
@@ -506,7 +509,7 @@ export default function ChatPage() {
               disabled={sending}
             />
 
-            {/* Micro button */}
+            {/* Micro button (SVG) */}
             <button
               type="button"
               onClick={() => {
@@ -521,8 +524,9 @@ export default function ChatPage() {
                 ...(listening ? styles.micBtnOn : {}),
                 ...(micSupported ? {} : styles.micBtnOff),
               }}
+              aria-label="Microphone"
             >
-              {listening ? "■" : "🎤"}
+              {listening ? <StopIcon /> : <MicIcon />}
             </button>
 
             <button onClick={sendMessage} disabled={sending || !input.trim()} style={styles.sendBtn}>
@@ -535,12 +539,66 @@ export default function ChatPage() {
   );
 }
 
+function MicIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M19 11a7 7 0 0 1-14 0"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12 18v3"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 21h8"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect
+        x="7"
+        y="7"
+        width="10"
+        height="10"
+        rx="2"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+    </svg>
+  );
+}
+
 const styles = {
   page: {
-    minHeight: "100vh",
+    height: "100vh",
+    display: "flex",
+    flexDirection: "column",
     background: "#0b0b0f",
     color: "#fff",
     position: "relative",
+    overflow: "hidden",
   },
   bg: {
     position: "absolute",
@@ -560,6 +618,7 @@ const styles = {
     borderBottom: "1px solid rgba(255,255,255,0.10)",
     background: "rgba(0,0,0,0.28)",
     backdropFilter: "blur(10px)",
+    flex: "0 0 auto",
   },
   topLeft: { display: "flex", alignItems: "center", gap: 12 },
   topCenter: { display: "flex", justifyContent: "center", alignItems: "center" },
@@ -605,10 +664,12 @@ const styles = {
     position: "relative",
     zIndex: 1,
     display: "grid",
-    gridTemplateColumns: "300px 1fr",
+    gridTemplateColumns: "320px 1fr",
     gap: 14,
     padding: 14,
-    minHeight: "calc(100vh - 64px)",
+    flex: "1 1 auto",
+    minHeight: 0, // CRUCIAL pour éviter l’historique coupé
+    overflow: "hidden",
   },
 
   sidebar: {
@@ -619,6 +680,7 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
+    minHeight: 0, // CRUCIAL
   },
   sideTop: {
     padding: 12,
@@ -626,6 +688,7 @@ const styles = {
     alignItems: "center",
     justifyContent: "space-between",
     borderBottom: "1px solid rgba(255,255,255,0.10)",
+    flex: "0 0 auto",
   },
   sideTitle: {
     fontWeight: 900,
@@ -645,7 +708,10 @@ const styles = {
     padding: 10,
     display: "grid",
     gap: 8,
-    overflow: "auto",
+    overflowY: "auto",
+    overflowX: "hidden",
+    flex: "1 1 auto",
+    minHeight: 0, // CRUCIAL
   },
   convItem: {
     textAlign: "left",
@@ -655,6 +721,7 @@ const styles = {
     color: "#fff",
     padding: 10,
     cursor: "pointer",
+    overflow: "hidden",
   },
   convItemActive: {
     border: "1px solid rgba(255,140,0,0.42)",
@@ -682,7 +749,7 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
-    minHeight: 0,
+    minHeight: 0, // CRUCIAL
   },
 
   agentHeader: {
@@ -691,13 +758,14 @@ const styles = {
     alignItems: "center",
     gap: 12,
     borderBottom: "1px solid rgba(255,255,255,0.10)",
+    flex: "0 0 auto",
   },
   avatar: {
     width: 72,
     height: 72,
     borderRadius: "50%",
     objectFit: "cover",
-    objectPosition: "center top", // visage bien cadré
+    objectPosition: "center top",
     border: "2px solid rgba(255,255,255,0.45)",
     backgroundColor: "#000",
     flexShrink: 0,
@@ -726,8 +794,9 @@ const styles = {
 
   chatBox: {
     padding: 14,
-    overflow: "auto",
-    flex: 1,
+    overflowY: "auto",
+    overflowX: "hidden",
+    flex: "1 1 auto",
     minHeight: 0,
   },
   msgRow: {
@@ -758,6 +827,7 @@ const styles = {
     fontWeight: 900,
     borderTop: "1px solid rgba(255,255,255,0.10)",
     background: "rgba(255,0,0,0.06)",
+    flex: "0 0 auto",
   },
 
   inputRow: {
@@ -767,6 +837,7 @@ const styles = {
     padding: 14,
     borderTop: "1px solid rgba(255,255,255,0.10)",
     background: "rgba(0,0,0,0.18)",
+    flex: "0 0 auto",
   },
   textarea: {
     flex: 1,
@@ -790,6 +861,8 @@ const styles = {
     color: "#fff",
     cursor: "pointer",
     fontWeight: 900,
+    display: "grid",
+    placeItems: "center",
   },
   micBtnOn: {
     background: "rgba(255,140,0,0.12)",
@@ -811,10 +884,12 @@ const styles = {
   },
 
   center: {
-    minHeight: "70vh",
+    height: "70vh",
     display: "grid",
     placeItems: "center",
     fontWeight: 900,
     color: "rgba(255,255,255,0.85)",
+    position: "relative",
+    zIndex: 1,
   },
 };
