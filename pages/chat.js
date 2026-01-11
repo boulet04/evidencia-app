@@ -153,9 +153,15 @@ export default function ChatPage() {
       return [];
     }
 
-    const list = data || [];
-    setMessages(list);
-    return list;
+  const list = (data || []).filter((m) => {
+  // Ne pas afficher les messages techniques
+  if (m.role === "system") return false;
+  if ((m.content || "").startsWith("MEMORY:")) return false;
+  return true;
+});
+setMessages(list);
+return list;
+
   }
 
   async function createConversationNow(initialTitle = DEFAULT_TITLE) {
