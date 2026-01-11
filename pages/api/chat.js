@@ -38,6 +38,59 @@ function parseMaybeJson(v) {
   return null;
 }
 
+function isSendConfirmation(text) {
+  const t = safeStr(text).trim().toUpperCase();
+  // tolérant : ENVOIE / ENVOYER / ENVOIE LE MAIL / ENVOIE STP etc.
+  return /^ENVOI(E|ER)\b/.test(t);
+}
+
+function extractFirstJsonObject(text) {
+  const raw = safeStr(text).trim();
+  if (!raw) return null;
+
+  // 1) bloc ```json ... ```
+  const m = raw.match(/```json\s*([\s\S]*?)\s*```/i);
+  if (m && m[1]) {
+    try {
+      return JSON.parse(m[1]);
+    } catch {
+      // continue
+    }
+  }
+
+  // 2) tentative directe si ça commence par "{"
+  if (raw.startsWith("{") && raw.endsWith("}")) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      // continue
+    }
+  }
+
+  // 3) fallback : prendre la première { ... } “raisonnable”
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    const slice = raw.slice(start, end + 1);
+    try {
+      return JSON.parse(slice);
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function normalizeEmailPayload(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  const to = safeStr(obj.to).trim();
+  const subject = safeStr(obj.subject).trim();
+  const body = safeStr(obj.body).trim();
+  if (!to || !subject || !body) return null;
+  return { to, subject, body };
+}
+
 async function getGlobalBasePrompt() {
   try {
     const { data, error } = await supabaseAdmin
@@ -45,6 +98,7 @@ async function getGlobalBasePrompt() {
       .select("value")
       .eq("key", "base_system_prompt")
       .maybeSingle();
+
     if (error) return "";
     return safeStr(data?.value).trim();
   } catch {
@@ -52,122 +106,41 @@ async function getGlobalBasePrompt() {
   }
 }
 
-// IMPORTANT: on renvoie 200 pour les erreurs fonctionnelles afin de ne pas déclencher ton popup
-function okReply(res, reply) {
-  return res.status(200).json({ reply: safeStr(reply) });
-}
+function pickAgentSlug(reqBody, reqQuery) {
+  // compat : plusieurs noms possibles selon tes versions de front
+  const fromBody =
+    safeStr(reqBody?.agentSlug).trim() ||
+    safeStr(reqBody?.agent).trim() ||
+    safeStr(reqBody?.slug).trim() ||
+    safeStr(reqBody?.agent_slug).trim();
 
-function sanitizeAgentSlug(input) {
-  let s = safeStr(input).trim();
+  const fromQuery =
+    safeStr(reqQuery?.agent).trim() ||
+    safeStr(reqQuery?.agentSlug).trim() ||
+    safeStr(reqQuery?.slug).trim();
 
-  // cas: URL complète ou query string
-  // ex: "https://.../chat?agent=emma" ou "chat?agent=emma"
-  const m1 = s.match(/[?&]agent=([a-z0-9-_]+)/i);
-  if (m1?.[1]) s = m1[1];
-
-  // cas: "agent-emma"
-  s = s.replace(/^agent[-_]/i, "");
-
-  // ne garder que ce qui ressemble à un slug
-  s = s.toLowerCase().match(/[a-z0-9-_]+/)?.[0] || "";
-
-  return s;
-}
-
-function detectSendIntent(userMsg) {
-  const t = safeStr(userMsg).toLowerCase();
-  // "envoie" / "envoyer" etc, mais pas "prépare sans envoyer"
-  const wantsSend = /\b(envoie|envoyer|envoi|expédie|expedie)\b/.test(t);
-  const neg = /\b(ne\s+pas\s+envoyer|n[' ]?envoie\s+pas|sans\s+envoyer|prépare\s+sans\s+envoyer|prepare\s+sans\s+envoyer)\b/.test(t);
-  return wantsSend && !neg;
-}
-
-function detectDraftIntent(userMsg) {
-  const t = safeStr(userMsg).toLowerCase();
-  // "prépare", "rédige", "écris" + mention mail/courrier
-  const mailWord = /\b(mail|email|e-mail|courrier)\b/.test(t);
-  const draftWord = /\b(prépare|prepare|rédige|redige|écris|ecris|rédaction|brouillon)\b/.test(t);
-  return mailWord && draftWord;
-}
-
-function looksLikeHtml(s) {
-  const t = safeStr(s).trim();
-  return /<\/?(p|br|div|span|strong|em|ul|ol|li|table|tr|td|h1|h2|h3|html|body)\b/i.test(t);
-}
-
-function plainToHtml(plain) {
-  const t = safeStr(plain).trim();
-  if (!t) return "";
-  const parts = t.split(/\n\s*\n+/g).map((p) => p.trim()).filter(Boolean);
-  const escaped = parts.map((p) =>
-    p
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/\n/g, "<br/>")
-  );
-  return escaped.map((p) => `<p>${p}</p>`).join("");
-}
-
-function extractJsonObject(text) {
-  const t = safeStr(text).trim();
-  if (!t) return null;
-
-  // JSON pur
-  if (t.startsWith("{") && t.endsWith("}")) {
-    try {
-      return JSON.parse(t);
-    } catch {}
-  }
-
-  // bloc ```json ... ```
-  const fence = t.match(/```json\s*([\s\S]*?)\s*```/i) || t.match(/```\s*([\s\S]*?)\s*```/);
-  if (fence?.[1]) {
-    const inner = fence[1].trim();
-    if (inner.startsWith("{") && inner.endsWith("}")) {
-      try {
-        return JSON.parse(inner);
-      } catch {}
-    }
-  }
-
-  // extraction { ... }
-  const curly = t.match(/\{[\s\S]*\}/);
-  if (curly?.[0]) {
-    try {
-      return JSON.parse(curly[0]);
-    } catch {}
-  }
-
-  return null;
+  return (fromBody || fromQuery).toLowerCase();
 }
 
 function getMakeWebhookUrl(ctxObj) {
-  const candidates = [
-    ctxObj?.make_webhook_url,
-    ctxObj?.makeWebhookUrl,
-    ctxObj?.make?.webhookUrl,
-    ctxObj?.make?.url,
-    ctxObj?.workflows?.make?.webhookUrl,
-    ctxObj?.workflows?.make?.url,
-    ctxObj?.workflow?.make?.url,
-    ctxObj?.workflow_url,
-  ]
-    .map((x) => safeStr(x).trim())
-    .filter(Boolean);
+  // Recommandé : ctxObj.make_webhook_url
+  // Tolérant : variantes possibles
+  const direct =
+    safeStr(ctxObj?.make_webhook_url).trim() ||
+    safeStr(ctxObj?.makeWebhookUrl).trim() ||
+    safeStr(ctxObj?.make_webhook).trim() ||
+    safeStr(ctxObj?.webhook_url).trim() ||
+    safeStr(ctxObj?.workflow_url).trim();
 
-  const fromEnv = safeStr(process.env.MAKE_WEBHOOK_URL).trim();
-  if (fromEnv) candidates.push(fromEnv);
+  const nested =
+    safeStr(ctxObj?.make?.webhook_url).trim() ||
+    safeStr(ctxObj?.make?.webhookUrl).trim();
 
-  // prioriser hook.make.com
-  return (
-    candidates.find((u) => /^https:\/\/hook\.[a-z0-9-]+\.make\.com\/.+/i.test(u)) ||
-    candidates[0] ||
-    ""
-  );
+  const url = direct || nested;
+  return url || "";
 }
 
-async function postToMake(url, payload) {
+async function postToMakeWebhook(url, payload) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
 
@@ -179,57 +152,52 @@ async function postToMake(url, payload) {
       signal: controller.signal,
     });
 
-    const text = await r.text().catch(() => "");
-    if (!r.ok) throw new Error(`Make HTTP ${r.status} ${r.statusText} ${text ? `- ${text}` : ""}`.trim());
-    return { ok: true };
+    const txt = await r.text().catch(() => "");
+    if (!r.ok) {
+      return { ok: false, status: r.status, body: txt };
+    }
+    return { ok: true, status: r.status, body: txt };
+  } catch (e) {
+    return { ok: false, status: 0, body: safeStr(e?.message || e) };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function loadConversationHistory(conversationId, userId, limit = 30) {
-  if (!conversationId) return { conv: null, history: [] };
+async function loadConversationHistory(conversationId, limit = 20) {
+  if (!conversationId) return [];
 
-  const { data: conv } = await supabaseAdmin
-    .from("conversations")
-    .select("id, user_id, agent_slug, title, archived, created_at")
-    .eq("id", conversationId)
-    .maybeSingle();
-
-  if (!conv || conv.user_id !== userId) return { conv: null, history: [] };
-
-  const { data: msgs } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from("messages")
     .select("role, content, created_at")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true })
-    .limit(Math.max(limit, 1));
+    .limit(limit);
 
-  const history = Array.isArray(msgs)
-    ? msgs
-        .map((m) => ({
-          role: safeStr(m.role).toLowerCase(),
-          content: safeStr(m.content),
-        }))
-        .filter((m) => m.role === "user" || m.role === "assistant")
-        .slice(-limit)
-    : [];
-
-  return { conv, history };
+  if (error || !Array.isArray(data)) return [];
+  // roles attendus: user / assistant / system
+  return data
+    .map((m) => ({
+      role: safeStr(m.role).trim() || "user",
+      content: safeStr(m.content),
+    }))
+    .filter((m) => m.content.trim().length > 0);
 }
 
-function findLastEmailDraft(history) {
-  // dernier assistant contenant {to,subject,body}
-  for (let i = history.length - 1; i >= 0; i--) {
-    const m = history[i];
-    if (m.role !== "assistant") continue;
-    const obj = extractJsonObject(m.content);
-    const to = safeStr(obj?.to).trim();
-    const subject = safeStr(obj?.subject).trim();
-    const body = safeStr(obj?.body).trim();
-    if (to && subject && body) return { to, subject, body };
-  }
-  return null;
+async function loadLastAssistantMessage(conversationId) {
+  if (!conversationId) return "";
+
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("content, created_at")
+    .eq("conversation_id", conversationId)
+    .eq("role", "assistant")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return "";
+  return safeStr(data?.content);
 }
 
 export default async function handler(req, res) {
@@ -239,35 +207,52 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
 
   try {
-    if (!process.env.MISTRAL_API_KEY) return res.status(500).json({ error: "MISTRAL_API_KEY manquant sur Vercel." });
-    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant sur Vercel." });
-    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant sur Vercel." });
+    if (!process.env.MISTRAL_API_KEY) {
+      return res.status(500).json({ error: "MISTRAL_API_KEY manquant sur Vercel." });
+    }
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant sur Vercel." });
+    }
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant sur Vercel." });
+    }
 
     const token = getBearerToken(req);
-    if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
+    if (!token) {
+      // 200 pour éviter l’alerte front si tu gères mal les non-200
+      return res.status(200).json({ reply: "Non authentifié (token manquant)." });
+    }
 
     const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-    if (userErr || !userData?.user) return res.status(401).json({ error: "Session invalide. Reconnectez-vous." });
+    if (userErr || !userData?.user) {
+      return res.status(200).json({ reply: "Session invalide. Reconnectez-vous." });
+    }
     const userId = userData.user.id;
 
-    const { message, agentSlug, conversationId } = req.body || {};
-    const userMsg = safeStr(message).trim();
-    if (!userMsg) return okReply(res, "Message vide.");
+    const reqBody = req.body || {};
+    const userMsg = safeStr(reqBody.message).trim();
+    const conversationId = safeStr(reqBody.conversationId).trim();
+    const slug = pickAgentSlug(reqBody, req.query);
 
-    const { conv, history } = await loadConversationHistory(conversationId, userId, 30);
+    if (!slug) {
+      return res.status(200).json({ reply: "Aucun agent sélectionné." });
+    }
+    if (!userMsg) {
+      return res.status(200).json({ reply: "Message vide." });
+    }
 
-    // slug depuis body OU depuis conversation
-    const slug = sanitizeAgentSlug(agentSlug || conv?.agent_slug);
-    if (!slug) return okReply(res, "Aucun agent sélectionné.");
-
-    const { data: agent } = await supabaseAdmin
+    // Agent
+    const { data: agent, error: agentErr } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
       .eq("slug", slug)
       .maybeSingle();
 
-    if (!agent) return okReply(res, `Agent introuvable (${slug}).`);
+    if (agentErr || !agent) {
+      return res.status(200).json({ reply: "Agent introuvable." });
+    }
 
+    // Vérif assignation
     const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
       .select("user_id, agent_id")
@@ -276,43 +261,17 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     if (assignErr) return res.status(500).json({ error: "Erreur assignation (user_agents)." });
-    if (!assignment) return okReply(res, "Accès interdit : agent non assigné.");
+    if (!assignment) return res.status(200).json({ reply: "Accès interdit : agent non assigné." });
 
-    const { data: cfg } = await supabaseAdmin
+    // Config user-agent
+    const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
       .eq("user_id", userId)
       .eq("agent_id", agent.id)
       .maybeSingle();
 
-    const ctxObj = parseMaybeJson(cfg?.context) || {};
-
-    const sendIntent = detectSendIntent(userMsg);
-    const draftIntent = detectDraftIntent(userMsg);
-
-    // ENVOI (uniquement si "envoie")
-    if (sendIntent) {
-      const draft = findLastEmailDraft(history);
-      if (!draft) {
-        return okReply(res, "Je n’ai pas de brouillon prêt à envoyer dans cette conversation. Demandez d’abord : « prépare un mail à ... ».");
-      }
-
-      const makeUrl = getMakeWebhookUrl(ctxObj);
-      if (!makeUrl) return res.status(500).json({ error: "Aucune URL Make webhook configurée (context ou MAKE_WEBHOOK_URL)." });
-
-      let body = draft.body;
-      if (!looksLikeHtml(body)) body = plainToHtml(body);
-
-      await postToMake(makeUrl, { to: draft.to, subject: draft.subject, body });
-      return okReply(res, "Email envoyé via Outlook (Make).");
-    }
-
-    const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
-
-    const globalBasePrompt = await getGlobalBasePrompt();
-    const basePrompt =
-      safeStr(agentPrompts?.[slug]?.systemPrompt).trim() ||
-      `Tu es ${agent.name}${agent.description ? `, ${agent.description}` : ""}.`;
+    const ctxObj = !cfgErr ? parseMaybeJson(cfg?.context) : null;
 
     const customPrompt =
       safeStr(cfg?.system_prompt).trim() ||
@@ -321,29 +280,81 @@ export default async function handler(req, res) {
       safeStr(ctxObj?.customPrompt).trim() ||
       "";
 
-    // Règles email: si on est en "prépare", on force BROUILLON JSON ONLY, sinon conversation normale
-    const emailDraftRules = `
-EMAIL - MODE BROUILLON (SANS ENVOI)
-- Tu prépares un brouillon, tu n'envoies rien.
-- Tu réponds UNIQUEMENT par un JSON strict, sans texte autour, avec exactement:
-  { "to": "<email>", "subject": "<objet>", "body": "<HTML>" }
-- body doit être du HTML simple (<p>, <br/>), avec des paragraphes.
-- Tu ne mets pas de placeholders type "[DATE A COMPLETER]" : si une info manque, tu fais au mieux sans la mettre.
+    const basePrompt =
+      safeStr(agentPrompts?.[slug]?.systemPrompt).trim() ||
+      `Tu es ${agent.name}${agent.description ? `, ${agent.description}` : ""}.`;
+
+    const globalBasePrompt = await getGlobalBasePrompt();
+
+    // IMPORTANT : règle ferme d’envoi email = 2 temps
+    const hardEmailRule = `
+RÈGLE EMAIL (INTÉGRATION MAKE)
+- Tu peux préparer des emails (brouillon), mais TU N’ENVOIES JAMAIS tant que l’utilisateur n’a pas écrit exactement: "ENVOIE" ou "ENVOYER".
+- Quand on te demande de "préparer" ou "rédiger" un email: tu fournis (1) un brouillon lisible, puis (2) un bloc JSON strict dans un bloc \`\`\`json\`\`\` avec exactement: { "to": "...", "subject": "...", "body": "..." }.
+- "body" doit être du HTML simple (paragraphes <p>, listes <ul><li>, sauts <br/> si besoin).
+- Si le destinataire manque, mets "to": "" et demande le destinataire.
 `;
 
-    const systemPrompt = [
-      globalBasePrompt ? `INSTRUCTIONS GÉNÉRALES\n${globalBasePrompt}` : "",
+    const finalSystemPrompt = [
+      globalBasePrompt
+        ? `INSTRUCTIONS GÉNÉRALES (communes à tous les agents)\n${globalBasePrompt}`
+        : "",
+      hardEmailRule.trim(),
       basePrompt,
-      customPrompt ? `INSTRUCTIONS PERSONNALISÉES\n${customPrompt}` : "",
-      draftIntent ? emailDraftRules : "",
+      customPrompt ? `INSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}` : "",
     ]
       .filter(Boolean)
       .join("\n\n");
 
-    const messages = [{ role: "system", content: systemPrompt }];
-    // mémoire conversation
-    for (const m of history) messages.push({ role: m.role, content: m.content });
-    messages.push({ role: "user", content: userMsg });
+    // ------------- MODE "ENVOIE" : on envoie via Make sans repasser par le LLM -------------
+    if (isSendConfirmation(userMsg)) {
+      // Il faut un conversationId pour retrouver le dernier brouillon JSON
+      if (!conversationId) {
+        return res.status(200).json({
+          reply:
+            "Je ne peux pas envoyer car je n’ai pas l’identifiant de conversation. Recharge la page et réessaie, ou renvoie le brouillon.",
+        });
+      }
+
+      const makeUrl = getMakeWebhookUrl(ctxObj || {});
+      if (!makeUrl) {
+        return res.status(200).json({
+          reply:
+            "Aucun webhook Make configuré pour cet agent/utilisateur. Ajoute-le dans le contexte (clé recommandée: make_webhook_url).",
+        });
+      }
+
+      const lastAssistant = await loadLastAssistantMessage(conversationId);
+      const jsonObj = extractFirstJsonObject(lastAssistant);
+      const payload = normalizeEmailPayload(jsonObj);
+
+      if (!payload) {
+        return res.status(200).json({
+          reply:
+            "Je ne trouve pas de brouillon JSON valide dans le dernier message assistant. Demande d’abord: “Prépare un email à …”, puis écris ENVOIE.",
+        });
+      }
+
+      const send = await postToMakeWebhook(makeUrl, payload);
+      if (!send.ok) {
+        return res.status(200).json({
+          reply: `Échec d’envoi via Make (HTTP ${send.status}). Vérifie le scénario Make et le mapping. Détail: ${send.body || "—"}`,
+        });
+      }
+
+      return res.status(200).json({ reply: "Email envoyé via Outlook (Make)." });
+    }
+
+    // ------------- MODE NORMAL : conversation + mémoire -------------
+    const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
+
+    const history = await loadConversationHistory(conversationId, 24);
+
+    const messages = [
+      { role: "system", content: finalSystemPrompt },
+      ...history.filter((m) => m.role === "user" || m.role === "assistant"),
+      { role: "user", content: userMsg },
+    ];
 
     const completion = await mistral.chat.complete({
       model: process.env.MISTRAL_MODEL || "mistral-small-latest",
@@ -351,34 +362,8 @@ EMAIL - MODE BROUILLON (SANS ENVOI)
       temperature: 0.7,
     });
 
-    const rawReply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
-
-    // si c'est un draft: on normalise en JSON pur
-    if (draftIntent) {
-      const obj = extractJsonObject(rawReply);
-      if (!obj) {
-        // on évite de casser l'UI: on renvoie un pseudo-brouillon minimal
-        const minimal = {
-          to: "",
-          subject: "Objet à préciser",
-          body: "<p>Indique-moi le destinataire (email) et l’objet exact, puis je rédige le brouillon.</p>",
-        };
-        return okReply(res, JSON.stringify(minimal));
-      }
-
-      let body = safeStr(obj.body).trim();
-      if (body && !looksLikeHtml(body)) body = plainToHtml(body);
-
-      const normalized = {
-        to: safeStr(obj.to).trim(),
-        subject: safeStr(obj.subject).trim(),
-        body,
-      };
-      return okReply(res, JSON.stringify(normalized));
-    }
-
-    // conversation normale
-    return okReply(res, rawReply);
+    const reply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
+    return res.status(200).json({ reply });
   } catch (err) {
     console.error("Erreur API /api/chat :", err);
     return res.status(500).json({ error: "Erreur interne de l’agent." });
