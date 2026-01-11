@@ -1,4 +1,3 @@
-// pages/chat.js
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import { createClient } from "@supabase/supabase-js";
@@ -39,28 +38,10 @@ function extractFirstNameFromUser(user) {
   return guessFirstNameFromEmail(user?.email || "");
 }
 
-function MicroIcon({ active = false }) {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-      style={{ opacity: active ? 1 : 0.9 }}
-    >
-      <path
-        fill="currentColor"
-        d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"
-      />
-    </svg>
-  );
-}
-
 export default function ChatPage() {
   const router = useRouter();
 
-  // Agent slug via URL: /chat?agent=emma
+  // Agent slug via ?agent=emma (fallback emma)
   const agentSlug = useMemo(() => {
     const q = router.query?.agent;
     if (typeof q === "string" && q.trim()) return q.trim();
@@ -82,11 +63,6 @@ export default function ChatPage() {
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [creatingConv, setCreatingConv] = useState(false);
   const [sending, setSending] = useState(false);
-
-  // --- Dictée vocale ---
-  const [listening, setListening] = useState(false);
-  const recognitionRef = useRef(null);
-  const lastFinalRef = useRef(""); // anti doublons
 
   const accessToken = useMemo(() => session?.access_token || null, [session]);
   const firstName = useMemo(() => extractFirstNameFromUser(user), [user]);
@@ -196,7 +172,7 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loadingMsgs]);
 
-  // IMPORTANT: création via API (pas via supabase insert)
+  // IMPORTANT: création via API
   async function handleNewConversation() {
     if (!accessToken) {
       alert("Session invalide. Veuillez vous reconnecter.");
@@ -265,15 +241,9 @@ export default function ChatPage() {
   }
 
   async function handleSend() {
+    if (!selectedConversationId) return;
     const content = input.trim();
     if (!content) return;
-
-    // si pas de conversation sélectionnée, on demande à l’utilisateur d’en créer une
-    // (chez vous, vous avez aussi un mode “création à la saisie” : on pourra l’ajouter ensuite proprement)
-    if (!selectedConversationId) {
-      alert("Cliquez sur “+ Nouvelle” pour démarrer une conversation, puis envoyez votre message.");
-      return;
-    }
 
     try {
       setSending(true);
@@ -300,7 +270,8 @@ export default function ChatPage() {
         },
         body: JSON.stringify({
           conversation_id: selectedConversationId,
-          agent_slug: agentSlug,
+          // IMPORTANT: l’API /api/chat lit agentSlug (pas agent_slug)
+          agentSlug: agentSlug,
           message: content,
         }),
       });
@@ -337,110 +308,6 @@ export default function ChatPage() {
   const showWelcomeFallback =
     !loadingMsgs && selectedConversationId && (messages?.length || 0) === 0;
 
-  function stopDictation() {
-    try {
-      const r = recognitionRef.current;
-      if (r) {
-        r.onresult = null;
-        r.onerror = null;
-        r.onend = null;
-        r.stop();
-      }
-    } catch (e) {
-      // ignore
-    } finally {
-      recognitionRef.current = null;
-      setListening(false);
-      lastFinalRef.current = "";
-    }
-  }
-
-  function startDictation() {
-    // Empêche un double start (souvent la cause du “x2”)
-    if (listening || recognitionRef.current) return;
-
-    const SR =
-      typeof window !== "undefined"
-        ? window.SpeechRecognition || window.webkitSpeechRecognition
-        : null;
-
-    if (!SR) {
-      alert("Dictée vocale non supportée sur ce navigateur. Utilisez Chrome sur ordinateur.");
-      return;
-    }
-
-    const r = new SR();
-    recognitionRef.current = r;
-
-    // réglages anti-doublons
-    r.lang = "fr-FR";
-    r.continuous = false;
-    r.interimResults = false;
-    r.maxAlternatives = 1;
-
-    lastFinalRef.current = "";
-
-    r.onresult = (event) => {
-      try {
-        let finalText = "";
-
-        // On ne traite que les nouveaux résultats à partir de resultIndex
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const res = event.results[i];
-          if (res && res.isFinal && res[0] && typeof res[0].transcript === "string") {
-            finalText += res[0].transcript;
-          }
-        }
-
-        finalText = (finalText || "").trim();
-        if (!finalText) return;
-
-        // Anti doublon : si le navigateur renvoie deux fois le même final, on ignore le second
-        if (finalText === lastFinalRef.current) return;
-        lastFinalRef.current = finalText;
-
-        setInput((prev) => {
-          const p = (prev || "").trim();
-          return p ? `${p} ${finalText}` : finalText;
-        });
-      } catch (e) {
-        console.error("Dictée onresult error:", e);
-      }
-    };
-
-    r.onerror = (e) => {
-      console.error("Dictée error:", e);
-      stopDictation();
-      alert("Erreur dictée vocale. Vérifiez les autorisations micro du navigateur.");
-    };
-
-    r.onend = () => {
-      // Ne pas relancer automatiquement : c’est une cause fréquente du doublon
-      recognitionRef.current = null;
-      setListening(false);
-      lastFinalRef.current = "";
-    };
-
-    try {
-      setListening(true);
-      r.start();
-    } catch (e) {
-      console.error("Dictée start error:", e);
-      stopDictation();
-    }
-  }
-
-  function toggleDictation() {
-    if (listening) stopDictation();
-    else startDictation();
-  }
-
-  // Sécurité: stop dictation quand on quitte la page
-  useEffect(() => {
-    return () => stopDictation();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   return (
     <div className="page">
       <div className="topbar">
@@ -449,7 +316,17 @@ export default function ChatPage() {
         </button>
 
         <div className="brand">
-          <div className="brandTitle">Evidenc’IA</div>
+          {/* Remplace le texte par le logo */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            className="brandLogo"
+            src="/images/logolong.png"
+            alt="Evidenc'IA"
+            onError={(e) => {
+              // fallback propre si l’image ne charge pas
+              e.currentTarget.style.display = "none";
+            }}
+          />
         </div>
 
         <div className="topbarRight">
@@ -457,7 +334,6 @@ export default function ChatPage() {
           <button
             className="btn logout"
             onClick={async () => {
-              stopDictation();
               await supabase.auth.signOut();
               router.push("/login");
             }}
@@ -569,20 +445,14 @@ export default function ChatPage() {
                     handleSend();
                   }
                 }}
-                disabled={sending}
+                disabled={!selectedConversationId || sending}
               />
 
-              <button
-                className={`btn mic ${listening ? "micActive" : ""}`}
-                type="button"
-                title={listening ? "Arrêter la dictée" : "Dicter un message"}
-                onClick={toggleDictation}
-                aria-pressed={listening ? "true" : "false"}
-              >
-                <MicroIcon active={listening} />
+              <button className="btn mic" type="button" title="Dictée vocale (à connecter)">
+                🎙
               </button>
 
-              <button className="btn send" onClick={handleSend} disabled={sending}>
+              <button className="btn send" onClick={handleSend} disabled={!selectedConversationId || sending}>
                 {sending ? "Envoi..." : "Envoyer"}
               </button>
             </div>
@@ -604,8 +474,10 @@ export default function ChatPage() {
           color: #e9eef6; padding: 10px 12px; border-radius: 14px; cursor: pointer; font-weight: 600; }
         .btn:disabled { opacity: 0.6; cursor: not-allowed; }
         .btn.logout { border-color: rgba(255,80,80,0.35); }
+
         .brand { display: flex; align-items: center; justify-content: center; flex: 1; text-align: center; }
-        .brandTitle { font-size: 20px; font-weight: 800; letter-spacing: 0.6px; }
+        .brandLogo { height: 26px; width: auto; display: block; opacity: 0.95; }
+
         .topbarRight { display: flex; gap: 10px; align-items: center; }
         .pill { border: 1px solid rgba(255,255,255,0.12); padding: 8px 10px; border-radius: 999px; font-size: 12px; opacity: 0.9; }
 
@@ -632,7 +504,10 @@ export default function ChatPage() {
         .agentLeft { display: flex; gap: 12px; align-items: center; }
         .agentAvatar { width: 44px; height: 44px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
           background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; }
+
+        /* Ta modif demandée */
         .agentAvatar img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; }
+
         .avatarFallback { font-weight: 900; opacity: 0.85; }
         .agentName { font-weight: 900; }
         .agentRole { font-size: 12px; color: rgba(233,238,246,0.65); margin-top: 2px; }
@@ -651,7 +526,6 @@ export default function ChatPage() {
           background: rgba(0,0,0,0.25); color: #e9eef6; padding: 0 14px; outline: none; }
         .btn.send { border-color: rgba(255,130,30,0.35); background: rgba(255,130,30,0.12); }
         .btn.mic { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; }
-        .btn.micActive { border-color: rgba(255,130,30,0.35); background: rgba(255,130,30,0.12); }
 
         .chatFooter { padding: 10px 14px 14px; }
 
