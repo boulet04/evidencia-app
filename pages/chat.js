@@ -38,15 +38,36 @@ function extractFirstNameFromUser(user) {
   return guessFirstNameFromEmail(user?.email || "");
 }
 
+// Déduit le slug de manière robuste (évite le fallback "emma" pendant les navigations)
+function deriveAgentSlug(router) {
+  const pick = (v) => {
+    if (Array.isArray(v)) v = v[0];
+    if (typeof v === "string" && v.trim()) return v.trim();
+    return "";
+  };
+
+  // 1) Next.js query
+  const q1 = pick(router.query?.agentSlug);
+  const q2 = pick(router.query?.agent);
+
+  // 2) Path (/chat/<slug>)
+  const asPath = (router.asPath || "").trim();
+  const pathOnly = asPath.split("?")[0] || "";
+  const mPath = pathOnly.match(/^\/chat\/([^/]+)$/i);
+  const fromPath = mPath ? decodeURIComponent(mPath[1] || "") : "";
+
+  // 3) Query string direct dans asPath (?agent=xxx)
+  const mAgent = asPath.match(/[?&]agent=([^&]+)/i);
+  const fromQS = mAgent ? decodeURIComponent(mAgent[1] || "") : "";
+
+  const slug = (q1 || q2 || fromPath || fromQS || "").trim().toLowerCase();
+  return slug || "emma";
+}
+
 export default function ChatPage() {
   const router = useRouter();
 
-  // Agent slug via ?agent=emma (fallback emma)
-  const agentSlug = useMemo(() => {
-    const q = router.query?.agent;
-    if (typeof q === "string" && q.trim()) return q.trim();
-    return "emma";
-  }, [router.query]);
+  const agentSlug = useMemo(() => deriveAgentSlug(router), [router.asPath, router.query]);
 
   const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
@@ -63,6 +84,8 @@ export default function ChatPage() {
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [creatingConv, setCreatingConv] = useState(false);
   const [sending, setSending] = useState(false);
+
+  const [brandLogoOk, setBrandLogoOk] = useState(true);
 
   const accessToken = useMemo(() => session?.access_token || null, [session]);
   const firstName = useMemo(() => extractFirstNameFromUser(user), [user]);
@@ -88,6 +111,16 @@ export default function ChatPage() {
 
     return () => sub?.subscription?.unsubscribe?.();
   }, []);
+
+  // IMPORTANT: quand on change d’agent, on reset les états pour éviter les mélanges visuels
+  useEffect(() => {
+    setAgent(null);
+    setConversations([]);
+    setSelectedConversationId(null);
+    setMessages([]);
+    setInput("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentSlug]);
 
   // Load agent meta
   useEffect(() => {
@@ -134,11 +167,12 @@ export default function ChatPage() {
       const list = data || [];
       setConversations(list);
 
-      if (!selectedConversationId && list.length > 0) {
+      if (list.length > 0) {
         setSelectedConversationId(list[0].id);
+      } else {
+        setSelectedConversationId(null);
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, agentSlug]);
 
   // Load messages
@@ -172,7 +206,7 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loadingMsgs]);
 
-  // IMPORTANT: création via API
+  // IMPORTANT: création via API (pas via supabase insert)
   async function handleNewConversation() {
     if (!accessToken) {
       alert("Session invalide. Veuillez vous reconnecter.");
@@ -270,8 +304,7 @@ export default function ChatPage() {
         },
         body: JSON.stringify({
           conversation_id: selectedConversationId,
-          // IMPORTANT: l’API /api/chat lit agentSlug (pas agent_slug)
-          agentSlug: agentSlug,
+          agent_slug: agentSlug,
           message: content,
         }),
       });
@@ -316,17 +349,17 @@ export default function ChatPage() {
         </button>
 
         <div className="brand">
-          {/* Remplace le texte par le logo */}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            className="brandLogo"
-            src="/images/logolong.png"
-            alt="Evidenc'IA"
-            onError={(e) => {
-              // fallback propre si l’image ne charge pas
-              e.currentTarget.style.display = "none";
-            }}
-          />
+          {brandLogoOk ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              className="brandLogo"
+              src="/images/logolong.png"
+              alt="Evidenc'IA"
+              onError={() => setBrandLogoOk(false)}
+            />
+          ) : (
+            <div className="brandTitle">Evidenc’IA</div>
+          )}
         </div>
 
         <div className="topbarRight">
@@ -396,7 +429,11 @@ export default function ChatPage() {
               <div className="agentAvatar">
                 {agent?.avatar_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={agent.avatar_url} alt={agent.name || "Agent"} />
+                  <img
+                    key={`${agentSlug}:${agent.avatar_url}`}
+                    src={agent.avatar_url}
+                    alt={agent.name || "Agent"}
+                  />
                 ) : (
                   <div className="avatarFallback">{(agent?.name || "A").slice(0, 1)}</div>
                 )}
@@ -449,7 +486,13 @@ export default function ChatPage() {
               />
 
               <button className="btn mic" type="button" title="Dictée vocale (à connecter)">
-                🎙
+                {/* icône micro plus claire (sans librairie) */}
+                <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Zm7-3a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V20H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-2.08A7 7 0 0 0 19 11Z"
+                    fill="currentColor"
+                  />
+                </svg>
               </button>
 
               <button className="btn send" onClick={handleSend} disabled={!selectedConversationId || sending}>
@@ -458,7 +501,9 @@ export default function ChatPage() {
             </div>
 
             <div className="chatFooter">
-              <div className="mutedSmall">{selectedConversationId ? `Conversation: ${selectedConversationId}` : ""}</div>
+              <div className="mutedSmall">
+                {selectedConversationId ? `Conversation: ${selectedConversationId}` : ""}
+              </div>
             </div>
           </div>
         </main>
@@ -474,10 +519,9 @@ export default function ChatPage() {
           color: #e9eef6; padding: 10px 12px; border-radius: 14px; cursor: pointer; font-weight: 600; }
         .btn:disabled { opacity: 0.6; cursor: not-allowed; }
         .btn.logout { border-color: rgba(255,80,80,0.35); }
-
         .brand { display: flex; align-items: center; justify-content: center; flex: 1; text-align: center; }
-        .brandLogo { height: 26px; width: auto; display: block; opacity: 0.95; }
-
+        .brandTitle { font-size: 20px; font-weight: 800; letter-spacing: 0.6px; }
+        .brandLogo { height: 22px; width: auto; display: block; opacity: 0.95; }
         .topbarRight { display: flex; gap: 10px; align-items: center; }
         .pill { border: 1px solid rgba(255,255,255,0.12); padding: 8px 10px; border-radius: 999px; font-size: 12px; opacity: 0.9; }
 
@@ -504,10 +548,7 @@ export default function ChatPage() {
         .agentLeft { display: flex; gap: 12px; align-items: center; }
         .agentAvatar { width: 44px; height: 44px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
           background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; }
-
-        /* Ta modif demandée */
-        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; }
-
+        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; } /* <= ta modif demandée */
         .avatarFallback { font-weight: 900; opacity: 0.85; }
         .agentName { font-weight: 900; }
         .agentRole { font-size: 12px; color: rgba(233,238,246,0.65); margin-top: 2px; }
