@@ -53,89 +53,195 @@ async function getGlobalBasePrompt() {
   }
 }
 
-// --- Make helpers ---
-
-function isExplicitSendConfirmation(userMsg) {
-  // Tu peux ajuster les mots-clés si besoin
-  return /CONFIRME\s+ENVOI|ENVOIE\s+MAINTENANT|CONFIRMER\s+L'?ENVOI/i.test(userMsg || "");
+function normalizeText(s) {
+  return safeStr(s).trim();
 }
 
-function tryParseStrictJsonObject(text) {
-  // On tente de parser un JSON "pur" (pas de texte autour)
-  const t = safeStr(text).trim();
-  if (!t.startsWith("{") || !t.endsWith("}")) return null;
-  try {
-    const obj = JSON.parse(t);
-    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : null;
-  } catch {
-    return null;
-  }
+/**
+ * Détection d'intention :
+ * - "préparer" => brouillon
+ * - "envoyer" => envoi (confirmé)
+ * On favorise la sécurité : si ambigu, on ne déclenche pas l'envoi.
+ */
+function detectEmailIntent(userMsgRaw) {
+  const t = normalizeText(userMsgRaw).toLowerCase();
+
+  const hasPrepare =
+    /\b(pr[eé]pare|r[eé]dige|brouillon|draft|compose|mets[-\s]?moi|ecris|écris)\b/i.test(t) &&
+    !/\b(envoie|envoyer|envoi|valide|confirme|send)\b/i.test(t);
+
+  const hasSend =
+    /\b(envoie|envoyer|envoi|send|valide|confirme|go)\b/i.test(t) &&
+    !/\b(ne\s+pas\s+envoyer|n[' ]?envoie\s+pas|sans\s+envoyer|ne\s+pas\s+l[' ]?envoyer)\b/i.test(t);
+
+  // S'il y a "prépare" et "envoie" dans la même phrase => ambigu => on force un brouillon
+  if (hasPrepare && hasSend) return "draft";
+  if (hasSend) return "send";
+  if (hasPrepare) return "draft";
+  return "none";
 }
 
-function pickMakeWebhookForEmail(workflows) {
-  // workflows attendus: [{provider, name, url}]
-  const list = Array.isArray(workflows) ? workflows : [];
-  const makeOnes = list.filter(
-    (w) => safeStr(w?.provider).toLowerCase() === "make" && /^https?:\/\//i.test(safeStr(w?.url))
-  );
-
-  if (makeOnes.length === 0) return null;
-
-  // 1) Priorité si le nom contient mail/email
-  const preferred = makeOnes.find((w) => /mail|email/i.test(safeStr(w?.name)));
-  return preferred?.url || makeOnes[0].url;
+function buildBodyHtmlFromText(text) {
+  const t = safeStr(text);
+  // rendu correct en HTML, conserve les retours à la ligne
+  const escaped = t
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return `<div style="font-family:Arial, sans-serif; font-size:14px; line-height:1.5; white-space:pre-line">${escaped}</div>`;
 }
 
-async function postJsonWithTimeout(url, payload, timeoutMs = 15000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+/**
+ * Extrait un JSON strict depuis une réponse LLM :
+ * - accepte code fences ```json ... ```
+ * - ou premier objet {...}
+ */
+function extractJsonObject(text) {
+  const s = safeStr(text).trim();
 
-  try {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-
-    const text = await r.text().catch(() => "");
-    if (!r.ok) {
-      return { ok: false, status: r.status, body: text };
+  // 1) code fence
+  const fence = s.match(/```json\s*([\s\S]*?)\s*```/i) || s.match(/```\s*([\s\S]*?)\s*```/i);
+  if (fence?.[1]) {
+    try {
+      return JSON.parse(fence[1]);
+    } catch {
+      // ignore
     }
-    return { ok: true, status: r.status, body: text };
-  } finally {
-    clearTimeout(timer);
   }
+
+  // 2) premier objet JSON naïf
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const chunk = s.slice(start, end + 1);
+    try {
+      return JSON.parse(chunk);
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
-function formatDraftEmail(to, subject, body) {
-  // Affichage simple côté chat (tu peux améliorer ensuite côté UI)
-  const t = safeStr(to).trim() || "(destinataire manquant)";
-  const s = safeStr(subject).trim() || "(objet manquant)";
-  const b = safeStr(body).trim() || "(corps manquant)";
+function isValidEmail(email) {
+  const e = safeStr(email).trim();
+  // validation simple
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+}
+
+/**
+ * Choix du workflow mail depuis context.workflows (admin)
+ * On privilégie provider make + name contenant mail/email/outlook
+ */
+function pickMailWorkflow(workflows) {
+  const arr = Array.isArray(workflows) ? workflows : [];
+  if (!arr.length) return null;
+
+  const score = (w) => {
+    const p = safeStr(w?.provider).toLowerCase();
+    const n = safeStr(w?.name).toLowerCase();
+    let s = 0;
+    if (p.includes("make")) s += 10;
+    if (n.includes("mail") || n.includes("email") || n.includes("outlook")) s += 10;
+    if (safeStr(w?.url).startsWith("https://hook.")) s += 2;
+    if (safeStr(w?.url).startsWith("https://")) s += 1;
+    return s;
+  };
+
+  const sorted = [...arr].sort((a, b) => score(b) - score(a));
+  const chosen = sorted[0];
+  if (!chosen?.url) return null;
+  return chosen;
+}
+
+async function upsertDraftEmail({ userId, agentId, context, draft }) {
+  // context peut contenir sources/workflows + tout le reste. On fusionne en conservant l'existant.
+  const ctx = typeof context === "object" && context ? context : {};
+  const nextCtx = {
+    ...ctx,
+    draft_email: {
+      ...draft,
+      created_at: new Date().toISOString(),
+    },
+  };
+
+  // upsert dans client_agent_configs
+  const { error } = await supabaseAdmin
+    .from("client_agent_configs")
+    .upsert(
+      {
+        user_id: userId,
+        agent_id: agentId,
+        system_prompt: null, // ne change pas ici
+        context: nextCtx,
+      },
+      { onConflict: "user_id,agent_id" }
+    );
+
+  // Note: si system_prompt existait, supabase upsert pourrait l'écraser selon config.
+  // Donc on fait plutôt un update si la ligne existe.
+  if (error) {
+    // fallback update
+    await supabaseAdmin
+      .from("client_agent_configs")
+      .update({ context: nextCtx })
+      .eq("user_id", userId)
+      .eq("agent_id", agentId);
+  }
+
+  return nextCtx;
+}
+
+async function clearDraftEmail({ userId, agentId, context }) {
+  const ctx = typeof context === "object" && context ? context : {};
+  const nextCtx = { ...ctx };
+  delete nextCtx.draft_email;
+
+  await supabaseAdmin
+    .from("client_agent_configs")
+    .update({ context: nextCtx })
+    .eq("user_id", userId)
+    .eq("agent_id", agentId);
+
+  return nextCtx;
+}
+
+function formatDraftPreview(draft) {
+  const to = safeStr(draft?.to).trim();
+  const subject = safeStr(draft?.subject).trim();
+  const body = safeStr(draft?.body).trim();
 
   return [
-    "Brouillon d’email (non envoyé) :",
+    "Brouillon prêt.",
     "",
-    `To: ${t}`,
-    `Subject: ${s}`,
+    `To: ${to || "(à compléter)"}`,
+    `Objet: ${subject || "(à compléter)"}`,
     "",
-    b,
+    body || "(corps vide)",
     "",
-    "Si c’est OK, réponds exactement : CONFIRME ENVOI",
+    "Si vous voulez l’envoyer, répondez : « Envoie le mail » (ou « Valide l’envoi »).",
   ].join("\n");
+}
+
+async function postToMakeWebhook(url, payload) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const txt = await r.text().catch(() => "");
+  if (!r.ok) {
+    throw new Error(`Webhook Make HTTP ${r.status}: ${txt || "Erreur inconnue"}`);
+  }
+  return txt;
 }
 
 export default async function handler(req, res) {
   setCors(res);
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Méthode non autorisée." });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
 
   try {
     if (!process.env.MISTRAL_API_KEY) {
@@ -151,9 +257,7 @@ export default async function handler(req, res) {
     const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
 
     const token = getBearerToken(req);
-    if (!token) {
-      return res.status(401).json({ error: "Non authentifié (token manquant)." });
-    }
+    if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
 
     const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
     if (userErr || !userData?.user) {
@@ -174,9 +278,7 @@ export default async function handler(req, res) {
       .eq("slug", slug)
       .maybeSingle();
 
-    if (agentErr || !agent) {
-      return res.status(404).json({ error: "Agent introuvable." });
-    }
+    if (agentErr || !agent) return res.status(404).json({ error: "Agent introuvable." });
 
     const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
@@ -196,12 +298,15 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     const ctxObj = !cfgErr ? parseMaybeJson(cfg?.context) : null;
+    const context = typeof ctxObj === "object" && ctxObj ? ctxObj : {};
+    const workflows = Array.isArray(context?.workflows) ? context.workflows : [];
+    const draftEmail = context?.draft_email && typeof context.draft_email === "object" ? context.draft_email : null;
 
     const customPrompt =
       safeStr(cfg?.system_prompt).trim() ||
-      safeStr(ctxObj?.prompt).trim() ||
-      safeStr(ctxObj?.systemPrompt).trim() ||
-      safeStr(ctxObj?.customPrompt).trim() ||
+      safeStr(context?.prompt).trim() ||
+      safeStr(context?.systemPrompt).trim() ||
+      safeStr(context?.customPrompt).trim() ||
       "";
 
     const basePrompt =
@@ -210,104 +315,177 @@ export default async function handler(req, res) {
 
     const globalBasePrompt = await getGlobalBasePrompt();
 
-    // Bloc "outil" durci côté backend : action draft/send + JSON strict
-    const toolProtocol = [
-      "PROTOCOLE OUTILS (STRICT) — À RESPECTER ABSOLUMENT",
-      "Si tu dois produire un email via Make, tu DOIS répondre uniquement avec un JSON strict (aucun texte autour) avec ces clés :",
-      '{ "action": "draft" | "send", "to": "email", "subject": "string", "body": "string" }',
-      "Règles :",
-      '- Si l’utilisateur demande de "préparer"/"rédiger"/"proposer" : action = "draft" (NE PAS ENVOYER).',
-      '- Tu n’utilises action = "send" QUE si l’utilisateur a explicitement confirmé avec : "CONFIRME ENVOI" ou "ENVOIE MAINTENANT".',
-      "Sinon, reste en draft.",
-      "",
-      "Important : si tu n’es pas certain du destinataire ou de l’objet, tu restes en draft et tu demandes 1 question courte.",
-    ].join("\n");
+    // Guardrails mail : l’agent ne doit produire un JSON d’envoi QUE si l’utilisateur confirme explicitement.
+    const mailGuardrails = `
+RÈGLES EMAIL (CRITIQUE)
+- Ne JAMAIS déclencher un envoi si l’utilisateur demande seulement de "préparer", "rédiger" ou "faire un brouillon".
+- Dans ce cas, tu fournis un BROUILLON lisible (texte normal) avec To / Objet / Corps, et tu demandes confirmation.
+- Tu ne dois produire un JSON strict { "to": "...", "subject": "...", "body": "..." } QUE si l’utilisateur confirme explicitement l’envoi (ex: "envoie", "valide l'envoi", "envoie-le maintenant").
+- Si la demande est ambiguë, tu NE PRODUIS PAS de JSON.
+- Pour le corps du mail, utilise des paragraphes séparés par une ligne vide.
+`;
 
     const finalSystemPrompt = [
-      globalBasePrompt
-        ? `INSTRUCTIONS GÉNÉRALES (communes à tous les agents)\n${globalBasePrompt}`
-        : "",
+      globalBasePrompt ? `INSTRUCTIONS GÉNÉRALES\n${globalBasePrompt}` : "",
       basePrompt,
-      customPrompt ? `INSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}` : "",
-      toolProtocol,
+      customPrompt ? `INSTRUCTIONS PERSONNALISÉES\n${customPrompt}` : "",
+      mailGuardrails,
     ]
       .filter(Boolean)
       .join("\n\n");
 
+    const intent = detectEmailIntent(userMsg);
+
+    /**
+     * Si l’utilisateur confirme l’envoi ("send"), on veut :
+     * - soit un JSON d’envoi dans la réponse LLM
+     * - soit réutiliser le dernier draft stocké (context.draft_email)
+     */
     const completion = await mistral.chat.complete({
       model: process.env.MISTRAL_MODEL || "mistral-small-latest",
       messages: [
         { role: "system", content: finalSystemPrompt },
-        { role: "user", content: userMsg },
+        {
+          role: "user",
+          content:
+            intent === "send"
+              ? `${userMsg}\n\nIMPORTANT: Si tu envoies, réponds uniquement avec un JSON strict {to, subject, body}.`
+              : userMsg,
+        },
       ],
-      temperature: 0.7,
+      temperature: 0.4,
     });
 
-    const rawReply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
+    const raw = completion?.choices?.[0]?.message?.content ?? "";
+    const replyText = safeStr(raw).trim();
 
-    // 1) Détection JSON strict pour email
-    const obj = tryParseStrictJsonObject(rawReply);
-    const action = safeStr(obj?.action).toLowerCase();
-    const to = safeStr(obj?.to).trim();
-    const subject = safeStr(obj?.subject).trim();
-    const body = safeStr(obj?.body).trim();
+    const parsed = extractJsonObject(replyText);
 
-    const looksLikeEmailToolCall =
-      obj &&
-      ["draft", "send"].includes(action) &&
-      ("to" in obj || "subject" in obj || "body" in obj);
+    // --- CAS 1: l'utilisateur demande un brouillon (draft) ---
+    if (intent === "draft") {
+      // Si le modèle a quand même produit un JSON, on le traite comme un draft, jamais un envoi.
+      let draft = null;
 
-    if (!looksLikeEmailToolCall) {
-      // Pas un appel outil : on renvoie la réponse normale de l’agent
-      return res.status(200).json({ reply: rawReply });
+      if (parsed && typeof parsed === "object") {
+        draft = {
+          to: safeStr(parsed.to).trim(),
+          subject: safeStr(parsed.subject).trim(),
+          body: safeStr(parsed.body).trim(),
+        };
+      } else {
+        // Sinon on laisse le texte tel quel (brouillon lisible).
+        // Mais on essaie quand même d'extraire To/Objet/Corps si l'agent les a donnés.
+        draft = null;
+      }
+
+      if (draft && (draft.to || draft.subject || draft.body)) {
+        const payload = {
+          to: draft.to,
+          subject: draft.subject,
+          body: draft.body,
+          body_html: buildBodyHtmlFromText(draft.body),
+        };
+        await upsertDraftEmail({ userId, agentId: agent.id, context, draft: payload });
+
+        return res.status(200).json({
+          reply: formatDraftPreview(payload),
+          mode: "draft",
+          draft: payload,
+        });
+      }
+
+      // Pas de JSON => on renvoie le brouillon texte tel quel
+      return res.status(200).json({ reply: replyText, mode: "draft" });
     }
 
-    // 2) Sélection du webhook Make (email) dans context.workflows
-    const workflows = Array.isArray(ctxObj?.workflows) ? ctxObj.workflows : [];
-    const webhookUrl = pickMakeWebhookForEmail(workflows);
+    // --- CAS 2: l'utilisateur demande un envoi (send) ---
+    if (intent === "send") {
+      // 2a) on utilise le JSON si présent, sinon on tente le dernier draft stocké.
+      let payload = null;
 
-    // 3) Sécurité : si pas de webhook → on renvoie un draft, jamais d’envoi
-    if (!webhookUrl) {
-      const draft = formatDraftEmail(to, subject, body);
+      if (parsed && typeof parsed === "object") {
+        payload = {
+          to: safeStr(parsed.to).trim(),
+          subject: safeStr(parsed.subject).trim(),
+          body: safeStr(parsed.body).trim(),
+        };
+      } else if (draftEmail) {
+        payload = {
+          to: safeStr(draftEmail.to).trim(),
+          subject: safeStr(draftEmail.subject).trim(),
+          body: safeStr(draftEmail.body).trim(),
+          body_html: safeStr(draftEmail.body_html).trim(),
+        };
+      }
+
+      if (!payload) {
+        return res.status(200).json({
+          reply:
+            "Je n’ai pas de brouillon à envoyer. Demandez d’abord : « Prépare un mail à … » puis confirmez : « Envoie le mail ».",
+          mode: "send",
+          sent: false,
+        });
+      }
+
+      if (!isValidEmail(payload.to)) {
+        return res.status(200).json({
+          reply: `Adresse email invalide: "${payload.to}".`,
+          mode: "send",
+          sent: false,
+        });
+      }
+
+      const wf = pickMailWorkflow(workflows);
+      if (!wf?.url) {
+        return res.status(200).json({
+          reply:
+            "Aucun workflow mail configuré dans l’admin (context.workflows). Ajoutez un workflow Make (mail) avec une URL webhook valide.",
+          mode: "send",
+          sent: false,
+        });
+      }
+
+      // assure body_html
+      const finalPayload = {
+        to: payload.to,
+        subject: payload.subject,
+        body: payload.body,
+        body_html: payload.body_html || buildBodyHtmlFromText(payload.body),
+      };
+
+      // envoi Make
+      await postToMakeWebhook(wf.url, finalPayload);
+
+      // on purge le draft stocké après envoi
+      await clearDraftEmail({ userId, agentId: agent.id, context });
+
       return res.status(200).json({
-        reply:
-          draft +
-          "\n\n(Workflow Make introuvable : ajoute un workflow provider=make dont le nom contient mail/email, avec une URL https.)",
-        meta: { tool: "email", action: "draft", blocked: true, reason: "missing_webhook" },
+        reply: "Email envoyé via Outlook (Make).",
+        mode: "send",
+        sent: true,
       });
     }
 
-    // 4) Blocage serveur : pas de send sans confirmation utilisateur explicite
-    const hasUserConfirm = isExplicitSendConfirmation(userMsg);
+    // --- CAS 3: conversation normale (none) ---
+    // Si l'agent renvoie du JSON sans demande explicite d'envoi => on force brouillon / sécurité
+    if (parsed && typeof parsed === "object" && (parsed.to || parsed.subject || parsed.body)) {
+      const draft = {
+        to: safeStr(parsed.to).trim(),
+        subject: safeStr(parsed.subject).trim(),
+        body: safeStr(parsed.body).trim(),
+        body_html: buildBodyHtmlFromText(safeStr(parsed.body).trim()),
+      };
 
-    if (action !== "send" || !hasUserConfirm) {
-      const draft = formatDraftEmail(to, subject, body);
+      await upsertDraftEmail({ userId, agentId: agent.id, context, draft });
+
       return res.status(200).json({
-        reply: draft,
-        meta: { tool: "email", action: "draft", blocked: action === "send" && !hasUserConfirm },
+        reply: formatDraftPreview(draft),
+        mode: "draft",
+        draft,
       });
     }
 
-    // 5) SEND : on appelle Make uniquement ici
-    // Payload attendu côté Make: {to, subject, body}
-    const payload = { to, subject, body };
-
-    const result = await postJsonWithTimeout(webhookUrl, payload, 15000);
-    if (!result.ok) {
-      // En cas d’échec Make : on renvoie le draft + erreur, sans retry automatique
-      const draft = formatDraftEmail(to, subject, body);
-      return res.status(200).json({
-        reply:
-          draft +
-          `\n\n(Erreur Make: HTTP ${result.status}. Vérifie le scénario / mapping Outlook.)`,
-        meta: { tool: "email", action: "send", ok: false, status: result.status },
-      });
-    }
-
-    return res.status(200).json({
-      reply: "Email envoyé via Outlook (Make).",
-      meta: { tool: "email", action: "send", ok: true, status: result.status },
-    });
+    return res.status(200).json({ reply: replyText, mode: "none" });
   } catch (err) {
     console.error("Erreur API /api/chat :", err);
     return res.status(500).json({ error: "Erreur interne de l’agent." });
