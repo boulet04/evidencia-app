@@ -53,25 +53,73 @@ async function getGlobalBasePrompt() {
   }
 }
 
+function isUuid(v) {
+  const s = safeStr(v).trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+}
+
 /**
- * Détermine si on est en intention "préparer" (draft) ou "envoyer" (send).
- * - DRAFT: "prépare / rédige / brouillon / draft" ET PAS "envoie/envoyer/envoi"
- * - SEND : contient "envoie/envoyer/envoi"
- * Sinon: normal
+ * Détermine l'intention email (draft vs send)
  */
 function detectEmailMode(userMsg) {
   const t = safeStr(userMsg).toLowerCase();
-
-  const hasSend =
-    /\b(envoie|envoyer|envoi|send)\b/i.test(t) ||
-    /\b(envoie-moi|envoie lui|envoie à)\b/i.test(t);
-
-  const hasDraft =
-    /\b(prépare|prepare|rédige|redige|brouillon|draft)\b/i.test(t);
-
+  const hasSend = /\b(envoie|envoyer|envoi)\b/i.test(t);
+  const hasDraft = /\b(prépare|prepare|rédige|redige|brouillon|draft)\b/i.test(t);
   if (hasSend) return "SEND";
   if (hasDraft) return "DRAFT";
   return "NORMAL";
+}
+
+/**
+ * Résolution robuste de l'agent :
+ * - accepte slug texte (emma)
+ * - accepte agentId uuid
+ * - accepte conversationId uuid -> lit conversations.agent_slug
+ */
+async function resolveAgent({ userId, agentIdentifier, conversationId }) {
+  let ident = safeStr(agentIdentifier).trim();
+
+  // 1) Si ident absent : tenter via conversationId
+  if (!ident && isUuid(conversationId)) {
+    const { data: conv, error: convErr } = await supabaseAdmin
+      .from("conversations")
+      .select("id, user_id, agent_slug")
+      .eq("id", conversationId)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!convErr && conv?.agent_slug) {
+      ident = safeStr(conv.agent_slug).trim();
+    }
+  }
+
+  if (!ident) {
+    return { agent: null, error: { status: 400, message: "Aucun agent sélectionné (agentSlug/agentId manquant)." } };
+  }
+
+  // 2) Essai par slug
+  const slug = safeStr(ident).trim().toLowerCase();
+  let { data: agent, error: agentErr } = await supabaseAdmin
+    .from("agents")
+    .select("id, slug, name, description")
+    .eq("slug", slug)
+    .maybeSingle();
+
+  if (!agentErr && agent) return { agent, error: null };
+
+  // 3) Si ident est UUID : essai par id
+  if (isUuid(ident)) {
+    const byId = await supabaseAdmin
+      .from("agents")
+      .select("id, slug, name, description")
+      .eq("id", ident)
+      .maybeSingle();
+
+    if (!byId.error && byId.data) return { agent: byId.data, error: null };
+  }
+
+  // 4) Agent introuvable
+  return { agent: null, error: { status: 404, message: `Agent introuvable (identifiant="${ident}").` } };
 }
 
 export default async function handler(req, res) {
@@ -102,31 +150,36 @@ export default async function handler(req, res) {
     }
     const userId = userData.user.id;
 
-    // IMPORTANT: accepter agentSlug OU agent (body ou query)
     const body = req.body || {};
-    const message = safeStr(body?.message).trim();
+    const userMsg = safeStr(body?.message).trim();
 
-    const rawSlug =
-      safeStr(body?.agentSlug) ||
-      safeStr(body?.agent) ||
-      safeStr(req.query?.agentSlug) ||
-      safeStr(req.query?.agent) ||
+    // IMPORTANT : tolérer plusieurs champs envoyés par le front
+    // (agentSlug / agent / agentId / conversationId)
+    const agentIdentifier =
+      body?.agentSlug ??
+      body?.agent ??
+      body?.agentId ??
+      req.query?.agentSlug ??
+      req.query?.agent ??
+      req.query?.agentId ??
       "";
 
-    const slug = safeStr(rawSlug).trim().toLowerCase();
-    if (!slug) return res.status(400).json({ error: "Aucun agent sélectionné." });
-    if (!message) return res.status(400).json({ error: "Message vide." });
+    const conversationId = body?.conversationId ?? body?.conversation_id ?? "";
 
-    const emailMode = detectEmailMode(message);
+    if (!userMsg) return res.status(400).json({ error: "Message vide." });
 
-    const { data: agent, error: agentErr } = await supabaseAdmin
-      .from("agents")
-      .select("id, slug, name, description")
-      .eq("slug", slug)
-      .maybeSingle();
+    // Résolution agent robuste
+    const { agent, error: resolveErr } = await resolveAgent({
+      userId,
+      agentIdentifier,
+      conversationId,
+    });
 
-    if (agentErr || !agent) return res.status(404).json({ error: "Agent introuvable." });
+    if (resolveErr) {
+      return res.status(resolveErr.status).json({ error: resolveErr.message });
+    }
 
+    // Vérifier assignation
     const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
       .select("user_id, agent_id")
@@ -137,6 +190,7 @@ export default async function handler(req, res) {
     if (assignErr) return res.status(500).json({ error: "Erreur assignation (user_agents)." });
     if (!assignment) return res.status(403).json({ error: "Accès interdit : agent non assigné." });
 
+    // Charger config user/agent
     const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -154,30 +208,28 @@ export default async function handler(req, res) {
       "";
 
     const basePrompt =
-      safeStr(agentPrompts?.[slug]?.systemPrompt).trim() ||
+      safeStr(agentPrompts?.[agent.slug]?.systemPrompt).trim() ||
       `Tu es ${agent.name}${agent.description ? `, ${agent.description}` : ""}.`;
 
     const globalBasePrompt = await getGlobalBasePrompt();
+    const emailMode = detectEmailMode(userMsg);
 
-    // Règles robustes anti-envoi accidentel :
-    // - En DRAFT: interdiction ABSOLUE de JSON {to,subject,body}
-    // - En SEND : JSON strict UNIQUEMENT, body en HTML
+    // Bloc email : empêcher l'envoi quand on veut juste préparer
     const emailSafetyBlock = `
 MODE_EMAIL=${emailMode}
 
 RÈGLES EMAIL (IMPORTANTES)
 - Si MODE_EMAIL=DRAFT :
-  - Tu DOIS préparer un brouillon lisible (texte/markdown) avec sections :
-    "Destinataire:", "Objet:", puis le corps en paragraphes séparés par une ligne vide.
-  - Interdiction totale de produire un JSON avec les clés exactes "to", "subject", "body".
+  - Tu DOIS préparer un brouillon lisible (texte/markdown) avec :
+    "Destinataire:", "Objet:", puis le corps en paragraphes.
+  - Interdiction TOTALE de produire un JSON contenant EXACTEMENT les clés "to", "subject", "body".
   - Termine par : "Si vous souhaitez l'envoyer, dites simplement : envoie."
 - Si MODE_EMAIL=SEND :
-  - Tu DOIS renvoyer UNIQUEMENT un JSON strict (aucun texte autour, pas de backticks) avec EXACTEMENT ces clés :
+  - Tu DOIS renvoyer UNIQUEMENT un JSON strict (aucun texte autour) avec EXACTEMENT :
     {"to":"...","subject":"...","body":"..."}
-  - "to" doit être une adresse email valide (une seule).
-  - "subject" doit être court et professionnel.
-  - "body" doit être du HTML (avec <p>, <br>, <strong> si utile) afin que l'email soit bien structuré dans Outlook.
-  - Ne mets JAMAIS de placeholders du type "[A COMPLETER]". Si une info manque, pose UNE question courte au lieu de générer le JSON.
+  - "to" = email valide (une seule).
+  - "body" = HTML (<p>, <br>, etc.) pour un rendu propre dans Outlook.
+  - Si info manquante, pose UNE question courte au lieu de générer le JSON.
 `;
 
     const finalSystemPrompt = [
@@ -195,7 +247,7 @@ RÈGLES EMAIL (IMPORTANTES)
       model: process.env.MISTRAL_MODEL || "mistral-small-latest",
       messages: [
         { role: "system", content: finalSystemPrompt },
-        { role: "user", content: message },
+        { role: "user", content: userMsg },
       ],
       temperature: 0.4,
     });
