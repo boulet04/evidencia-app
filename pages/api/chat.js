@@ -45,7 +45,6 @@ async function getGlobalBasePrompt() {
       .select("value")
       .eq("key", "base_system_prompt")
       .maybeSingle();
-
     if (error) return "";
     return safeStr(data?.value).trim();
   } catch {
@@ -53,12 +52,42 @@ async function getGlobalBasePrompt() {
   }
 }
 
+// IMPORTANT: on renvoie 200 pour les erreurs fonctionnelles afin de ne pas déclencher ton popup
+function okReply(res, reply) {
+  return res.status(200).json({ reply: safeStr(reply) });
+}
+
+function sanitizeAgentSlug(input) {
+  let s = safeStr(input).trim();
+
+  // cas: URL complète ou query string
+  // ex: "https://.../chat?agent=emma" ou "chat?agent=emma"
+  const m1 = s.match(/[?&]agent=([a-z0-9-_]+)/i);
+  if (m1?.[1]) s = m1[1];
+
+  // cas: "agent-emma"
+  s = s.replace(/^agent[-_]/i, "");
+
+  // ne garder que ce qui ressemble à un slug
+  s = s.toLowerCase().match(/[a-z0-9-_]+/)?.[0] || "";
+
+  return s;
+}
+
 function detectSendIntent(userMsg) {
   const t = safeStr(userMsg).toLowerCase();
-  return (
-    /\b(envoie|envoyer|envoi|expédie|expedie|envoie\s+le\s+mail|envoie\s+un\s+mail)\b/.test(t) &&
-    !/\b(ne\s+pas\s+envoyer|n[' ]?envoie\s+pas|sans\s+envoyer|prépare\s+sans\s+envoyer)\b/.test(t)
-  );
+  // "envoie" / "envoyer" etc, mais pas "prépare sans envoyer"
+  const wantsSend = /\b(envoie|envoyer|envoi|expédie|expedie)\b/.test(t);
+  const neg = /\b(ne\s+pas\s+envoyer|n[' ]?envoie\s+pas|sans\s+envoyer|prépare\s+sans\s+envoyer|prepare\s+sans\s+envoyer)\b/.test(t);
+  return wantsSend && !neg;
+}
+
+function detectDraftIntent(userMsg) {
+  const t = safeStr(userMsg).toLowerCase();
+  // "prépare", "rédige", "écris" + mention mail/courrier
+  const mailWord = /\b(mail|email|e-mail|courrier)\b/.test(t);
+  const draftWord = /\b(prépare|prepare|rédige|redige|écris|ecris|rédaction|brouillon)\b/.test(t);
+  return mailWord && draftWord;
 }
 
 function looksLikeHtml(s) {
@@ -84,36 +113,30 @@ function extractJsonObject(text) {
   const t = safeStr(text).trim();
   if (!t) return null;
 
-  // Cas 1: JSON pur
+  // JSON pur
   if (t.startsWith("{") && t.endsWith("}")) {
     try {
       return JSON.parse(t);
-    } catch {
-      /* ignore */
-    }
+    } catch {}
   }
 
-  // Cas 2: bloc ```json ... ```
+  // bloc ```json ... ```
   const fence = t.match(/```json\s*([\s\S]*?)\s*```/i) || t.match(/```\s*([\s\S]*?)\s*```/);
-  if (fence && fence[1]) {
+  if (fence?.[1]) {
     const inner = fence[1].trim();
     if (inner.startsWith("{") && inner.endsWith("}")) {
       try {
         return JSON.parse(inner);
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     }
   }
 
-  // Cas 3: tentative extraction naive { ... }
+  // extraction { ... }
   const curly = t.match(/\{[\s\S]*\}/);
-  if (curly && curly[0]) {
+  if (curly?.[0]) {
     try {
       return JSON.parse(curly[0]);
-    } catch {
-      /* ignore */
-    }
+    } catch {}
   }
 
   return null;
@@ -136,7 +159,12 @@ function getMakeWebhookUrl(ctxObj) {
   const fromEnv = safeStr(process.env.MAKE_WEBHOOK_URL).trim();
   if (fromEnv) candidates.push(fromEnv);
 
-  return candidates.find((u) => /^https:\/\/hook\.[a-z0-9-]+\.make\.com\/.+/i.test(u)) || candidates[0] || "";
+  // prioriser hook.make.com
+  return (
+    candidates.find((u) => /^https:\/\/hook\.[a-z0-9-]+\.make\.com\/.+/i.test(u)) ||
+    candidates[0] ||
+    ""
+  );
 }
 
 async function postToMake(url, payload) {
@@ -162,37 +190,36 @@ async function postToMake(url, payload) {
 async function loadConversationHistory(conversationId, userId, limit = 30) {
   if (!conversationId) return { conv: null, history: [] };
 
-  const { data: conv, error: convErr } = await supabaseAdmin
+  const { data: conv } = await supabaseAdmin
     .from("conversations")
     .select("id, user_id, agent_slug, title, archived, created_at")
     .eq("id", conversationId)
     .maybeSingle();
 
-  if (convErr || !conv) return { conv: null, history: [] };
-  if (conv.user_id !== userId) return { conv: null, history: [] };
+  if (!conv || conv.user_id !== userId) return { conv: null, history: [] };
 
-  const { data: msgs, error: msgErr } = await supabaseAdmin
+  const { data: msgs } = await supabaseAdmin
     .from("messages")
     .select("role, content, created_at")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true })
     .limit(Math.max(limit, 1));
 
-  if (msgErr || !Array.isArray(msgs)) return { conv, history: [] };
-
-  const history = msgs
-    .map((m) => ({
-      role: safeStr(m.role).toLowerCase(),
-      content: safeStr(m.content),
-    }))
-    .filter((m) => m.role === "user" || m.role === "assistant")
-    .slice(-limit);
+  const history = Array.isArray(msgs)
+    ? msgs
+        .map((m) => ({
+          role: safeStr(m.role).toLowerCase(),
+          content: safeStr(m.content),
+        }))
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .slice(-limit)
+    : [];
 
   return { conv, history };
 }
 
 function findLastEmailDraft(history) {
-  // On cherche le dernier message assistant qui contient un JSON {to,subject,body}
+  // dernier assistant contenant {to,subject,body}
   for (let i = history.length - 1; i >= 0; i--) {
     const m = history[i];
     if (m.role !== "assistant") continue;
@@ -216,8 +243,6 @@ export default async function handler(req, res) {
     if (!process.env.NEXT_PUBLIC_SUPABASE_URL) return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant sur Vercel." });
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant sur Vercel." });
 
-    const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
-
     const token = getBearerToken(req);
     if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
 
@@ -227,20 +252,21 @@ export default async function handler(req, res) {
 
     const { message, agentSlug, conversationId } = req.body || {};
     const userMsg = safeStr(message).trim();
-    if (!userMsg) return res.status(400).json({ error: "Message vide." });
-
-    const sendIntent = detectSendIntent(userMsg);
+    if (!userMsg) return okReply(res, "Message vide.");
 
     const { conv, history } = await loadConversationHistory(conversationId, userId, 30);
-    const slug = safeStr(agentSlug || conv?.agent_slug).trim().toLowerCase();
-    if (!slug) return res.status(400).json({ error: "Aucun agent sélectionné." });
 
-    const { data: agent, error: agentErr } = await supabaseAdmin
+    // slug depuis body OU depuis conversation
+    const slug = sanitizeAgentSlug(agentSlug || conv?.agent_slug);
+    if (!slug) return okReply(res, "Aucun agent sélectionné.");
+
+    const { data: agent } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
       .eq("slug", slug)
       .maybeSingle();
-    if (agentErr || !agent) return res.status(404).json({ error: "Agent introuvable." });
+
+    if (!agent) return okReply(res, `Agent introuvable (${slug}).`);
 
     const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
@@ -248,41 +274,41 @@ export default async function handler(req, res) {
       .eq("user_id", userId)
       .eq("agent_id", agent.id)
       .maybeSingle();
-    if (assignErr) return res.status(500).json({ error: "Erreur assignation (user_agents)." });
-    if (!assignment) return res.status(403).json({ error: "Accès interdit : agent non assigné." });
 
-    const { data: cfg, error: cfgErr } = await supabaseAdmin
+    if (assignErr) return res.status(500).json({ error: "Erreur assignation (user_agents)." });
+    if (!assignment) return okReply(res, "Accès interdit : agent non assigné.");
+
+    const { data: cfg } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
       .eq("user_id", userId)
       .eq("agent_id", agent.id)
       .maybeSingle();
-    const ctxObj = !cfgErr ? parseMaybeJson(cfg?.context) : null;
 
-    // 1) Si l'utilisateur dit "ENVOIE" -> on tente d'envoyer le dernier brouillon existant
+    const ctxObj = parseMaybeJson(cfg?.context) || {};
+
+    const sendIntent = detectSendIntent(userMsg);
+    const draftIntent = detectDraftIntent(userMsg);
+
+    // ENVOI (uniquement si "envoie")
     if (sendIntent) {
       const draft = findLastEmailDraft(history);
       if (!draft) {
-        return res.status(200).json({
-          reply: "Je n’ai pas de brouillon d’email prêt à envoyer dans cette conversation. Demandez d’abord : « prépare un mail à … ».",
-        });
+        return okReply(res, "Je n’ai pas de brouillon prêt à envoyer dans cette conversation. Demandez d’abord : « prépare un mail à ... ».");
       }
 
-      const makeUrl = getMakeWebhookUrl(ctxObj || {});
-      if (!makeUrl) {
-        return res.status(500).json({
-          error: "Aucune URL Make webhook configurée (context ou MAKE_WEBHOOK_URL).",
-        });
-      }
+      const makeUrl = getMakeWebhookUrl(ctxObj);
+      if (!makeUrl) return res.status(500).json({ error: "Aucune URL Make webhook configurée (context ou MAKE_WEBHOOK_URL)." });
 
       let body = draft.body;
       if (!looksLikeHtml(body)) body = plainToHtml(body);
 
       await postToMake(makeUrl, { to: draft.to, subject: draft.subject, body });
-      return res.status(200).json({ reply: "Email envoyé via Outlook (Make)." });
+      return okReply(res, "Email envoyé via Outlook (Make).");
     }
 
-    // 2) Sinon: on génère un brouillon (JSON strict) stockable, mais NON envoyé
+    const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
+
     const globalBasePrompt = await getGlobalBasePrompt();
     const basePrompt =
       safeStr(agentPrompts?.[slug]?.systemPrompt).trim() ||
@@ -295,28 +321,28 @@ export default async function handler(req, res) {
       safeStr(ctxObj?.customPrompt).trim() ||
       "";
 
-    const serverSafety = `
+    // Règles email: si on est en "prépare", on force BROUILLON JSON ONLY, sinon conversation normale
+    const emailDraftRules = `
 EMAIL - MODE BROUILLON (SANS ENVOI)
-- Tu dois préparer un brouillon d'email, mais tu n'envoies rien.
+- Tu prépares un brouillon, tu n'envoies rien.
 - Tu réponds UNIQUEMENT par un JSON strict, sans texte autour, avec exactement:
   { "to": "<email>", "subject": "<objet>", "body": "<HTML>" }
-- body doit être un HTML simple (<p>, <br/>).
-- Si le destinataire n'est pas clair, mets "to" à "" et demande UNE question courte ensuite (mais toujours JSON strict, en mettant un champ subject/body quand même).
+- body doit être du HTML simple (<p>, <br/>), avec des paragraphes.
+- Tu ne mets pas de placeholders type "[DATE A COMPLETER]" : si une info manque, tu fais au mieux sans la mettre.
 `;
 
     const systemPrompt = [
       globalBasePrompt ? `INSTRUCTIONS GÉNÉRALES\n${globalBasePrompt}` : "",
       basePrompt,
       customPrompt ? `INSTRUCTIONS PERSONNALISÉES\n${customPrompt}` : "",
-      serverSafety,
+      draftIntent ? emailDraftRules : "",
     ]
       .filter(Boolean)
       .join("\n\n");
 
     const messages = [{ role: "system", content: systemPrompt }];
-    for (const m of history) {
-      messages.push({ role: m.role, content: m.content });
-    }
+    // mémoire conversation
+    for (const m of history) messages.push({ role: m.role, content: m.content });
     messages.push({ role: "user", content: userMsg });
 
     const completion = await mistral.chat.complete({
@@ -325,26 +351,34 @@ EMAIL - MODE BROUILLON (SANS ENVOI)
       temperature: 0.7,
     });
 
-    const rawReply = completion?.choices?.[0]?.message?.content?.trim() || "";
+    const rawReply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
 
-    // Normalisation HTML si besoin
-    const obj = extractJsonObject(rawReply);
-    if (obj) {
+    // si c'est un draft: on normalise en JSON pur
+    if (draftIntent) {
+      const obj = extractJsonObject(rawReply);
+      if (!obj) {
+        // on évite de casser l'UI: on renvoie un pseudo-brouillon minimal
+        const minimal = {
+          to: "",
+          subject: "Objet à préciser",
+          body: "<p>Indique-moi le destinataire (email) et l’objet exact, puis je rédige le brouillon.</p>",
+        };
+        return okReply(res, JSON.stringify(minimal));
+      }
+
       let body = safeStr(obj.body).trim();
       if (body && !looksLikeHtml(body)) body = plainToHtml(body);
+
       const normalized = {
         to: safeStr(obj.to).trim(),
         subject: safeStr(obj.subject).trim(),
         body,
       };
-      return res.status(200).json({ reply: JSON.stringify(normalized) });
+      return okReply(res, JSON.stringify(normalized));
     }
 
-    // Si le modèle n'a pas respecté JSON
-    return res.status(200).json({
-      reply:
-        "Je n’ai pas pu produire un brouillon structuré. Reformule en précisant: destinataire, objet, contenu. Exemple: « prépare un mail à prenom.nom@domaine.com, objet: ..., contenu: ... »",
-    });
+    // conversation normale
+    return okReply(res, rawReply);
   } catch (err) {
     console.error("Erreur API /api/chat :", err);
     return res.status(500).json({ error: "Erreur interne de l’agent." });
