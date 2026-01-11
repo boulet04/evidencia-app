@@ -11,20 +11,40 @@ function getBearerToken(req) {
   return m ? m[1] : "";
 }
 
+/**
+ * Extrait le prénom après une ligne du type :
+ * - tu travaille pour "Simon"
+ * - tu travailles pour Simon
+ * - tu travail pour Simon   (variante fautive mais présente)
+ * Tolère : guillemets, espaces, ponctuation.
+ */
 function extractFirstNameFromPrompt(systemPrompt) {
   const p = safeStr(systemPrompt);
 
-  // Exemples acceptés :
-  // - tu travaille pour "Simon"
-  // - tu travailles pour 'Chloé'
-  // - tu travailles pour Simon
-  const reQuoted = /tu\s+travaill(?:e|es)\s+pour\s+["“']([^"”']+)["”']/i;
+  // 1) avec guillemets
+  const reQuoted =
+    /tu\s+(?:travail|travaill(?:e|es))\s+pour\s+["“'‘]([^"”'’]+)["”'’]/i;
   const m1 = p.match(reQuoted);
   if (m1?.[1]) return m1[1].trim();
 
-  const reBare = /tu\s+travaill(?:e|es)\s+pour\s+([A-Za-zÀ-ÖØ-öø-ÿ-]+)\b/i;
+  // 2) sans guillemets (prend le premier “mot prénom”, stoppe à ponctuation/fin)
+  const reBare =
+    /tu\s+(?:travail|travaill(?:e|es))\s+pour\s+([A-Za-zÀ-ÖØ-öø-ÿ-]+)\b/i;
   const m2 = p.match(reBare);
   if (m2?.[1]) return m2[1].trim();
+
+  // 3) fallback plus permissif (jusqu'à fin de ligne, puis on prend le premier token)
+  const reLine =
+    /tu\s+(?:travail|travaill(?:e|es))\s+pour\s+([^\n\r]+)/i;
+  const m3 = p.match(reLine);
+  if (m3?.[1]) {
+    const cleaned = m3[1]
+      .replace(/[.,;:!?(){}\[\]]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const firstToken = cleaned.split(" ")[0] || "";
+    return firstToken.trim();
+  }
 
   return "";
 }
@@ -100,7 +120,7 @@ export default async function handler(req, res) {
 
     if (agentErr || !agent) return res.status(404).json({ error: "Agent introuvable." });
 
-    // Charger prompt personnalisé (pour extraire prénom)
+    // Charger prompt personnalisé (source prioritaire pour le prénom)
     const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt")
@@ -111,9 +131,14 @@ export default async function handler(req, res) {
     if (cfgErr) return res.status(500).json({ error: "Erreur lecture client_agent_configs." });
 
     let firstName = extractFirstNameFromPrompt(cfg?.system_prompt || "");
-    if (!firstName) firstName = firstNameFromEmail(userEmail) || "";
 
-    const greeting = `Bonjour ${firstName || ""}${firstName ? ", " : ""}je suis ${agent.name || agentSlug}, comment puis-je vous aider ?`;
+    // Fallback uniquement si la ligne n’existe pas / prompt vide
+    if (!firstName) firstName = firstNameFromEmail(userEmail);
+
+    const agentDisplayName = agent.name || agentSlug;
+    const greeting = firstName
+      ? `Bonjour ${firstName}, je suis ${agentDisplayName}, comment puis-je vous aider ?`
+      : `Bonjour, je suis ${agentDisplayName}, comment puis-je vous aider ?`;
 
     // Insert greeting as assistant message
     const { error: insErr } = await supabaseAdmin.from("messages").insert({
@@ -125,7 +150,7 @@ export default async function handler(req, res) {
 
     if (insErr) return res.status(500).json({ error: "Erreur insertion message d'accueil." });
 
-    return res.status(200).json({ ok: true, inserted: true });
+    return res.status(200).json({ ok: true, inserted: true, firstNameFound: Boolean(firstName) });
   } catch (e) {
     return res.status(500).json({ error: "Server error", details: safeStr(e?.message || e) });
   }
