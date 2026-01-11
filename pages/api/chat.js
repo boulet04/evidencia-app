@@ -15,14 +15,14 @@ const supabaseAdmin = createClient(
   { auth: { persistSession: false } }
 );
 
-function safeStr(v) {
-  return (v ?? "").toString();
-}
-
 function getBearerToken(req) {
   const h = req.headers?.authorization || "";
   const m = h.match(/^Bearer\s+(.+)$/i);
   return m ? m[1] : "";
+}
+
+function safeStr(v) {
+  return (v ?? "").toString();
 }
 
 function parseMaybeJson(v) {
@@ -38,106 +38,67 @@ function parseMaybeJson(v) {
   return null;
 }
 
-function pickAgentSlug(reqBody, reqQuery) {
-  const fromBody =
-    safeStr(reqBody?.agentSlug).trim() ||
-    safeStr(reqBody?.agent).trim() ||
-    safeStr(reqBody?.slug).trim() ||
-    safeStr(reqBody?.agent_slug).trim();
-
-  const fromQuery =
-    safeStr(reqQuery?.agent).trim() ||
-    safeStr(reqQuery?.agentSlug).trim() ||
-    safeStr(reqQuery?.slug).trim();
-
-  return (fromBody || fromQuery).toLowerCase();
-}
-
-// ✅ Accepte "ENVOIE", "oui envoie", "ok envoie", "vas-y envoie", "envoie le mail", etc.
 function isSendConfirmation(text) {
   const t = safeStr(text).trim().toLowerCase();
-
-  // Eviter les faux positifs du type "prépare un mail et envoie-le après"
-  // Ici on veut une intention claire d'envoi maintenant.
-  const startsLikeConfirmation = /^(?:oui|ok|d'accord|dac|vas-y|vas y|go|parfait|super)\s+/.test(t);
-
-  const normalized = t.replace(/\s+/g, " ").trim();
-
-  // Cas 1: message = "envoie", "envoyer", "envoie le mail", "envoie à ...", etc.
-  const direct =
-    /^(envoi(e|er)|envoyer)\b/.test(normalized) ||
-    /^(envoi(e|er)|envoyer)\s+(le|la|les|ce|cet|cette)\b/.test(normalized) ||
-    /^(envoi(e|er)|envoyer)\s+mail\b/.test(normalized);
-
-  // Cas 2: "oui envoie ..."
-  const confirmPlusSend =
-    startsLikeConfirmation && /^(?:oui|ok|d'accord|dac|vas-y|vas y|go|parfait|super)\s+(envoi(e|er)|envoyer)\b/.test(normalized);
-
-  return direct || confirmPlusSend;
+  // confirmation volontairement stricte
+  return /^(ok\s*)?(oui\s*)?(envoi(e|er)?|envoie|envoyer)\s*!*$/i.test(t);
 }
 
-function extractFirstJsonObject(text) {
-  const raw = safeStr(text).trim();
-  if (!raw) return null;
+function stripMakeJsonBlocks(s) {
+  const str = safeStr(s);
+  return str.replace(/<make_json[\s\S]*?<\/make_json>/gi, "").trim();
+}
 
-  const m = raw.match(/```json\s*([\s\S]*?)\s*```/i);
-  if (m && m[1]) {
-    try {
-      return JSON.parse(m[1]);
-    } catch {
-      // continue
-    }
+function extractMakeJsonBlock(s) {
+  const str = safeStr(s);
+  const m = str.match(/<make_json[^>]*>([\s\S]*?)<\/make_json>/i);
+  if (!m) return null;
+  const raw = m[1].trim();
+  try {
+    const obj = JSON.parse(raw);
+    return obj && typeof obj === "object" ? obj : null;
+  } catch {
+    return null;
   }
-
-  if (raw.startsWith("{") && raw.endsWith("}")) {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      // continue
-    }
-  }
-
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start !== -1 && end !== -1 && end > start) {
-    const slice = raw.slice(start, end + 1);
-    try {
-      return JSON.parse(slice);
-    } catch {
-      return null;
-    }
-  }
-
-  return null;
 }
 
-function normalizeEmailPayload(obj) {
-  if (!obj || typeof obj !== "object") return null;
-  const to = safeStr(obj.to).trim();
-  const subject = safeStr(obj.subject).trim();
-  const body = safeStr(obj.body).trim();
-  if (!to || !subject || !body) return null;
-  return { to, subject, body };
+function looksLikeHtml(s) {
+  const t = safeStr(s);
+  return /<\/?(p|br|div|span|strong|em|ul|ol|li|table|tr|td|h1|h2|h3|html|body)\b/i.test(t);
 }
 
-function getMakeWebhookUrl(ctxObj) {
-  const direct =
-    safeStr(ctxObj?.make_webhook_url).trim() ||
-    safeStr(ctxObj?.makeWebhookUrl).trim() ||
-    safeStr(ctxObj?.make_webhook).trim() ||
-    safeStr(ctxObj?.webhook_url).trim() ||
-    safeStr(ctxObj?.workflow_url).trim();
-
-  const nested =
-    safeStr(ctxObj?.make?.webhook_url).trim() ||
-    safeStr(ctxObj?.make?.webhookUrl).trim();
-
-  return direct || nested || "";
+function escapeHtml(s) {
+  return safeStr(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
-async function postToMakeWebhook(url, payload) {
+function toHtmlParagraphs(plain) {
+  const t = safeStr(plain).trim();
+  if (!t) return "";
+  const blocks = t.split(/\n{2,}/).map((b) => b.trim()).filter(Boolean);
+  return blocks
+    .map((b) => {
+      const lines = b.split("\n").map((l) => escapeHtml(l));
+      return `<p>${lines.join("<br/>")}</p>`;
+    })
+    .join("");
+}
+
+function isValidEmail(email) {
+  const e = safeStr(email).trim();
+  // Regex simple mais efficace pour validation client
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+}
+
+async function postToMake(payload) {
+  const url = process.env.MAKE_WEBHOOK_URL;
+  if (!url) throw new Error("MAKE_WEBHOOK_URL manquant (Vercel).");
+
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeout = setTimeout(() => controller.abort(), 20000);
 
   try {
     const r = await fetch(url, {
@@ -147,31 +108,103 @@ async function postToMakeWebhook(url, payload) {
       signal: controller.signal,
     });
 
-    const txt = await r.text().catch(() => "");
-    if (!r.ok) return { ok: false, status: r.status, body: txt };
-    return { ok: true, status: r.status, body: txt };
-  } catch (e) {
-    return { ok: false, status: 0, body: safeStr(e?.message || e) };
+    const ct = r.headers.get("content-type") || "";
+    const text = await r.text().catch(() => "");
+
+    let parsed = null;
+    if (ct.includes("application/json")) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = null;
+      }
+    }
+
+    if (!r.ok) {
+      const msg =
+        parsed?.details ||
+        parsed?.message ||
+        text ||
+        `HTTP ${r.status}`;
+      throw new Error(msg.toString().slice(0, 500));
+    }
+
+    // si Make renvoie ok:false en 200 (certains préfèrent), on le gère aussi
+    if (parsed && parsed.ok === false) {
+      const msg = (parsed.details || parsed.message || "Erreur Make").toString().slice(0, 500);
+      throw new Error(msg);
+    }
+
+    return { ok: true, data: parsed || { ok: true } };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function getGlobalBasePrompt() {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("app_settings")
-      .select("value")
-      .eq("key", "base_system_prompt")
-      .maybeSingle();
-    if (error) return "";
-    return safeStr(data?.value).trim();
-  } catch {
-    return "";
-  }
+async function getConversationById(conversationId) {
+  if (!conversationId) return null;
+  const { data, error } = await supabaseAdmin
+    .from("conversations")
+    .select("id, user_id, agent_slug, title, archived, created_at")
+    .eq("id", conversationId)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data;
 }
 
-async function loadConversationHistory(conversationId, limit = 24) {
+async function getLatestConversationForUserAndAgent(userId, agentSlug) {
+  const { data, error } = await supabaseAdmin
+    .from("conversations")
+    .select("id, user_id, agent_slug, title, archived, created_at")
+    .eq("user_id", userId)
+    .eq("agent_slug", agentSlug)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error) return null;
+  return data?.[0] || null;
+}
+
+function buildTitleFromFirstMessage(msg) {
+  const stop = new Set(["bonjour", "salut", "hello", "coucou", "bonsoir", "hey", "yo"]);
+  const words = safeStr(msg)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s'-]+/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((w) => !stop.has(w));
+
+  const picked = words.slice(0, 5);
+  const title = picked.join(" ").trim();
+  return title ? title.charAt(0).toUpperCase() + title.slice(1) : "Nouvelle conversation";
+}
+
+async function ensureConversation({ userId, agentSlug, conversationId, firstMessage }) {
+  const existing = await getConversationById(conversationId);
+  if (existing) {
+    if (existing.user_id !== userId) return null;
+    return existing;
+  }
+
+  if (agentSlug) {
+    const latest = await getLatestConversationForUserAndAgent(userId, agentSlug);
+    if (latest && latest.user_id === userId && !latest.archived) return latest;
+  }
+
+  if (!agentSlug) return null;
+
+  const title = buildTitleFromFirstMessage(firstMessage);
+  const { data, error } = await supabaseAdmin
+    .from("conversations")
+    .insert([{ user_id: userId, agent_slug: agentSlug, title, archived: false }])
+    .select("id, user_id, agent_slug, title, archived, created_at")
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return data;
+}
+
+async function loadConversationMessages(conversationId, limit = 40) {
   if (!conversationId) return [];
   const { data, error } = await supabaseAdmin
     .from("messages")
@@ -180,78 +213,159 @@ async function loadConversationHistory(conversationId, limit = 24) {
     .order("created_at", { ascending: true })
     .limit(limit);
 
-  if (error || !Array.isArray(data)) return [];
-  return data
-    .map((m) => ({ role: safeStr(m.role).trim() || "user", content: safeStr(m.content) }))
-    .filter((m) => m.content.trim().length > 0);
+  if (error || !data) return [];
+  return data;
 }
 
-// ✅ Cherche le dernier JSON email valide dans les N derniers messages assistant
-async function findLastAssistantEmailPayload(conversationId, lookback = 20) {
-  if (!conversationId) return null;
+async function storeMessage(conversationId, role, content) {
+  if (!conversationId) return;
+  await supabaseAdmin.from("messages").insert([
+    { conversation_id: conversationId, role, content: safeStr(content) },
+  ]);
+}
 
+async function getLatestPendingEmail(conversationId) {
   const { data, error } = await supabaseAdmin
     .from("messages")
     .select("content, created_at")
     .eq("conversation_id", conversationId)
-    .eq("role", "assistant")
+    .eq("role", "system")
+    .like("content", "__PENDING_EMAIL__%")
     .order("created_at", { ascending: false })
-    .limit(lookback);
+    .limit(1);
 
-  if (error || !Array.isArray(data)) return null;
+  if (error) return null;
+  const row = data?.[0];
+  if (!row?.content) return null;
 
-  for (const row of data) {
-    const content = safeStr(row?.content);
-    const jsonObj = extractFirstJsonObject(content);
-    const payload = normalizeEmailPayload(jsonObj);
-    if (payload) return payload;
-  }
+  const raw = safeStr(row.content).replace(/^__PENDING_EMAIL__/, "");
+  const obj = parseMaybeJson(raw);
+  return obj && typeof obj === "object" ? obj : null;
+}
 
-  return null;
+function validateEmailPayload(p) {
+  const missing = [];
+  const to = safeStr(p?.to).trim();
+  const subject = safeStr(p?.subject).trim();
+  const body = safeStr(p?.body).trim();
+
+  if (!to) missing.push("adresse email destinataire");
+  else if (!isValidEmail(to)) missing.push("adresse email destinataire (format invalide)");
+
+  if (!subject) missing.push("objet");
+  if (!body) missing.push("contenu du mail");
+
+  return { ok: missing.length === 0, missing, normalized: { to, subject, body } };
 }
 
 export default async function handler(req, res) {
   setCors(res);
+
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
 
   try {
-    if (!process.env.MISTRAL_API_KEY) {
-      return res.status(500).json({ error: "MISTRAL_API_KEY manquant sur Vercel." });
-    }
+    if (!process.env.MISTRAL_API_KEY) return res.status(500).json({ error: "MISTRAL_API_KEY manquant sur Vercel." });
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant sur Vercel." });
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant sur Vercel." });
 
     const token = getBearerToken(req);
-    if (!token) return res.status(200).json({ reply: "Non authentifié (token manquant)." });
+    if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
 
     const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-    if (userErr || !userData?.user) return res.status(200).json({ reply: "Session invalide. Reconnectez-vous." });
+    if (userErr || !userData?.user) return res.status(401).json({ error: "Session invalide. Reconnectez-vous." });
     const userId = userData.user.id;
 
     const body = req.body || {};
     const userMsg = safeStr(body.message).trim();
-    const conversationId = safeStr(body.conversationId).trim();
-    const slug = pickAgentSlug(body, req.query);
+    const providedSlug = safeStr(body.agentSlug).trim().toLowerCase();
+    const providedConversationId = safeStr(body.conversationId).trim();
 
-    if (!slug) return res.status(200).json({ reply: "Aucun agent sélectionné." });
-    if (!userMsg) return res.status(200).json({ reply: "Message vide." });
+    if (!userMsg) return res.status(400).json({ error: "Message vide." });
 
+    // Déduire conversation/agent si possible
+    let conversation = await getConversationById(providedConversationId);
+    if (conversation && conversation.user_id !== userId) return res.status(403).json({ error: "Accès interdit : conversation invalide." });
+
+    let slug = providedSlug;
+    if (!slug && conversation?.agent_slug) slug = safeStr(conversation.agent_slug).trim().toLowerCase();
+
+    if (!slug && !conversation) return res.status(400).json({ error: "Aucun agent sélectionné." });
+
+    // Agent
     const { data: agent, error: agentErr } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
       .eq("slug", slug)
       .maybeSingle();
+    if (agentErr || !agent) return res.status(404).json({ error: "Agent introuvable." });
 
-    if (agentErr || !agent) return res.status(200).json({ reply: "Agent introuvable." });
-
-    const { data: assignment } = await supabaseAdmin
+    // Assignation
+    const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
       .select("user_id, agent_id")
       .eq("user_id", userId)
       .eq("agent_id", agent.id)
       .maybeSingle();
+    if (assignErr) return res.status(500).json({ error: "Erreur assignation (user_agents)." });
+    if (!assignment) return res.status(403).json({ error: "Accès interdit : agent non assigné." });
 
-    if (!assignment) return res.status(200).json({ reply: "Accès interdit : agent non assigné." });
+    // Conversation
+    if (!conversation) {
+      conversation = await ensureConversation({
+        userId,
+        agentSlug: slug,
+        conversationId: providedConversationId || "",
+        firstMessage: userMsg,
+      });
+    }
+    if (!conversation) return res.status(500).json({ error: "Impossible de créer/récupérer la conversation." });
+    const conversationId = conversation.id;
 
+    // Stocker le message user côté serveur (si votre front ne le fait pas déjà)
+    await storeMessage(conversationId, "user", userMsg);
+
+    // CONFIRMATION "ENVOIE" => envoyer le pending via Make
+    if (isSendConfirmation(userMsg)) {
+      const pending = await getLatestPendingEmail(conversationId);
+      if (!pending) {
+        const reply = "Je n’ai pas de brouillon d’email en attente dans cette conversation.";
+        await storeMessage(conversationId, "assistant", reply);
+        return res.status(200).json({ reply, conversationId });
+      }
+
+      const v = validateEmailPayload(pending);
+      if (!v.ok) {
+        const reply =
+          `Je ne peux pas l’envoyer : il manque ou est invalide : ${v.missing.join(", ")}.\n` +
+          `Dites-moi ces éléments et je régénère le brouillon.`;
+        await storeMessage(conversationId, "assistant", reply);
+        return res.status(200).json({ reply, conversationId });
+      }
+
+      const sendPayload = {
+        to: v.normalized.to,
+        subject: v.normalized.subject,
+        body: looksLikeHtml(v.normalized.body) ? v.normalized.body : toHtmlParagraphs(v.normalized.body),
+      };
+
+      try {
+        const makeRes = await postToMake(sendPayload);
+
+        const reply = `Email envoyé via Outlook (Make) ✓`;
+        await storeMessage(conversationId, "assistant", reply);
+        // Optionnel : tracer le statut pour audit
+        await storeMessage(conversationId, "system", `__MAKE_STATUS__${JSON.stringify(makeRes.data || { ok: true })}`);
+
+        return res.status(200).json({ reply, conversationId, make: makeRes.data || { ok: true } });
+      } catch (e) {
+        const reply = `Échec d’envoi (Make) : ${safeStr(e.message || e).slice(0, 300)}`;
+        await storeMessage(conversationId, "assistant", reply);
+        return res.status(200).json({ reply, conversationId, make: { ok: false, error: safeStr(e.message || e) } });
+      }
+    }
+
+    // Prompt perso
     const { data: cfg } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -259,47 +373,7 @@ export default async function handler(req, res) {
       .eq("agent_id", agent.id)
       .maybeSingle();
 
-    const ctxObj = parseMaybeJson(cfg?.context) || {};
-    const makeUrl = getMakeWebhookUrl(ctxObj);
-
-    // -------------------- MODE ENVOI (sans LLM) --------------------
-    if (isSendConfirmation(userMsg)) {
-      if (!conversationId) {
-        return res.status(200).json({
-          reply: "Je ne peux pas envoyer sans conversationId. Le front doit l’envoyer à /api/chat.",
-        });
-      }
-      if (!makeUrl) {
-        return res.status(200).json({
-          reply: "Webhook Make absent. Mets-le dans le context JSON: make_webhook_url.",
-        });
-      }
-
-      const payload = await findLastAssistantEmailPayload(conversationId, 30);
-      if (!payload) {
-        return res.status(200).json({
-          reply:
-            "Je ne trouve pas de brouillon JSON (to/subject/body) récent dans cette conversation. Demande d’abord “Prépare un mail à …”, puis confirme l’envoi.",
-        });
-      }
-
-      const send = await postToMakeWebhook(makeUrl, payload);
-      if (!send.ok) {
-        return res.status(200).json({
-          reply: `Échec d’envoi via Make (HTTP ${send.status}). Détail: ${send.body || "—"}`,
-        });
-      }
-
-      return res.status(200).json({ reply: "Email envoyé via Outlook (Make)." });
-    }
-
-    // -------------------- MODE CHAT (avec historique) --------------------
-    const globalBasePrompt = await getGlobalBasePrompt();
-
-    const basePrompt =
-      safeStr(agentPrompts?.[slug]?.systemPrompt).trim() ||
-      `Tu es ${agent.name}${agent.description ? `, ${agent.description}` : ""}.`;
-
+    const ctxObj = parseMaybeJson(cfg?.context);
     const customPrompt =
       safeStr(cfg?.system_prompt).trim() ||
       safeStr(ctxObj?.prompt).trim() ||
@@ -307,43 +381,80 @@ export default async function handler(req, res) {
       safeStr(ctxObj?.customPrompt).trim() ||
       "";
 
-    const hardEmailRule = `
-RÈGLE EMAIL (INTÉGRATION MAKE)
-- Tu peux préparer des emails (brouillon), mais TU N’ENVOIES JAMAIS tant que l’utilisateur ne confirme pas explicitement l’envoi (ex: "ENVOIE", "oui envoie", "ok envoie", "vas-y envoie").
-- Quand on te demande de "préparer" ou "rédiger" un email: tu fournis (1) un brouillon lisible, puis (2) un bloc JSON strict dans un bloc \`\`\`json\`\`\` avec exactement: { "to": "...", "subject": "...", "body": "..." }.
-- "body" doit être du HTML simple: <p>..., <br/>, <ul><li>...
-- Si le destinataire manque, mets "to": "" et demande le destinataire.
-`.trim();
+    const basePrompt =
+      safeStr(agentPrompts?.[slug]?.systemPrompt).trim() ||
+      `Tu es ${agent.name}${agent.description ? `, ${agent.description}` : ""}.`;
 
-    const systemPrompt = [
-      globalBasePrompt ? `INSTRUCTIONS GÉNÉRALES\n${globalBasePrompt}` : "",
-      hardEmailRule,
+    // RÈGLES email : collecte → brouillon → confirmation → envoi (jamais avant)
+    const emailRule = `
+WORKFLOW EMAIL — STRICT :
+1) Collecte d’abord les informations. Champs obligatoires : (a) email destinataire, (b) objet, (c) contenu du mail.
+   Champs conseillés : nom/prénom ou société du destinataire, signature, ton, dates, pièces jointes.
+2) S’il manque UN champ obligatoire, pose des questions ciblées (liste courte) et NE RÉDIGE PAS le JSON.
+3) Quand tu as tous les champs obligatoires :
+   - Produis un BROUILLON lisible (bien structuré).
+   - Termine par : "Souhaitez-vous que je l’envoie ? Répondez ENVOIE."
+   - À la toute fin, ajoute un bloc EXACT :
+     <make_json>{"to":"...","subject":"...","body":"...HTML..."}</make_json>
+4) Tu n’envoies JAMAIS sans confirmation explicite "ENVOIE".
+5) Le champ body doit être en HTML structuré : <p>...</p> et <br/> si besoin.
+6) Le bloc <make_json> ne doit contenir QUE les clés : to, subject, body.`;
+
+    const finalSystemPrompt = [
       basePrompt,
-      customPrompt ? `INSTRUCTIONS PERSONNALISÉES\n${customPrompt}` : "",
+      customPrompt ? `INSTRUCTIONS PERSONNALISÉES :\n${customPrompt}` : "",
+      emailRule,
     ]
       .filter(Boolean)
       .join("\n\n");
 
-    const history = await loadConversationHistory(conversationId, 30);
-
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...history.filter((m) => m.role === "user" || m.role === "assistant"),
-      { role: "user", content: userMsg },
-    ];
+    // Historique pour cohérence
+    const historyRows = await loadConversationMessages(conversationId, 40);
+    const history = historyRows
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: stripMakeJsonBlocks(m.content) }));
 
     const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
 
     const completion = await mistral.chat.complete({
       model: process.env.MISTRAL_MODEL || "mistral-small-latest",
-      messages,
+      messages: [{ role: "system", content: finalSystemPrompt }, ...history],
       temperature: 0.7,
     });
 
-    const reply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
-    return res.status(200).json({ reply });
+    const rawReply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
+
+    // Extraction du <make_json> (si présent)
+    const makeObj = extractMakeJsonBlock(rawReply);
+
+    // Préparer réponse visible
+    let reply = stripMakeJsonBlocks(rawReply);
+
+    if (makeObj) {
+      // Validation stricte avant de stocker pending
+      const v = validateEmailPayload(makeObj);
+      if (!v.ok) {
+        // On empêche l’envoi futur et on force une demande de compléments
+        reply =
+          `${reply}\n\n` +
+          `Je ne peux pas préparer l’envoi car il manque ou est invalide : ${v.missing.join(", ")}.\n` +
+          `Donnez-moi ces éléments et je mets à jour le brouillon.`;
+      } else {
+        const pending = {
+          to: v.normalized.to,
+          subject: v.normalized.subject,
+          body: looksLikeHtml(v.normalized.body) ? v.normalized.body : toHtmlParagraphs(v.normalized.body),
+        };
+        await storeMessage(conversationId, "system", `__PENDING_EMAIL__${JSON.stringify(pending)}`);
+      }
+    }
+
+    await storeMessage(conversationId, "assistant", reply);
+
+    return res.status(200).json({ reply, conversationId });
   } catch (err) {
     console.error("Erreur API /api/chat :", err);
     return res.status(500).json({ error: "Erreur interne de l’agent." });
   }
 }
+
