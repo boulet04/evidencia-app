@@ -38,6 +38,11 @@ function parseMaybeJson(v) {
   return null;
 }
 
+function isUuid(v) {
+  const s = safeStr(v).trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+}
+
 async function getGlobalBasePrompt() {
   try {
     const { data, error } = await supabaseAdmin
@@ -53,52 +58,36 @@ async function getGlobalBasePrompt() {
   }
 }
 
-function isUuid(v) {
-  const s = safeStr(v).trim();
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
-}
-
-/**
- * Détermine l'intention email (draft vs send)
- */
 function detectEmailMode(userMsg) {
   const t = safeStr(userMsg).toLowerCase();
-  const hasSend = /\b(envoie|envoyer|envoi)\b/i.test(t);
-  const hasDraft = /\b(prépare|prepare|rédige|redige|brouillon|draft)\b/i.test(t);
-  if (hasSend) return "SEND";
-  if (hasDraft) return "DRAFT";
+  const send = /\b(envoie|envoyer|envoi)\b/.test(t);
+  const draft = /\b(prépare|prepare|rédige|redige|brouillon|draft)\b/.test(t);
+  if (send) return "SEND";
+  if (draft) return "DRAFT";
   return "NORMAL";
 }
 
-/**
- * Résolution robuste de l'agent :
- * - accepte slug texte (emma)
- * - accepte agentId uuid
- * - accepte conversationId uuid -> lit conversations.agent_slug
- */
 async function resolveAgent({ userId, agentIdentifier, conversationId }) {
   let ident = safeStr(agentIdentifier).trim();
 
-  // 1) Si ident absent : tenter via conversationId
+  // fallback via conversationId
   if (!ident && isUuid(conversationId)) {
     const { data: conv, error: convErr } = await supabaseAdmin
       .from("conversations")
-      .select("id, user_id, agent_slug")
+      .select("agent_slug")
       .eq("id", conversationId)
       .eq("user_id", userId)
       .maybeSingle();
-
-    if (!convErr && conv?.agent_slug) {
-      ident = safeStr(conv.agent_slug).trim();
-    }
+    if (!convErr && conv?.agent_slug) ident = safeStr(conv.agent_slug).trim();
   }
 
   if (!ident) {
     return { agent: null, error: { status: 400, message: "Aucun agent sélectionné (agentSlug/agentId manquant)." } };
   }
 
-  // 2) Essai par slug
-  const slug = safeStr(ident).trim().toLowerCase();
+  const slug = safeStr(ident).toLowerCase();
+
+  // by slug
   let { data: agent, error: agentErr } = await supabaseAdmin
     .from("agents")
     .select("id, slug, name, description")
@@ -107,19 +96,102 @@ async function resolveAgent({ userId, agentIdentifier, conversationId }) {
 
   if (!agentErr && agent) return { agent, error: null };
 
-  // 3) Si ident est UUID : essai par id
+  // by uuid id
   if (isUuid(ident)) {
     const byId = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
       .eq("id", ident)
       .maybeSingle();
-
     if (!byId.error && byId.data) return { agent: byId.data, error: null };
   }
 
-  // 4) Agent introuvable
   return { agent: null, error: { status: 404, message: `Agent introuvable (identifiant="${ident}").` } };
+}
+
+function normalizeHistoryRows(rows) {
+  const out = [];
+  for (const r of rows || []) {
+    const role = safeStr(r.role).toLowerCase();
+    const content = safeStr(r.content).trim();
+    if (!content) continue;
+    if (role === "user" || role === "assistant") out.push({ role, content });
+  }
+  return out;
+}
+
+/**
+ * Construit (résumé + derniers messages) dans une limite de taille.
+ * Retourne { messages, truncated, omittedMessages }
+ */
+function buildContextWithBudget({ summary, history, maxChars }) {
+  // On part du plus récent vers l'ancien
+  const reversed = [...history].reverse();
+
+  let budget = maxChars;
+  const selectedReversed = [];
+
+  // Reserve un peu si on met un résumé
+  const summaryBlock = summary ? `RÉSUMÉ DE CONVERSATION (mémoire longue)\n${summary}\n` : "";
+  if (summaryBlock) budget -= summaryBlock.length;
+
+  // Ajout des messages récents tant qu'on tient
+  for (const m of reversed) {
+    const chunk = `${m.role.toUpperCase()}: ${m.content}\n`;
+    if (chunk.length > budget) break;
+    selectedReversed.push(m);
+    budget -= chunk.length;
+  }
+
+  const selected = selectedReversed.reverse();
+  const truncated = selected.length < history.length;
+
+  const omittedMessages = truncated ? history.slice(0, history.length - selected.length) : [];
+  const summaryMsg = summaryBlock ? [{ role: "system", content: summaryBlock }] : [];
+
+  return { messages: [...summaryMsg, ...selected], truncated, omittedMessages };
+}
+
+async function updateConversationSummary({ mistral, conversationId, oldSummary, omittedMessages }) {
+  if (!isUuid(conversationId)) return;
+
+  // Rien à résumer
+  if (!omittedMessages?.length) return;
+
+  // On résume uniquement ce qu'on a omis
+  const toSummarize = omittedMessages
+    .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+    .join("\n");
+
+  const summarizerPrompt = `
+Tu es un outil de résumé.
+Objectif: maintenir une mémoire longue et fidèle d'une conversation.
+Règles:
+- Résumé concis mais complet (faits, décisions, préférences, tâches, personnes, éléments techniques).
+- Pas d'inventions. Si incertain, ne l'ajoute pas.
+- Conserve les détails actionnables (URLs, identifiants, workflows, paramètres).
+- Sortie: TEXTE (pas de JSON).
+`;
+
+  const completion = await mistral.chat.complete({
+    model: process.env.MISTRAL_MODEL || "mistral-small-latest",
+    messages: [
+      { role: "system", content: summarizerPrompt.trim() },
+      {
+        role: "user",
+        content:
+          `Résumé existant (peut être vide):\n${oldSummary || ""}\n\n` +
+          `Nouveaux éléments à intégrer au résumé:\n${toSummarize}\n\n` +
+          `Produis le nouveau résumé fusionné.`,
+      },
+    ],
+    temperature: 0.2,
+  });
+
+  const newSummary = completion?.choices?.[0]?.message?.content?.trim();
+  if (!newSummary) return;
+
+  await supabaseAdmin.from("conversations").update({ summary: newSummary }).eq("id", conversationId);
 }
 
 export default async function handler(req, res) {
@@ -129,15 +201,9 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
 
   try {
-    if (!process.env.MISTRAL_API_KEY) {
-      return res.status(500).json({ error: "MISTRAL_API_KEY manquant sur Vercel." });
-    }
-    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
-      return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant sur Vercel." });
-    }
-    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant sur Vercel." });
-    }
+    if (!process.env.MISTRAL_API_KEY) return res.status(500).json({ error: "MISTRAL_API_KEY manquant sur Vercel." });
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant sur Vercel." });
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant sur Vercel." });
 
     const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
 
@@ -145,16 +211,14 @@ export default async function handler(req, res) {
     if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
 
     const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-    if (userErr || !userData?.user) {
-      return res.status(401).json({ error: "Session invalide. Reconnectez-vous." });
-    }
+    if (userErr || !userData?.user) return res.status(401).json({ error: "Session invalide. Reconnectez-vous." });
     const userId = userData.user.id;
 
     const body = req.body || {};
     const userMsg = safeStr(body?.message).trim();
+    if (!userMsg) return res.status(400).json({ error: "Message vide." });
 
-    // IMPORTANT : tolérer plusieurs champs envoyés par le front
-    // (agentSlug / agent / agentId / conversationId)
+    const conversationId = safeStr(body?.conversationId ?? body?.conversation_id ?? "").trim();
     const agentIdentifier =
       body?.agentSlug ??
       body?.agent ??
@@ -164,20 +228,8 @@ export default async function handler(req, res) {
       req.query?.agentId ??
       "";
 
-    const conversationId = body?.conversationId ?? body?.conversation_id ?? "";
-
-    if (!userMsg) return res.status(400).json({ error: "Message vide." });
-
-    // Résolution agent robuste
-    const { agent, error: resolveErr } = await resolveAgent({
-      userId,
-      agentIdentifier,
-      conversationId,
-    });
-
-    if (resolveErr) {
-      return res.status(resolveErr.status).json({ error: resolveErr.message });
-    }
+    const { agent, error: resolveErr } = await resolveAgent({ userId, agentIdentifier, conversationId });
+    if (resolveErr) return res.status(resolveErr.status).json({ error: resolveErr.message });
 
     // Vérifier assignation
     const { data: assignment, error: assignErr } = await supabaseAdmin
@@ -214,45 +266,95 @@ export default async function handler(req, res) {
     const globalBasePrompt = await getGlobalBasePrompt();
     const emailMode = detectEmailMode(userMsg);
 
-    // Bloc email : empêcher l'envoi quand on veut juste préparer
-    const emailSafetyBlock = `
+    // Charger résumé conversation (mémoire longue) + historique
+    let convSummary = "";
+    let history = [];
+
+    if (isUuid(conversationId)) {
+      const { data: conv } = await supabaseAdmin
+        .from("conversations")
+        .select("summary")
+        .eq("id", conversationId)
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      convSummary = safeStr(conv?.summary).trim();
+
+      const { data: rows } = await supabaseAdmin
+        .from("messages")
+        .select("role, content, created_at")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: true })
+        .limit(400);
+
+      history = normalizeHistoryRows(rows);
+    }
+
+    const emailRules = `
 MODE_EMAIL=${emailMode}
 
-RÈGLES EMAIL (IMPORTANTES)
+CAPACITÉ SYSTÈME
+- Tu as la capacité d'envoyer un e-mail VIA MAKE/OUTLOOK quand MODE_EMAIL=SEND.
+- Interdiction d'écrire : "je ne peux pas envoyer d'e-mails" ou équivalent.
+
+RÈGLES DE SORTIE EMAIL
 - Si MODE_EMAIL=DRAFT :
-  - Tu DOIS préparer un brouillon lisible (texte/markdown) avec :
-    "Destinataire:", "Objet:", puis le corps en paragraphes.
-  - Interdiction TOTALE de produire un JSON contenant EXACTEMENT les clés "to", "subject", "body".
-  - Termine par : "Si vous souhaitez l'envoyer, dites simplement : envoie."
+  - Produis un brouillon lisible structuré :
+    Destinataire:
+    Objet:
+    Corps: (paragraphes séparés par une ligne vide)
+  - Interdiction totale de renvoyer un JSON {to,subject,body}.
+  - Termine par : "Si vous souhaitez l'envoyer, dites : envoie."
+
 - Si MODE_EMAIL=SEND :
-  - Tu DOIS renvoyer UNIQUEMENT un JSON strict (aucun texte autour) avec EXACTEMENT :
+  - Renvoie UNIQUEMENT un JSON strict (aucun texte autour) avec EXACTEMENT :
     {"to":"...","subject":"...","body":"..."}
-  - "to" = email valide (une seule).
-  - "body" = HTML (<p>, <br>, etc.) pour un rendu propre dans Outlook.
-  - Si info manquante, pose UNE question courte au lieu de générer le JSON.
+  - body doit être du HTML simple (<p>..</p><p>..</p>) pour un rendu email propre Outlook.
+  - Si info manquante -> pose UNE question courte (au lieu d'inventer).
 `;
 
     const finalSystemPrompt = [
-      globalBasePrompt
-        ? `INSTRUCTIONS GÉNÉRALES (communes à tous les agents)\n${globalBasePrompt}`
-        : "",
+      globalBasePrompt ? `INSTRUCTIONS GÉNÉRALES\n${globalBasePrompt}` : "",
       basePrompt,
-      customPrompt ? `INSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}` : "",
-      emailSafetyBlock.trim(),
+      customPrompt ? `INSTRUCTIONS PERSONNALISÉES\n${customPrompt}` : "",
+      emailRules.trim(),
     ]
       .filter(Boolean)
       .join("\n\n");
 
+    // Budget de contexte (approx en caractères)
+    const MAX_CONTEXT_CHARS = Number(process.env.MAX_CONTEXT_CHARS || 24000);
+
+    const ctx = buildContextWithBudget({
+      summary: convSummary,
+      history,
+      maxChars: MAX_CONTEXT_CHARS,
+    });
+
+    const mistralMessages = [
+      { role: "system", content: finalSystemPrompt },
+      ...ctx.messages,
+      { role: "user", content: userMsg },
+    ];
+
     const completion = await mistral.chat.complete({
       model: process.env.MISTRAL_MODEL || "mistral-small-latest",
-      messages: [
-        { role: "system", content: finalSystemPrompt },
-        { role: "user", content: userMsg },
-      ],
+      messages: mistralMessages,
       temperature: 0.4,
     });
 
     const reply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
+
+    // Mettre à jour le résumé si on a tronqué
+    if (isUuid(conversationId) && ctx.truncated) {
+      await updateConversationSummary({
+        mistral,
+        conversationId,
+        oldSummary: convSummary,
+        omittedMessages: ctx.omittedMessages,
+      });
+    }
+
     return res.status(200).json({ reply });
   } catch (err) {
     console.error("Erreur API /api/chat :", err);
