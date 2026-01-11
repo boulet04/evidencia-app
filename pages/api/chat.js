@@ -53,112 +53,123 @@ async function getGlobalBasePrompt() {
   }
 }
 
-// Confirmation stricte (pour éviter les envois accidentels)
-function isExplicitSendConfirmation(text) {
-  const t = safeStr(text).trim().toLowerCase();
-
-  // Si l’utilisateur dit "n'envoie pas", on bloque toujours
-  const hasNegation =
-    t.includes("n'envoie pas") ||
-    t.includes("n’envoie pas") ||
-    t.includes("ne l'envoie pas") ||
-    t.includes("ne l’envoie pas") ||
-    t.includes("ne pas envoyer") ||
-    t.includes("pas envoyer") ||
-    t.includes("sans envoyer");
-
-  if (hasNegation) return false;
-
-  // Confirmation volontairement stricte
-  const ok =
-    t === "envoie" ||
-    t === "envoie le mail" ||
-    t === "envoie l'email" ||
-    t === "envoie l’email" ||
-    t === "envoie le courrier" ||
-    t === "confirme envoi" ||
-    t === "ok envoie" ||
-    t === "vas-y envoie";
-
-  return ok;
+function looksLikeHtml(s) {
+  const t = safeStr(s).trim();
+  return /<\/?(p|br|div|span|strong|em|ul|ol|li|table|tr|td|h1|h2|h3|html|body)\b/i.test(t);
 }
 
-function looksLikeActionJson(reply) {
-  const s = safeStr(reply).trim();
-  return s.startsWith("{") && s.endsWith("}");
+function plainToHtml(plain) {
+  const t = safeStr(plain).trim();
+  if (!t) return "";
+  // Split on blank lines => paragraphs
+  const parts = t.split(/\n\s*\n+/g).map((p) => p.trim()).filter(Boolean);
+  const escaped = parts.map((p) =>
+    p
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\n/g, "<br/>")
+  );
+  return escaped.map((p) => `<p>${p}</p>`).join("");
 }
 
-function tryParseActionJson(reply) {
-  const s = safeStr(reply).trim();
+function isJsonOnly(str) {
+  const t = safeStr(str).trim();
+  if (!t) return false;
+  if (!(t.startsWith("{") && t.endsWith("}"))) return false;
   try {
-    const obj = JSON.parse(s);
-    if (!obj || typeof obj !== "object") return null;
-
-    const to = safeStr(obj.to).trim();
-    const subject = safeStr(obj.subject).trim();
-    const body = safeStr(obj.body).trim();
-
-    if (!to || !subject || !body) return null;
-    return { to, subject, body };
+    const obj = JSON.parse(t);
+    return obj && typeof obj === "object" && !Array.isArray(obj);
   } catch {
-    return null;
+    return false;
   }
 }
 
-function escapeHtml(str) {
-  return safeStr(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+function detectSendIntent(userMsg) {
+  const t = safeStr(userMsg).toLowerCase();
+  // Intention forte d'envoi
+  return (
+    /\b(envoie|envoyer|envoi|expédie|expedie|envoie\s+le\s+mail|envoie\s+un\s+mail)\b/.test(t) &&
+    !/\b(ne\s+pas\s+envoyer|n[' ]?envoie\s+pas|sans\s+envoyer|prépare\s+sans\s+envoyer)\b/.test(t)
+  );
 }
 
-function textToBasicHtml(text) {
-  // Convertit un texte en HTML lisible (paragraphes)
-  const lines = safeStr(text).split(/\r?\n/);
+function getMakeWebhookUrl(ctxObj) {
+  // On supporte plusieurs clés pour s’adapter à ton UI / workflows
+  const candidates = [
+    ctxObj?.make_webhook_url,
+    ctxObj?.makeWebhookUrl,
+    ctxObj?.make?.webhookUrl,
+    ctxObj?.make?.url,
+    ctxObj?.workflows?.make?.webhookUrl,
+    ctxObj?.workflows?.make?.url,
+    ctxObj?.workflow?.make?.url,
+    ctxObj?.workflow_url,
+  ]
+    .map((x) => safeStr(x).trim())
+    .filter(Boolean);
 
-  // Regroupe en paragraphes (séparés par ligne vide)
-  const paragraphs = [];
-  let buf = [];
-  for (const line of lines) {
-    if (!line.trim()) {
-      if (buf.length) {
-        paragraphs.push(buf.join(" ").trim());
-        buf = [];
-      }
-    } else {
-      buf.push(line.trim());
+  const fromEnv = safeStr(process.env.MAKE_WEBHOOK_URL).trim();
+  if (fromEnv) candidates.push(fromEnv);
+
+  // On prend le premier qui ressemble à une URL Make
+  const url = candidates.find((u) => /^https:\/\/hook\.[a-z0-9-]+\.make\.com\/.+/i.test(u)) || candidates[0] || "";
+  return url;
+}
+
+async function postToMake(url, payload) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const text = await r.text().catch(() => "");
+    if (!r.ok) {
+      throw new Error(`Make HTTP ${r.status} ${r.statusText} ${text ? `- ${text}` : ""}`.trim());
     }
+    return { ok: true, status: r.status, text };
+  } finally {
+    clearTimeout(timeout);
   }
-  if (buf.length) paragraphs.push(buf.join(" ").trim());
-
-  const html = paragraphs
-    .map((p) => `<p>${escapeHtml(p)}</p>`)
-    .join("");
-
-  return html || `<p>${escapeHtml(safeStr(text).trim())}</p>`;
 }
 
-async function loadConversationHistory(conversationId, limit = 20) {
-  if (!conversationId) return [];
+async function loadConversationHistory(conversationId, userId, limit = 20) {
+  if (!conversationId) return { conv: null, history: [] };
 
-  const { data, error } = await supabaseAdmin
+  // Vérifier appartenance conversation
+  const { data: conv, error: convErr } = await supabaseAdmin
+    .from("conversations")
+    .select("id, user_id, agent_slug, title, archived, created_at")
+    .eq("id", conversationId)
+    .maybeSingle();
+
+  if (convErr || !conv) return { conv: null, history: [] };
+  if (conv.user_id !== userId) return { conv: null, history: [] };
+
+  const { data: msgs, error: msgErr } = await supabaseAdmin
     .from("messages")
     .select("role, content, created_at")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true })
-    .limit(limit);
+    .limit(Math.max(limit, 1));
 
-  if (error || !Array.isArray(data)) return [];
+  if (msgErr || !Array.isArray(msgs)) return { conv, history: [] };
 
-  // On ne garde que user/assistant, on force string
-  return data
+  const history = msgs
     .map((m) => ({
-      role: m.role === "assistant" ? "assistant" : "user",
+      role: safeStr(m.role).toLowerCase(),
       content: safeStr(m.content),
     }))
-    .filter((m) => m.content.trim().length > 0);
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .slice(-limit);
+
+  return { conv, history };
 }
 
 export default async function handler(req, res) {
@@ -184,31 +195,18 @@ export default async function handler(req, res) {
     if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
 
     const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
-    if (userErr || !userData?.user) {
-      return res.status(401).json({ error: "Session invalide. Reconnectez-vous." });
-    }
+    if (userErr || !userData?.user) return res.status(401).json({ error: "Session invalide. Reconnectez-vous." });
     const userId = userData.user.id;
 
-    const body = req.body || {};
-    const userMsg = safeStr(body.message).trim();
-
-    // IMPORTANT: accepter plusieurs noms de champs pour le slug
-    const rawSlug =
-      body.agentSlug ??
-      body.agent ??
-      body.slug ??
-      body.agent_slug ??
-      "";
-
-    const slug = safeStr(rawSlug).trim().toLowerCase();
-
-    // IMPORTANT: accepter plusieurs noms de champs pour conversationId
-    const conversationId = safeStr(body.conversationId ?? body.conversation_id ?? "").trim();
-
-    if (!slug) return res.status(400).json({ error: "Aucun agent sélectionné." });
+    const { message, agentSlug, conversationId } = req.body || {};
+    const userMsg = safeStr(message).trim();
     if (!userMsg) return res.status(400).json({ error: "Message vide." });
 
-    // Agent
+    // Agent slug: priorités -> body.agentSlug, sinon conversation.agent_slug (si conversationId fourni)
+    const { conv, history } = await loadConversationHistory(conversationId, userId, 20);
+    const slug = safeStr(agentSlug || conv?.agent_slug).trim().toLowerCase();
+    if (!slug) return res.status(400).json({ error: "Aucun agent sélectionné." });
+
     const { data: agent, error: agentErr } = await supabaseAdmin
       .from("agents")
       .select("id, slug, name, description")
@@ -217,7 +215,6 @@ export default async function handler(req, res) {
 
     if (agentErr || !agent) return res.status(404).json({ error: "Agent introuvable." });
 
-    // Assignation
     const { data: assignment, error: assignErr } = await supabaseAdmin
       .from("user_agents")
       .select("user_id, agent_id")
@@ -228,7 +225,6 @@ export default async function handler(req, res) {
     if (assignErr) return res.status(500).json({ error: "Erreur assignation (user_agents)." });
     if (!assignment) return res.status(403).json({ error: "Accès interdit : agent non assigné." });
 
-    // Config perso
     const { data: cfg, error: cfgErr } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -251,95 +247,101 @@ export default async function handler(req, res) {
 
     const globalBasePrompt = await getGlobalBasePrompt();
 
-    // Règles “actions” (Make) — on force une convention robuste
-    const actionRules = `
-RÈGLES IMPORTANTES (EMAIL VIA MAKE / OUTLOOK)
-
-1) Deux étapes obligatoires :
-- Étape A (préparation) : tu rédiges un BROUILLON lisible (pas de JSON), avec sections :
-  Destinataire:
-  Objet:
-  Corps:
-  (corps avec paragraphes séparés par une ligne vide)
-  Puis tu demandes explicitement une confirmation : "Si vous voulez l'envoyer, répondez : ENVOIE"
-
-- Étape B (envoi) : uniquement si l'utilisateur répond EXACTEMENT "ENVOIE" / "ENVOIE LE MAIL" / "CONFIRME ENVOI".
-  Dans ce cas seulement, tu réponds avec un JSON STRICT (aucun texte autour) :
-  {"to":"...","subject":"...","body":"<p>...</p>"}
-  body doit être en HTML (paragraphes <p>), sinon Outlook colle tout sur une ligne.
-
-2) Interdiction d'envoyer si l'utilisateur demande seulement "prépare", "rédige", "brouillon", "sans envoyer".
-3) Si tu n'as pas les infos (destinataire / sujet / contenu), tu poses UNE seule question courte.
-`.trim();
+    // IMPORTANT : on renforce côté serveur la règle "préparer vs envoyer"
+    // - si l'utilisateur veut PREPARER: l'agent doit rendre un brouillon lisible (pas de JSON)
+    // - si l'utilisateur veut ENVOYER: l'agent doit rendre un JSON strict {to, subject, body} (body en HTML)
+    const serverSafety = `
+RÈGLES OUTILS EMAIL (Make/Outlook) - À RESPECTER STRICTEMENT
+- Si l'utilisateur demande de PRÉPARER / RÉDIGER / PROPOSER un email SANS demander explicitement l'envoi: tu fournis un brouillon humain lisible (avec paragraphes), PAS de JSON.
+- Tu n'envoies JAMAIS un email sans confirmation explicite.
+- Si (et seulement si) l'utilisateur demande explicitement l'ENVOI (ex: "envoie", "envoyer le mail"): tu réponds UNIQUEMENT par un JSON STRICT, sans texte autour, avec exactement:
+  { "to": "<email>", "subject": "<objet>", "body": "<HTML>" }
+- Le champ body doit être un HTML simple (<p>..., <br/>) pour que l'email soit bien formaté.
+`;
 
     const finalSystemPrompt = [
-      globalBasePrompt
-        ? `INSTRUCTIONS GÉNÉRALES (communes à tous les agents)\n${globalBasePrompt}`
-        : "",
+      globalBasePrompt ? `INSTRUCTIONS GÉNÉRALES\n${globalBasePrompt}` : "",
       basePrompt,
-      customPrompt ? `INSTRUCTIONS PERSONNALISÉES POUR CET UTILISATEUR :\n${customPrompt}` : "",
-      actionRules,
+      customPrompt ? `INSTRUCTIONS PERSONNALISÉES\n${customPrompt}` : "",
+      serverSafety,
     ]
       .filter(Boolean)
       .join("\n\n");
 
-    // Mémoire conversation
-    const history = await loadConversationHistory(conversationId, 20);
+    const messages = [{ role: "system", content: finalSystemPrompt }];
 
-    // IMPORTANT: éviter de dupliquer le dernier message user si le front l’a déjà inséré en base avant l’appel API.
-    // On supprime le dernier élément si c’est exactement le même user message.
-    const normalizedUserMsg = userMsg.trim();
-    const historyTrimmed = [...history];
-    const last = historyTrimmed[historyTrimmed.length - 1];
-    if (last?.role === "user" && safeStr(last.content).trim() === normalizedUserMsg) {
-      historyTrimmed.pop();
+    // Historique conversation (si dispo)
+    for (const m of history) {
+      messages.push({ role: m.role, content: m.content });
     }
 
-    const messagesForModel = [
-      { role: "system", content: finalSystemPrompt },
-      ...historyTrimmed.map((m) => ({ role: m.role, content: m.content })),
-      { role: "user", content: userMsg },
-    ];
+    // Message actuel
+    messages.push({ role: "user", content: userMsg });
 
     const completion = await mistral.chat.complete({
       model: process.env.MISTRAL_MODEL || "mistral-small-latest",
-      messages: messagesForModel,
+      messages,
       temperature: 0.7,
     });
 
-    let reply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
+    const rawReply = completion?.choices?.[0]?.message?.content?.trim() || "Réponse vide.";
 
-    // Garde-fou anti-envoi accidentel :
-    // Si le modèle renvoie un JSON action mais que l’utilisateur n’a pas confirmé, on bloque.
-    if (looksLikeActionJson(reply)) {
-      const action = tryParseActionJson(reply);
-      if (action) {
-        const allowed = isExplicitSendConfirmation(userMsg);
+    // Si le modèle renvoie du JSON, on décide si on déclenche Make ou non
+    if (isJsonOnly(rawReply)) {
+      const obj = JSON.parse(rawReply);
+      const to = safeStr(obj?.to).trim();
+      const subject = safeStr(obj?.subject).trim();
+      let body = safeStr(obj?.body).trim();
 
-        if (!allowed) {
-          // On remplace le JSON par un brouillon lisible (donc Make ne sera pas déclenché)
-          const bodyAsText = action.body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-          reply =
-            `Voici le brouillon (NON envoyé) :\n\n` +
-            `Destinataire: ${action.to}\n` +
-            `Objet: ${action.subject}\n\n` +
-            `Corps:\n${bodyAsText}\n\n` +
-            `Si vous voulez l'envoyer, répondez : ENVOIE`;
-        } else {
-          // On force body en HTML si jamais c’est du texte brut
-          const seemsHtml = /<\/(p|br|div|span|table|html|body)>/i.test(action.body) || /<p[ >]/i.test(action.body);
-          const safeBodyHtml = seemsHtml ? action.body : textToBasicHtml(action.body);
+      // On ne déclenche l'envoi que si l'utilisateur a vraiment demandé l'envoi
+      const sendIntent = detectSendIntent(userMsg);
 
-          reply = JSON.stringify(
-            { to: action.to, subject: action.subject, body: safeBodyHtml },
-            null,
-            0
-          );
-        }
+      // Validation minimale
+      if (!to || !subject || !body) {
+        // On renvoie un message humain plutôt que planter
+        return res.status(200).json({
+          reply:
+            "Le brouillon est incomplet (to/subject/body). Reformulez la demande ou précisez le destinataire, l’objet et le contenu.",
+        });
+      }
+
+      // Body en HTML
+      if (!looksLikeHtml(body)) body = plainToHtml(body);
+
+      if (!sendIntent) {
+        // Cas : le modèle a quand même renvoyé du JSON alors que l'utilisateur demandait juste de préparer
+        // => on renvoie un brouillon lisible et on n'envoie rien
+        const preview =
+          `Brouillon prêt (non envoyé). Dites "envoie" pour l’envoyer.\n\n` +
+          `Destinataire : ${to}\n` +
+          `Objet : ${subject}\n\n` +
+          body.replace(/<\/?p>/g, "").replace(/<br\/>/g, "\n").trim();
+
+        return res.status(200).json({ reply: preview });
+      }
+
+      // Envoi via Make
+      const makeUrl = getMakeWebhookUrl(ctxObj || {});
+      if (!makeUrl) {
+        return res.status(500).json({
+          error:
+            "Aucune URL Make webhook configurée. Ajoutez-la dans le workflow (ou set MAKE_WEBHOOK_URL sur Vercel).",
+        });
+      }
+
+      try {
+        await postToMake(makeUrl, { to, subject, body });
+        return res.status(200).json({ reply: "Email envoyé via Outlook (Make)." });
+      } catch (e) {
+        console.error("Erreur Make:", e);
+        return res.status(502).json({
+          error: `Échec d’envoi via Make. Vérifiez que le scénario est ON et que l’URL webhook est correcte. Détail: ${safeStr(e?.message)}`,
+        });
       }
     }
 
-    return res.status(200).json({ reply });
+    // Sinon, réponse standard
+    return res.status(200).json({ reply: rawReply });
   } catch (err) {
     console.error("Erreur API /api/chat :", err);
     return res.status(500).json({ error: "Erreur interne de l’agent." });
