@@ -38,36 +38,51 @@ function extractFirstNameFromUser(user) {
   return guessFirstNameFromEmail(user?.email || "");
 }
 
-// Déduit le slug de manière robuste (évite le fallback "emma" pendant les navigations)
-function deriveAgentSlug(router) {
-  const pick = (v) => {
-    if (Array.isArray(v)) v = v[0];
-    if (typeof v === "string" && v.trim()) return v.trim();
-    return "";
-  };
+// --- NEW: stopwords pour titre de conversation (ignorer salutations)
+const TITLE_STOPWORDS = new Set([
+  "bonjour",
+  "salut",
+  "hello",
+  "hey",
+  "coucou",
+  "bonsoir",
+  "yo",
+  "bjr",
+  "slt",
+]);
 
-  // 1) Next.js query
-  const q1 = pick(router.query?.agentSlug);
-  const q2 = pick(router.query?.agent);
+function buildConversationTitleFromMessage(text) {
+  const raw = (text || "").trim();
+  if (!raw) return "Nouvelle conversation";
 
-  // 2) Path (/chat/<slug>)
-  const asPath = (router.asPath || "").trim();
-  const pathOnly = asPath.split("?")[0] || "";
-  const mPath = pathOnly.match(/^\/chat\/([^/]+)$/i);
-  const fromPath = mPath ? decodeURIComponent(mPath[1] || "") : "";
+  // normalise + retire ponctuation simple
+  const tokens = raw
+    .toLowerCase()
+    .replace(/[“”"’'.,;:!?()[\]{}<>]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
 
-  // 3) Query string direct dans asPath (?agent=xxx)
-  const mAgent = asPath.match(/[?&]agent=([^&]+)/i);
-  const fromQS = mAgent ? decodeURIComponent(mAgent[1] || "") : "";
+  // retire salutations au début
+  while (tokens.length > 0 && TITLE_STOPWORDS.has(tokens[0])) tokens.shift();
 
-  const slug = (q1 || q2 || fromPath || fromQS || "").trim().toLowerCase();
-  return slug || "emma";
+  // si ça vide tout, on retombe sur le message brut
+  const finalTokens = tokens.length ? tokens : raw.split(/\s+/).filter(Boolean);
+
+  const first5 = finalTokens.slice(0, 5).join(" ");
+  const titled = first5 ? first5 : "Nouvelle conversation";
+
+  // capitalise la 1ère lettre du titre
+  return titled.charAt(0).toUpperCase() + titled.slice(1);
 }
 
 export default function ChatPage() {
   const router = useRouter();
 
-  const agentSlug = useMemo(() => deriveAgentSlug(router), [router.asPath, router.query]);
+  const agentSlug = useMemo(() => {
+    const q = router.query?.agent;
+    if (typeof q === "string" && q.trim()) return q.trim();
+    return "emma";
+  }, [router.query]);
 
   const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
@@ -84,8 +99,6 @@ export default function ChatPage() {
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [creatingConv, setCreatingConv] = useState(false);
   const [sending, setSending] = useState(false);
-
-  const [brandLogoOk, setBrandLogoOk] = useState(true);
 
   const accessToken = useMemo(() => session?.access_token || null, [session]);
   const firstName = useMemo(() => extractFirstNameFromUser(user), [user]);
@@ -111,16 +124,6 @@ export default function ChatPage() {
 
     return () => sub?.subscription?.unsubscribe?.();
   }, []);
-
-  // IMPORTANT: quand on change d’agent, on reset les états pour éviter les mélanges visuels
-  useEffect(() => {
-    setAgent(null);
-    setConversations([]);
-    setSelectedConversationId(null);
-    setMessages([]);
-    setInput("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentSlug]);
 
   // Load agent meta
   useEffect(() => {
@@ -167,12 +170,18 @@ export default function ChatPage() {
       const list = data || [];
       setConversations(list);
 
-      if (list.length > 0) {
+      if (!selectedConversationId && list.length > 0) {
         setSelectedConversationId(list[0].id);
-      } else {
+      }
+
+      // --- NEW: si aucune conversation, on laisse selectedConversationId = null
+      // l’utilisateur pourra taper, et on créera automatiquement.
+      if (list.length === 0) {
         setSelectedConversationId(null);
+        setMessages([]);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, agentSlug]);
 
   // Load messages
@@ -207,12 +216,12 @@ export default function ChatPage() {
   }, [messages, loadingMsgs]);
 
   // IMPORTANT: création via API (pas via supabase insert)
-  async function handleNewConversation() {
+  async function handleNewConversation({ title } = {}) {
     if (!accessToken) {
       alert("Session invalide. Veuillez vous reconnecter.");
-      return;
+      return null;
     }
-    if (!agentSlug) return;
+    if (!agentSlug) return null;
 
     try {
       setCreatingConv(true);
@@ -223,7 +232,7 @@ export default function ChatPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${accessToken}`,
         },
-        body: JSON.stringify({ agent_slug: agentSlug }),
+        body: JSON.stringify({ agent_slug: agentSlug, title: title || null }),
       });
 
       const data = await resp.json().catch(() => null);
@@ -234,9 +243,11 @@ export default function ChatPage() {
 
       setConversations((prev) => [conv, ...prev]);
       setSelectedConversationId(conv.id);
+      return conv;
     } catch (e) {
       console.error(e);
       alert("Impossible de créer une nouvelle conversation.");
+      return null;
     } finally {
       setCreatingConv(false);
     }
@@ -274,8 +285,66 @@ export default function ChatPage() {
     }
   }
 
+  // --- NEW: dictée vocale (Web Speech API)
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef(null);
+
+  useEffect(() => {
+    // Initialise une seule fois
+    if (typeof window === "undefined") return;
+
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition || null;
+
+    if (!SpeechRecognition) {
+      recognitionRef.current = null;
+      return;
+    }
+
+    const rec = new SpeechRecognition();
+    rec.lang = "fr-FR";
+    rec.continuous = false;
+    rec.interimResults = true;
+
+    rec.onstart = () => setListening(true);
+    rec.onend = () => setListening(false);
+
+    rec.onerror = (e) => {
+      console.error("SpeechRecognition error:", e);
+      setListening(false);
+    };
+
+    // IMPORTANT: éviter le doublon => on gère final uniquement
+    rec.onresult = (event) => {
+      let finalText = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const res = event.results[i];
+        if (res.isFinal) finalText += res[0]?.transcript || "";
+      }
+      if (finalText.trim()) {
+        setInput((prev) => (prev ? `${prev} ${finalText.trim()}` : finalText.trim()));
+      }
+    };
+
+    recognitionRef.current = rec;
+  }, []);
+
+  function toggleMic() {
+    const rec = recognitionRef.current;
+    if (!rec) {
+      alert("Dictée vocale non supportée sur ce navigateur.");
+      return;
+    }
+
+    try {
+      if (listening) rec.stop();
+      else rec.start();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   async function handleSend() {
-    if (!selectedConversationId) return;
     const content = input.trim();
     if (!content) return;
 
@@ -283,10 +352,19 @@ export default function ChatPage() {
       setSending(true);
       setInput("");
 
+      // --- NEW: si pas de conversation sélectionnée, on en crée une automatiquement
+      let convId = selectedConversationId;
+      if (!convId) {
+        const title = buildConversationTitleFromMessage(content);
+        const newConv = await handleNewConversation({ title });
+        convId = newConv?.id || null;
+        if (!convId) throw new Error("Conversation auto-création échouée.");
+      }
+
       const { data: userMsg, error: userMsgErr } = await supabase
         .from("messages")
         .insert({
-          conversation_id: selectedConversationId,
+          conversation_id: convId,
           role: "user",
           content,
         })
@@ -303,7 +381,7 @@ export default function ChatPage() {
           ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         },
         body: JSON.stringify({
-          conversation_id: selectedConversationId,
+          conversation_id: convId,
           agent_slug: agentSlug,
           message: content,
         }),
@@ -321,7 +399,7 @@ export default function ChatPage() {
         const { data: asstMsg, error: asstErr } = await supabase
           .from("messages")
           .insert({
-            conversation_id: selectedConversationId,
+            conversation_id: convId,
             role: "assistant",
             content: assistantText,
           })
@@ -339,7 +417,7 @@ export default function ChatPage() {
   }
 
   const showWelcomeFallback =
-    !loadingMsgs && selectedConversationId && (messages?.length || 0) === 0;
+    !loadingMsgs && !selectedConversationId && (messages?.length || 0) === 0;
 
   return (
     <div className="page">
@@ -349,17 +427,7 @@ export default function ChatPage() {
         </button>
 
         <div className="brand">
-          {brandLogoOk ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              className="brandLogo"
-              src="/images/logolong.png"
-              alt="Evidenc'IA"
-              onError={() => setBrandLogoOk(false)}
-            />
-          ) : (
-            <div className="brandTitle">Evidenc’IA</div>
-          )}
+          <div className="brandTitle">Evidenc’IA</div>
         </div>
 
         <div className="topbarRight">
@@ -380,7 +448,7 @@ export default function ChatPage() {
         <aside className="sidebar">
           <div className="sidebarHeader">
             <div className="sidebarTitle">Historique</div>
-            <button className="btn new" onClick={handleNewConversation} disabled={creatingConv}>
+            <button className="btn new" onClick={() => handleNewConversation()} disabled={creatingConv}>
               + Nouvelle
             </button>
           </div>
@@ -429,11 +497,7 @@ export default function ChatPage() {
               <div className="agentAvatar">
                 {agent?.avatar_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    key={`${agentSlug}:${agent.avatar_url}`}
-                    src={agent.avatar_url}
-                    alt={agent.name || "Agent"}
-                  />
+                  <img src={agent.avatar_url} alt={agent.name || "Agent"} />
                 ) : (
                   <div className="avatarFallback">{(agent?.name || "A").slice(0, 1)}</div>
                 )}
@@ -447,24 +511,21 @@ export default function ChatPage() {
 
           <div className="chat">
             <div className="chatBody">
-              {!selectedConversationId ? (
-                <div className="muted">Sélectionne une conversation ou clique sur “+ Nouvelle”.</div>
-              ) : loadingMsgs ? (
+              {showWelcomeFallback && (
+                <div className="msgRow assistant">
+                  <div className="msgBubble">{welcomeText()}</div>
+                </div>
+              )}
+
+              {!selectedConversationId && (messages?.length || 0) === 0 ? null : loadingMsgs ? (
                 <div className="muted">Chargement des messages...</div>
               ) : (
                 <>
-                  {showWelcomeFallback && (
-                    <div className="msgRow assistant">
-                      <div className="msgBubble">{welcomeText()}</div>
-                    </div>
-                  )}
-
                   {(messages || []).map((m) => (
                     <div key={m.id} className={`msgRow ${m.role === "user" ? "user" : "assistant"}`}>
                       <div className="msgBubble">{m.content}</div>
                     </div>
                   ))}
-
                   <div ref={messagesEndRef} />
                 </>
               )}
@@ -482,28 +543,27 @@ export default function ChatPage() {
                     handleSend();
                   }
                 }}
-                disabled={!selectedConversationId || sending}
+                disabled={sending}
               />
 
-              <button className="btn mic" type="button" title="Dictée vocale (à connecter)">
-                {/* icône micro plus claire (sans librairie) */}
-                <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Zm7-3a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V20H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-2.08A7 7 0 0 0 19 11Z"
-                    fill="currentColor"
-                  />
-                </svg>
+              <button
+                className={`btn mic ${listening ? "listening" : ""}`}
+                type="button"
+                title="Dictée vocale"
+                onClick={toggleMic}
+                disabled={sending}
+              >
+                {/* icône plus “micro” */}
+                <span className="micIcon" aria-hidden="true">🎤</span>
               </button>
 
-              <button className="btn send" onClick={handleSend} disabled={!selectedConversationId || sending}>
+              <button className="btn send" onClick={handleSend} disabled={sending}>
                 {sending ? "Envoi..." : "Envoyer"}
               </button>
             </div>
 
             <div className="chatFooter">
-              <div className="mutedSmall">
-                {selectedConversationId ? `Conversation: ${selectedConversationId}` : ""}
-              </div>
+              <div className="mutedSmall">{selectedConversationId ? `Conversation: ${selectedConversationId}` : ""}</div>
             </div>
           </div>
         </main>
@@ -521,7 +581,6 @@ export default function ChatPage() {
         .btn.logout { border-color: rgba(255,80,80,0.35); }
         .brand { display: flex; align-items: center; justify-content: center; flex: 1; text-align: center; }
         .brandTitle { font-size: 20px; font-weight: 800; letter-spacing: 0.6px; }
-        .brandLogo { height: 22px; width: auto; display: block; opacity: 0.95; }
         .topbarRight { display: flex; gap: 10px; align-items: center; }
         .pill { border: 1px solid rgba(255,255,255,0.12); padding: 8px 10px; border-radius: 999px; font-size: 12px; opacity: 0.9; }
 
@@ -548,7 +607,8 @@ export default function ChatPage() {
         .agentLeft { display: flex; gap: 12px; align-items: center; }
         .agentAvatar { width: 44px; height: 44px; border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1);
           background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; }
-        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; } /* <= ta modif demandée */
+        /* IMPORTANT: ta modif demandée */
+        .agentAvatar img { width: 100%; height: 100%; object-fit: cover; object-position: center 20%; }
         .avatarFallback { font-weight: 900; opacity: 0.85; }
         .agentName { font-weight: 900; }
         .agentRole { font-size: 12px; color: rgba(233,238,246,0.65); margin-top: 2px; }
@@ -567,6 +627,8 @@ export default function ChatPage() {
           background: rgba(0,0,0,0.25); color: #e9eef6; padding: 0 14px; outline: none; }
         .btn.send { border-color: rgba(255,130,30,0.35); background: rgba(255,130,30,0.12); }
         .btn.mic { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; }
+        .btn.mic.listening { border-color: rgba(255,130,30,0.35); background: rgba(255,130,30,0.12); }
+        .micIcon { font-size: 18px; line-height: 1; }
 
         .chatFooter { padding: 10px 14px 14px; }
 
