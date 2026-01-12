@@ -55,18 +55,6 @@ function stripMemoryTag(content) {
   return t.startsWith("MEMORY:\n") ? t.slice("MEMORY:\n".length) : t;
 }
 
-// -------- PROMPTS HELPERS (IMPORTANT) --------
-function getPromptString(v) {
-  if (!v) return "";
-  if (typeof v === "string") return v.trim();
-  if (typeof v === "object") {
-    if (typeof v.systemPrompt === "string") return v.systemPrompt.trim();
-    if (typeof v.prompt === "string") return v.prompt.trim();
-  }
-  return "";
-}
-
-// -------- DRAFT EMAIL STORAGE --------
 const DRAFT_PREFIX = "DRAFT_EMAIL:\n";
 
 function buildDraftTag(obj) {
@@ -209,6 +197,73 @@ function buildDraftPreview(draft) {
     "\n\n" +
     "Si vous confirmez, écrivez : ok envoie"
   );
+}
+
+/**
+ * NOUVEAU : extraction d’un brouillon depuis un texte (si le modèle n’a pas renvoyé du JSON).
+ * Supporte par ex :
+ * - To: xxx@yyy.com
+ * - Destinataire : xxx@yyy.com
+ * - Subject: ...
+ * - Objet : ...
+ */
+function extractDraftFromPlainText(text) {
+  const raw = safeStr(text || "").trim();
+  if (!raw) return null;
+
+  // Retire gras markdown éventuel **To:**, **Subject:**
+  const cleaned = raw.replace(/\*\*/g, "");
+
+  const lines = cleaned.split(/\r?\n/).map((l) => l.trim());
+  if (!lines.length) return null;
+
+  let to = "";
+  let subject = "";
+  let bodyStartIdx = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+
+    // To / Destinataire
+    let m = l.match(/^(to|destinataire)\s*:\s*(.+)$/i);
+    if (m && !to) {
+      to = safeStr(m[2]).trim();
+      continue;
+    }
+
+    // Subject / Objet
+    m = l.match(/^(subject|objet)\s*:\s*(.+)$/i);
+    if (m && !subject) {
+      subject = safeStr(m[2]).trim();
+      // le corps commence après une éventuelle ligne vide suivante
+      bodyStartIdx = i + 1;
+      continue;
+    }
+  }
+
+  // Si on n’a pas trouvé to+subject : ce n’est pas un draft exploitable
+  if (!to || !subject) return null;
+
+  // Corps = tout après subject (en sautant une ligne vide initiale)
+  let bodyLines = [];
+  if (bodyStartIdx >= 0 && bodyStartIdx < lines.length) {
+    let j = bodyStartIdx;
+    // saute les lignes vides
+    while (j < lines.length && !lines[j]) j++;
+    bodyLines = lines.slice(j);
+  }
+
+  const body = bodyLines.join("\n").trim();
+
+  // corps peut être vide (ex: test), on accepte quand même mais l’envoi exigera un contenu
+  return {
+    to,
+    subject,
+    body,
+    body_html: "",
+    cc: [],
+    bcc: [],
+  };
 }
 
 async function getLatestDraft(supabaseAdmin, conversationId) {
@@ -491,7 +546,31 @@ export default async function handler(req, res) {
       let mailSent = false;
       let mailError = "";
 
-      const draft = await getLatestDraft(supabaseAdmin, conversationId);
+      let draft = await getLatestDraft(supabaseAdmin, conversationId);
+
+      // NOUVEAU : si pas de DRAFT_EMAIL enregistré, on tente de parser le dernier message assistant
+      if (!draft) {
+        const { data: lastAsst } = await supabaseAdmin
+          .from("messages")
+          .select("content")
+          .eq("conversation_id", conversationId)
+          .eq("role", "assistant")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        const parsed = extractDraftFromPlainText(lastAsst?.content || "");
+        if (parsed) {
+          draft = parsed;
+          // on le stocke pour fiabiliser les prochains “ok envoie”
+          await supabaseAdmin.from("messages").insert({
+            conversation_id: conversationId,
+            role: "system",
+            content: buildDraftTag(draft),
+            created_at: nowIso(),
+          });
+        }
+      }
 
       if (!draft) {
         assistantText =
@@ -538,6 +617,7 @@ export default async function handler(req, res) {
             assistantText =
               "Envoi confirmé : l’email a été transmis au workflow d’envoi. Vérifiez Indésirables/Spam et les Éléments envoyés du compte Outlook connecté à Make.";
 
+            // Marque le brouillon comme “consommé”
             await supabaseAdmin.from("messages").insert({
               conversation_id: conversationId,
               role: "system",
@@ -566,10 +646,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // --- PROMPTS (GLOBAL + AGENT + PERSO) ---
-    const globalPrompt = getPromptString(agentPrompts?.__GLOBAL__);
-    const agentFallbackPrompt = getPromptString(agentPrompts?.[agentSlug]);
-
+    // --- SYSTEM PROMPT (inclut prompt perso agent + mémoire) ---
     const { data: cfg } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -578,12 +655,19 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     const customPrompt = safeStr(cfg?.system_prompt).trim();
+    const fallbackPrompt =
+      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts[agentSlug]?.systemPrompt).trim()) ||
+      "";
+
+    const globalPrompt =
+      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts.__GLOBAL__?.systemPrompt).trim()) ||
+      "";
 
     const workflowRules =
       "RÈGLES D’EXÉCUTION (EMAIL / MAKE) :\n" +
       "- Tu NE DOIS JAMAIS envoyer un email automatiquement.\n" +
       "- Quand l’utilisateur demande d’écrire/préparer un mail : tu produis un BROUILLON.\n" +
-      "- Le BROUILLON doit contenir au minimum : to, subject, body.\n" +
+      "- Idéalement, renvoie un JSON STRICT avec : {\"to\":\"...\",\"subject\":\"...\",\"body\":\"...\"} (sans markdown).\n" +
       "- Tu demandes ensuite confirmation explicite : l’utilisateur doit écrire exactement : ok envoie\n" +
       "- Tant que la confirmation n’est pas donnée : aucun envoi.\n" +
       "- Si une info manque réellement : tu poses UNE question.\n" +
@@ -591,9 +675,9 @@ export default async function handler(req, res) {
 
     const systemPrompt =
       `${workflowRules}\n` +
-      (globalPrompt ? `\n--- PROMPT GLOBAL ---\n${globalPrompt}\n` : "") +
-      (agentFallbackPrompt ? `\n--- PROMPT AGENT ---\n${agentFallbackPrompt}\n` : "") +
-      (customPrompt ? `\n--- PROMPT PERSO UTILISATEUR ---\n${customPrompt}\n` : "") +
+      (globalPrompt ? `${globalPrompt}\n` : "") +
+      (customPrompt ? `${customPrompt}\n` : "") +
+      (!customPrompt && fallbackPrompt ? `${fallbackPrompt}\n` : "") +
       `\nTu es ${safeStr(agent.name) || "un agent"} d’Evidenc'IA.\n` +
       (finalMemory ? `\nMÉMOIRE DE LA CONVERSATION:\n${finalMemory}\n` : "");
 
@@ -617,7 +701,7 @@ export default async function handler(req, res) {
     let assistantText = safeStr(completion?.choices?.[0]?.message?.content).trim();
     if (!assistantText) assistantText = "Réponse vide.";
 
-    // --- DRAFT DETECTION (stockage brouillon; pas d’envoi) ---
+    // --- DRAFT DETECTION (JSON OU TEXTE) ---
     let mailSent = false;
     let mailError = "";
 
@@ -638,8 +722,10 @@ export default async function handler(req, res) {
       safeStr(obj.subject).trim() &&
       (safeStr(obj.body).trim() || safeStr(obj.body_html).trim());
 
+    let draft = null;
+
     if (hasDraftShape || hasActionSend) {
-      const draft = {
+      draft = {
         to: safeStr(obj.to).trim(),
         subject: safeStr(obj.subject).trim(),
         body: safeStr(obj.body).trim(),
@@ -647,7 +733,14 @@ export default async function handler(req, res) {
         cc: Array.isArray(obj.cc) ? obj.cc : [],
         bcc: Array.isArray(obj.bcc) ? obj.bcc : [],
       };
+    } else {
+      // NOUVEAU : fallback si le modèle renvoie un brouillon en texte (To/Subject)
+      const parsed = extractDraftFromPlainText(assistantText);
+      if (parsed) draft = parsed;
+    }
 
+    if (draft) {
+      // Stockage brouillon (caché UI)
       await supabaseAdmin.from("messages").insert({
         conversation_id: conversationId,
         role: "system",
@@ -655,11 +748,13 @@ export default async function handler(req, res) {
         created_at: nowIso(),
       });
 
+      // Affichage utilisateur : brouillon lisible + demande confirmation
       assistantText = buildDraftPreview(draft);
       mailSent = false;
       mailError = "";
     }
 
+    // SAVE assistant message (lisible)
     const { error: insAsstErr } = await supabaseAdmin.from("messages").insert({
       conversation_id: conversationId,
       role: "assistant",
