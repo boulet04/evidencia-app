@@ -27,6 +27,15 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const endRef = useRef(null);
 
+  // IMPORTANT: ref textarea pour garder le focus
+  const textareaRef = useRef(null);
+  const focusInput = () => {
+    // RAF => garantit le focus après le re-render
+    if (typeof window !== "undefined") {
+      window.requestAnimationFrame(() => textareaRef.current?.focus?.());
+    }
+  };
+
   // --- Micro / dictée (Web Speech API) ---
   const recognitionRef = useRef(null);
   const finalTextRef = useRef("");
@@ -102,6 +111,7 @@ export default function ChatPage() {
         else interim += txt;
       }
       setInput((finalTextRef.current + interim).trim());
+      focusInput();
     };
 
     rec.onerror = () => setListening(false);
@@ -120,6 +130,7 @@ export default function ChatPage() {
     } catch (_) {}
     recognitionRef.current = null;
     setListening(false);
+    focusInput();
   }
 
   async function initGreetingIfEmpty(conversationId) {
@@ -201,6 +212,7 @@ export default function ChatPage() {
     const conv = (conversations || []).find((c) => c.id === conversationId);
     const currentTitle = conv?.title || DEFAULT_TITLE;
 
+    // Si la conv a été créée "vide", on la renomme au 1er message
     if (!currentTitle || currentTitle === DEFAULT_TITLE) {
       const newTitle = titleFromMessage(firstUserMessage);
       try {
@@ -216,7 +228,7 @@ export default function ChatPage() {
       .eq("user_id", uid)
       .eq("agent_slug", slug)
       .order("created_at", { ascending: false })
-      .limit(25);
+      .limit(10);
 
     if (error) {
       const { data: data2, error: error2 } = await supabase
@@ -225,7 +237,7 @@ export default function ChatPage() {
         .eq("user_id", uid)
         .eq("agent_slug", slug)
         .order("created_at", { ascending: false })
-        .limit(25);
+        .limit(10);
 
       if (error2) {
         setErrorMsg("Impossible de charger l'historique.");
@@ -247,26 +259,32 @@ export default function ChatPage() {
   }
 
   async function ensureConversationExistsWithGreeting() {
-    const { firstId } = await refreshConversations(userId, agentSlug);
+    // Si aucune conversation, on en crée une immédiatement + greeting
+    const { list, firstId } = await refreshConversations(userId, agentSlug);
 
     if (firstId) {
       setSelectedConvId(firstId);
       await loadMessages(firstId);
+      focusInput();
       return;
     }
 
+    // Aucune conversation => on crée + greeting + on charge
     const convId = await createConversationNow(DEFAULT_TITLE);
     if (!convId) {
       setSelectedConvId("");
       setMessages([]);
+      focusInput();
       return;
     }
 
     await refreshConversations(userId, agentSlug);
     setSelectedConvId(convId);
 
+    // IMPORTANT : greeting avant toute action user
     await initGreetingIfEmpty(convId);
     await loadMessages(convId);
+    focusInput();
   }
 
   // Init page: session + agent + conversations
@@ -317,7 +335,7 @@ export default function ChatPage() {
     })();
   }, []);
 
-  // Une fois userId + agentSlug connus
+  // Une fois userId + agentSlug connus : on garantit une conversation existante + greeting
   useEffect(() => {
     if (!userId || !agentSlug) return;
     (async () => {
@@ -332,76 +350,36 @@ export default function ChatPage() {
     const convId = await createConversationNow(DEFAULT_TITLE);
     if (!convId) {
       setErrorMsg("Impossible de créer une nouvelle conversation.");
+      focusInput();
       return;
     }
 
     await refreshConversations(userId, agentSlug);
     setSelectedConvId(convId);
 
+    // Greeting doit s’afficher immédiatement
     await initGreetingIfEmpty(convId);
     await loadMessages(convId);
-  }
-
-  async function handleDeleteConversation(conversationId) {
-    if (!conversationId) return;
-
-    const ok = window.confirm("Supprimer cette conversation ?");
-    if (!ok) return;
-
-    const token = await getAccessToken();
-    if (!token) {
-      setErrorMsg("Session expirée. Reconnectez-vous.");
-      return;
-    }
-
-    try {
-      const resp = await fetch("/api/conversations/delete", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ conversationId }),
-      });
-
-      const json = await resp.json().catch(() => null);
-      if (!resp.ok) {
-        setErrorMsg(json?.error || "Suppression impossible.");
-        return;
-      }
-
-      // Refresh + sélection
-      const { list, firstId } = await refreshConversations(userId, agentSlug);
-
-      if (selectedConvId === conversationId) {
-        if (firstId) {
-          setSelectedConvId(firstId);
-          await loadMessages(firstId);
-        } else {
-          await ensureConversationExistsWithGreeting();
-        }
-      } else {
-        // rien à faire
-        setConversations(list || []);
-      }
-    } catch (_) {
-      setErrorMsg("Suppression impossible.");
-    }
+    focusInput();
   }
 
   async function sendMessage() {
-    if (!input.trim() || sending) return;
+    if (!input.trim() || sending) {
+      focusInput();
+      return;
+    }
+
     setErrorMsg("");
     setSending(true);
 
     try {
       let convId = selectedConvId;
 
+      // Si aucune conv sélectionnée (cas rare), on en crée tout de suite + greeting, puis on envoie
       if (!convId) {
         convId = await createConversationNow(DEFAULT_TITLE);
         if (!convId) {
           setErrorMsg("Impossible de créer une conversation.");
-          setSending(false);
           return;
         }
         await refreshConversations(userId, agentSlug);
@@ -414,18 +392,19 @@ export default function ChatPage() {
       const token = await getAccessToken();
       if (!token) {
         setErrorMsg("Session expirée. Reconnectez-vous.");
-        setSending(false);
         return;
       }
 
       const userText = input.trim();
       setInput("");
 
+      // Optimistic UI (après greeting)
       setMessages((prev) => [
         ...(prev || []),
         { id: "tmp-" + Date.now(), role: "user", content: userText, created_at: new Date().toISOString() },
       ]);
 
+      // Renommer la conversation au 1er message (si elle était "Nouvelle conversation")
       await updateConversationTitleIfNeeded(convId, userText);
       await refreshConversations(userId, agentSlug);
 
@@ -447,7 +426,6 @@ export default function ChatPage() {
       if (!resp.ok) {
         setErrorMsg(json?.error || "Erreur lors de l’envoi.");
         await loadMessages(convId);
-        setSending(false);
         return;
       }
 
@@ -457,10 +435,11 @@ export default function ChatPage() {
       }
 
       await loadMessages(convId);
-      setSending(false);
     } catch (_) {
       setErrorMsg("Erreur lors de l’envoi.");
+    } finally {
       setSending(false);
+      focusInput();
     }
   }
 
@@ -520,23 +499,10 @@ export default function ChatPage() {
                 onClick={async () => {
                   setSelectedConvId(c.id);
                   await loadMessages(c.id);
+                  focusInput();
                 }}
                 title={c.title || ""}
               >
-                <button
-                  type="button"
-                  style={styles.convDeleteBtn}
-                  title="Supprimer"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    handleDeleteConversation(c.id);
-                  }}
-                  aria-label="Supprimer la conversation"
-                >
-                  ×
-                </button>
-
                 <div style={styles.convTitle}>{c.title || "Conversation"}</div>
                 <div style={styles.convMeta}>
                   {c.created_at ? new Date(c.created_at).toLocaleString("fr-FR") : ""}
@@ -586,6 +552,7 @@ export default function ChatPage() {
 
           <div style={styles.inputRow}>
             <textarea
+              ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Écrire…"
@@ -602,6 +569,7 @@ export default function ChatPage() {
 
             <button
               type="button"
+              onMouseDown={(e) => e.preventDefault()} // empêche le focus de quitter le textarea
               onClick={() => {
                 if (!micSupported) return;
                 if (listening) stopMic();
@@ -619,7 +587,12 @@ export default function ChatPage() {
               {listening ? <StopIcon /> : <MicIcon />}
             </button>
 
-            <button onClick={sendMessage} disabled={sending || !input.trim()} style={styles.sendBtn}>
+            <button
+              onMouseDown={(e) => e.preventDefault()} // empêche le focus de quitter le textarea
+              onClick={sendMessage}
+              disabled={sending || !input.trim()}
+              style={styles.sendBtn}
+            >
               {sending ? "Envoi…" : "Envoyer"}
             </button>
           </div>
@@ -701,11 +674,10 @@ const styles = {
     background: "rgba(0,0,0,0.28)",
     backdropFilter: "blur(10px)",
     flex: "0 0 auto",
-    minWidth: 0,
   },
-  topLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
-  topCenter: { display: "flex", justifyContent: "center", alignItems: "center", minWidth: 0 },
-  topRight: { display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12, minWidth: 0 },
+  topLeft: { display: "flex", alignItems: "center", gap: 12 },
+  topCenter: { display: "flex", justifyContent: "center", alignItems: "center" },
+  topRight: { display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12 },
 
   backBtn: {
     padding: "8px 14px",
@@ -732,7 +704,6 @@ const styles = {
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
-    minWidth: 0,
   },
   logoutBtn: {
     padding: "8px 14px",
@@ -748,13 +719,12 @@ const styles = {
     position: "relative",
     zIndex: 1,
     display: "grid",
-    gridTemplateColumns: "320px minmax(0, 1fr)",
+    gridTemplateColumns: "320px 1fr",
     gap: 14,
     padding: 14,
     flex: "1 1 auto",
     minHeight: 0,
     overflow: "hidden",
-    minWidth: 0,
   },
 
   sidebar: {
@@ -766,7 +736,6 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     minHeight: 0,
-    minWidth: 0,
   },
   sideTop: {
     padding: 12,
@@ -775,7 +744,6 @@ const styles = {
     justifyContent: "space-between",
     borderBottom: "1px solid rgba(255,255,255,0.10)",
     flex: "0 0 auto",
-    minWidth: 0,
   },
   sideTitle: {
     fontWeight: 900,
@@ -791,80 +759,41 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
   },
-
   convList: {
     padding: 10,
-    paddingRight: 14,
     display: "grid",
     gap: 8,
     overflowY: "auto",
     overflowX: "hidden",
     flex: "1 1 auto",
     minHeight: 0,
-    minWidth: 0,
-    scrollbarGutter: "stable",
   },
-
   convItem: {
-    width: "100%",
-    minWidth: 0,
-    boxSizing: "border-box",
-    display: "block",
     textAlign: "left",
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,0.10)",
     background: "rgba(0,0,0,0.26)",
     color: "#fff",
-    padding: 12,
+    padding: 10,
     cursor: "pointer",
     overflow: "hidden",
-    position: "relative",
   },
-
-  convDeleteBtn: {
-    position: "absolute",
-    top: 10,
-    right: 10,
-    width: 26,
-    height: 26,
-    borderRadius: 999,
-    border: "1px solid rgba(255,60,60,0.45)",
-    background: "rgba(255,60,60,0.10)",
-    color: "rgba(255,120,120,0.95)",
-    cursor: "pointer",
-    fontWeight: 900,
-    lineHeight: "24px",
-    textAlign: "center",
-  },
-
   convItemActive: {
     border: "1px solid rgba(255,140,0,0.42)",
     background: "rgba(255,140,0,0.08)",
   },
-
   convTitle: {
-    width: "100%",
-    minWidth: 0,
     fontSize: 12,
     fontWeight: 900,
-    marginBottom: 6,
-    overflow: "hidden",
-    display: "-webkit-box",
-    WebkitLineClamp: 2,
-    WebkitBoxOrient: "vertical",
-    paddingRight: 34, // réserve la place de la croix
-  },
-
-  convMeta: {
-    width: "100%",
-    minWidth: 0,
-    fontSize: 11,
-    fontWeight: 700,
-    color: "rgba(238,242,255,0.60)",
+    marginBottom: 4,
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
-    paddingRight: 34,
+  },
+  convMeta: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: "rgba(238,242,255,0.60)",
   },
 
   chatCol: {
@@ -876,7 +805,6 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     minHeight: 0,
-    minWidth: 0,
   },
 
   agentHeader: {
@@ -886,7 +814,6 @@ const styles = {
     gap: 12,
     borderBottom: "1px solid rgba(255,255,255,0.10)",
     flex: "0 0 auto",
-    minWidth: 0,
   },
   avatar: {
     width: 72,
@@ -906,20 +833,18 @@ const styles = {
     background: "rgba(255,255,255,0.06)",
     flexShrink: 0,
   },
-  agentMeta: { display: "grid", gap: 6, minWidth: 0 },
+  agentMeta: { display: "grid", gap: 6 },
   agentName: {
     fontSize: 18,
     fontWeight: 900,
     color: "#ffffff",
     textShadow: "0 2px 12px rgba(0,0,0,0.60)",
-    minWidth: 0,
   },
   agentDesc: {
     fontSize: 13,
     fontWeight: 800,
     color: "rgba(238,242,255,0.75)",
     lineHeight: 1.35,
-    minWidth: 0,
   },
 
   chatBox: {
@@ -928,12 +853,10 @@ const styles = {
     overflowX: "hidden",
     flex: "1 1 auto",
     minHeight: 0,
-    minWidth: 0,
   },
   msgRow: {
     display: "flex",
     marginBottom: 10,
-    minWidth: 0,
   },
   bubble: {
     maxWidth: "78%",
@@ -970,7 +893,6 @@ const styles = {
     borderTop: "1px solid rgba(255,255,255,0.10)",
     background: "rgba(0,0,0,0.18)",
     flex: "0 0 auto",
-    minWidth: 0,
   },
   textarea: {
     flex: 1,
@@ -984,7 +906,6 @@ const styles = {
     minHeight: 44,
     maxHeight: 140,
     fontWeight: 700,
-    minWidth: 0,
   },
   micBtn: {
     width: 44,
@@ -997,7 +918,6 @@ const styles = {
     fontWeight: 900,
     display: "grid",
     placeItems: "center",
-    flex: "0 0 auto",
   },
   micBtnOn: {
     background: "rgba(255,140,0,0.12)",
@@ -1016,7 +936,6 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
     minWidth: 110,
-    flex: "0 0 auto",
   },
 
   center: {
