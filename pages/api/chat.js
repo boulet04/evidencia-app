@@ -558,7 +558,44 @@ export default async function handler(req, res) {
       });
     }
 
-    // --- SYSTEM PROMPT (inclut prompt perso agent + mémoire) ---
+    // --- PROMPTS: GLOBAL + AGENT + PERSO ---
+    // 1) Prompt global (priorité: lib/agentPrompts.__GLOBAL__ ; sinon fallback ci-dessous)
+    const GLOBAL_PROMPT_FALLBACK =
+      "RÈGLES GLOBALES (s’appliquent à tous les agents)\n\n" +
+      "1) commmence toutes tes conversations par : Bonjour, comment puis-je vous aider?\n\n" +
+      "2) Priorité aux informations de l’utilisateur\n" +
+      "- Toute information fournie par l’utilisateur dans la conversation est considérée comme disponible et exploitable.\n" +
+      "- Ne dis jamais “je ne trouve pas cette information” si l’utilisateur vient de la fournir. Utilise-la.\n\n" +
+      "3) Pas de refus génériques\n" +
+      "- Tu n’écris pas “je ne peux pas vous aider” de façon générale.\n" +
+      "- Si une demande sort de ton périmètre exact, tu proposes:\n" +
+      "  (a) ce que tu peux faire immédiatement (structurer, plan d’action, questions, modèle de message),\n" +
+      "  (b) si nécessaire, quel agent est plus adapté.\n\n" +
+      "4) Clarification minimale\n" +
+      "- Si un élément manque réellement, pose UNE seule question courte et précise.\n" +
+      "- Sinon, avance avec des hypothèses explicites.\n\n" +
+      "5) Style\n" +
+      "- Pas de salutations répétées. Pas de “Bonjour je suis …” sauf demande explicite.\n" +
+      "- Réponse professionnelle, directe, orientée action.\n" +
+      "- Ne jamais inventer de faits. Si incertain, le dire.\n\n" +
+      "6) Sources & documents\n" +
+      "- Si des sources (URLs/PDF) sont fournies, tu les utilises en priorité.\n" +
+      "- Si une source est illisible/inaccessible, tu l’indiques et proposes une alternative.\n\n" +
+      "7) Règle de sortie pour l’envoi d’email (Make / Outlook)\n" +
+      "- Quand l'utilisateur te demande d'ecrire ou de préparer un mail, tu dois lui présenter avant envoi.\n" +
+      "- Tu attends toujours sa confirmation pour envoyer le mail.\n" +
+      "- Si la tâche consiste à envoyer un email via Make, tu dois produire uniquement un JSON strict (aucun texte autour) avec exactement ces clés : to, subject, body\n";
+
+    const globalFromLib = safeStr(
+      agentPrompts?.__GLOBAL__ || agentPrompts?.GLOBAL_PROMPT || agentPrompts?.global || ""
+    ).trim();
+    const globalPrompt = globalFromLib || GLOBAL_PROMPT_FALLBACK;
+
+    // 2) Prompt agent fallback (lib/agentPrompts[agentSlug])
+    const agentFallbackPrompt =
+      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts[agentSlug]).trim()) || "";
+
+    // 3) Prompt perso (Supabase client_agent_configs.system_prompt)
     const { data: cfg } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -567,10 +604,8 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     const customPrompt = safeStr(cfg?.system_prompt).trim();
-    const fallbackPrompt =
-      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts[agentSlug]).trim()) ||
-      "";
 
+    // 4) Règles d’exécution email (ton mécanisme de brouillon + confirmation)
     const workflowRules =
       "RÈGLES D’EXÉCUTION (EMAIL / MAKE) :\n" +
       "- Tu NE DOIS JAMAIS envoyer un email automatiquement.\n" +
@@ -581,10 +616,13 @@ export default async function handler(req, res) {
       "- Si une info manque réellement : tu poses UNE question.\n" +
       "- Réponse en français, ton professionnel.\n";
 
+    // IMPORTANT: on injecte TOUJOURS global + agent + perso (si dispo) + mémoire
+    // Ordre choisi: règles d'exécution -> global -> agent -> perso -> identité -> mémoire
     const systemPrompt =
       `${workflowRules}\n` +
-      (customPrompt ? `${customPrompt}\n` : "") +
-      (!customPrompt && fallbackPrompt ? `${fallbackPrompt}\n` : "") +
+      `\n--- PROMPT GLOBAL ---\n${globalPrompt}\n` +
+      (agentFallbackPrompt ? `\n--- PROMPT AGENT ---\n${agentFallbackPrompt}\n` : "") +
+      (customPrompt ? `\n--- PROMPT PERSO UTILISATEUR ---\n${customPrompt}\n` : "") +
       `\nTu es ${safeStr(agent.name) || "un agent"} d’Evidenc'IA.\n` +
       (finalMemory ? `\nMÉMOIRE DE LA CONVERSATION:\n${finalMemory}\n` : "");
 
