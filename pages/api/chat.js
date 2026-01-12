@@ -125,7 +125,797 @@ function extractFirstJsonObject(text) {
 
   const scanned = scanFirstBalancedObject(raw);
   if (scanned) {
-    const parsed = tryParse
-      ught: you must provide citations"? no. No web.
+    const parsed = tryParseJson(scanned);
+    if (parsed) return parsed;
+  }
+
+  return null;
+}
+
+function tryParseJson(s) {
+  const t = safeStr(s).trim();
+  if (!t.startsWith("{") || !t.endsWith("}")) return null;
+  try {
+    const obj = JSON.parse(t);
+    return obj && typeof obj === "object" ? obj : null;
+  } catch {
+    return null;
+  }
+}
+
+function scanFirstBalancedObject(text) {
+  const s = safeStr(text);
+  let start = -1;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+
+    if (ch === '"') {
+      inStr = true;
+      continue;
+    }
+
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+      continue;
+    }
+
+    if (ch === "}") {
+      if (depth > 0) depth--;
+      if (depth === 0 && start !== -1) return s.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function htmlToText(html) {
+  let t = safeStr(html);
+  t = t.replace(/<\s*br\s*\/?>/gi, "\n");
+  t = t.replace(/<\/p>\s*<p>/gi, "\n\n");
+  t = t.replace(/<\/?p>/gi, "");
+  t = t.replace(/<\/?div>/gi, "");
+  t = t.replace(/<\/?strong>/gi, "");
+  t = t.replace(/<\/?em>/gi, "");
+  t = t.replace(/<[^>]+>/g, "");
+  t = t.replace(/\n{3,}/g, "\n\n");
+  return t.trim();
+}
+
+function buildDraftPreview(draft) {
+  const to = safeStr(draft.to || "").trim();
+  const subject = safeStr(draft.subject || "").trim();
+  const body =
+    safeStr(draft.body || "").trim() ||
+    (draft.body_html ? htmlToText(draft.body_html) : "");
+
+  const lines = [];
+  lines.push("Voici le brouillon du mail (non envoyé) :");
+  lines.push("");
+  lines.push(`- Destinataire : ${to || "[À COMPLETER]"}`);
+  lines.push(`- Objet : ${subject || "[À COMPLETER]"}`);
+  lines.push("");
+  lines.push(body || "[Contenu à compléter]");
+  lines.push("");
+  lines.push('Si vous confirmez, écrivez "ok envoie" pour que je l’envoie.');
+  return lines.join("\n");
+}
+
+/**
+ * Signature: on l’extrait du prompt perso (Prénom/Nom + bloc "En-tête / signature standard").
+ * Si le modèle met un placeholder ou oublie, on complète côté serveur.
+ */
+function extractUserFullNameFromPrompt(promptText) {
+  const p = safeStr(promptText);
+
+  const first = (p.match(/Prénom\s*:\s*([^\n\r]+)/i)?.[1] || "").trim();
+  const last = (p.match(/Nom\s*:\s*([^\n\r]+)/i)?.[1] || "").trim();
+
+  if (first && last) return `${first} ${last}`.trim();
+
+  // Fallback: "Tu travailles pour Simon"
+  const workFor = (p.match(/tu\s+travailles\s+pour\s+([^\n\r]+)/i)?.[1] || "").trim();
+  if (workFor) return workFor;
+
+  return "";
+}
+
+function extractSignatureBlockFromPrompt(promptText) {
+  const lines = safeStr(promptText).split(/\r?\n/);
+  const idx = lines.findIndex((l) => l.toLowerCase().includes("en-tête / signature standard"));
+  if (idx === -1) return "";
+
+  // On collecte les lignes suivantes "visibles" (non vides), jusqu’à un séparateur logique
+  const collected = [];
+  for (let i = idx + 1; i < lines.length; i++) {
+    const raw = lines[i];
+    const l = raw.trim();
+
+    // stop sur sections typiques
+    if (!l) {
+      // on tolère 1 ligne vide, mais si on a déjà collecté, on stop
+      if (collected.length > 0) break;
+      continue;
+    }
+    if (/^(MISSION|RÈGLES|UTILISATION|COMPORTEMENT|FORMAT|STYLE|LIMITES|CONFIDENTIALITÉ)\b/i.test(l)) break;
+    if (l.startsWith("-")) break;
+
+    // On supprime l’indentation mais on garde la ligne
+    collected.push(l);
+    if (collected.length >= 8) break;
+  }
+
+  // On évite de renvoyer un bloc ridicule
+  const block = collected.join("\n").trim();
+  return block.length >= 10 ? block : "";
+}
+
+function normalizeBody(body) {
+  // Force des paragraphes séparés par une ligne vide (règle globale)
+  const t = safeStr(body).replace(/\r/g, "").trim();
+  // si déjà bien formaté, on n’abîme pas trop
+  return t.replace(/\n{3,}/g, "\n\n");
+}
+
+function ensureSignatureInBody(body, fullName, signatureBlock) {
+  let t = normalizeBody(body);
+
+  // Si le modèle a laissé un placeholder, on le remplace
+  t = t.replace(/\[Votre\s+Pr[ée]nom\]/gi, fullName || "");
+  t = t.replace(/\[Votre\s+Nom\]/gi, fullName || "");
+  t = t.replace(/\[Votre\s+Pr[ée]nom\s+Nom\]/gi, fullName || "");
+
+  const lower = t.toLowerCase();
+  const hasName = fullName && lower.includes(fullName.toLowerCase());
+  const hasSigBlock = signatureBlock && lower.includes(signatureBlock.split("\n")[0].toLowerCase());
+
+  if (hasName || hasSigBlock) return t;
+
+  // Ajout standard (copiable) : cordialement + nom + bloc entreprise
+  const parts = [];
+  parts.push(t);
+  parts.push("");
+  parts.push("Cordialement,");
+  if (fullName) parts.push(fullName);
+  if (signatureBlock) parts.push(signatureBlock);
+  return parts.join("\n").trim();
+}
+
+function bodyToHtml(bodyText) {
+  // paragraphes => <p>...<br/></p>
+  const t = normalizeBody(bodyText);
+  const escaped = t
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  const paras = escaped.split(/\n{2,}/).map((p) => p.replace(/\n/g, "<br/>"));
+  return paras.map((p) => `<p>${p}</p>`).join("");
+}
+
+function pickFallbackPromptForSlug(slug) {
+  const v = agentPrompts?.[slug];
+  if (!v) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "object") {
+    return (
+      safeStr(v.system_prompt || v.systemPrompt || v.prompt || v.system || v.text || "")
+    ).trim();
+  }
+  return "";
+}
+
+export default async function handler(req, res) {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée." });
+
+  const t0 = Date.now();
+
+  try {
+    const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
+
+    const MAKE_URL =
+      process.env.MAKE_EMAIL_WEBHOOK_URL ||
+      process.env.MAKE_WEBHOOK_URL ||
+      process.env.MAKE_EMAIL_WEBHOOK ||
+      "";
+
+    const CHAT_MODEL = process.env.MISTRAL_MODEL || "mistral-small-latest";
+    const SUMMARY_MODEL = process.env.MISTRAL_SUMMARY_MODEL || "mistral-small-latest";
+
+    if (!SUPABASE_URL) return res.status(500).json({ error: "NEXT_PUBLIC_SUPABASE_URL manquant sur Vercel." });
+    if (!SUPABASE_SERVICE_ROLE_KEY) return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquant sur Vercel." });
+    if (!MISTRAL_API_KEY) return res.status(500).json({ error: "MISTRAL_API_KEY manquant sur Vercel." });
+
+    const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false },
+    });
+
+    // AUTH
+    const token = getBearerToken(req);
+    if (!token) return res.status(401).json({ error: "Non authentifié (token manquant)." });
+
+    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
+    if (userErr || !userData?.user) return res.status(401).json({ error: "Session invalide. Reconnectez-vous." });
+    const userId = userData.user.id;
+
+    // BODY
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const agentSlug = safeStr(body.agentSlug || body.agent_slug).trim().toLowerCase();
+    const message = safeStr(body.message || body.content).trim();
+    let conversationId = safeStr(body.conversationId || body.conversation_id).trim() || null;
+
+    if (!agentSlug) return res.status(400).json({ error: "Aucun agent sélectionné." });
+    if (!message) return res.status(400).json({ error: "Message vide." });
+
+    // PROFILE (admin + expiry)
+    const { data: profile, error: profileErr } = await supabaseAdmin
+      .from("profiles")
+      .select("role, expires_at")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (profileErr) return res.status(500).json({ error: "Erreur lecture profil.", detail: profileErr.message });
+
+    const isAdmin = profile?.role === "admin";
+    if (!isAdmin && isExpired(profile?.expires_at)) {
+      return res.status(403).json({
+        error: "Subscription expired",
+        message: "Votre abonnement a expiré. Veuillez contacter Evidenc'IA pour renouveler votre abonnement.",
+      });
+    }
+
+    // AGENT
+    const { data: agent, error: agentErr } = await supabaseAdmin
+      .from("agents")
+      .select("id, slug, name, description")
+      .eq("slug", agentSlug)
+      .maybeSingle();
+
+    if (agentErr) return res.status(500).json({ error: "Erreur lecture agent.", detail: agentErr.message });
+    if (!agent) return res.status(404).json({ error: "Agent introuvable." });
+
+    // ASSIGNMENT (non-admin)
+    if (!isAdmin) {
+      const { data: ua, error: uaErr } = await supabaseAdmin
+        .from("user_agents")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("agent_id", agent.id)
+        .maybeSingle();
+
+      if (uaErr) return res.status(500).json({ error: "Erreur assignation (user_agents).", detail: uaErr.message });
+      if (!ua) return res.status(403).json({ error: "Accès interdit : agent non assigné." });
+    }
+
+    // CONVERSATION
+    if (conversationId) {
+      const { data: conv, error: convErr } = await supabaseAdmin
+        .from("conversations")
+        .select("id, user_id, agent_slug")
+        .eq("id", conversationId)
+        .maybeSingle();
+
+      if (convErr) return res.status(500).json({ error: "Erreur lecture conversation.", detail: convErr.message });
+
+      if (!conv) conversationId = null;
+      else if (!isAdmin && conv.user_id !== userId) return res.status(403).json({ error: "Conversation invalide (ownership)." });
+      else if (conv.agent_slug !== agentSlug) return res.status(400).json({ error: "conversationId ne correspond pas à agentSlug." });
+    }
+
+    if (!conversationId) {
+      const { data: newConv, error: newConvErr } = await supabaseAdmin
+        .from("conversations")
+        .insert({
+          user_id: userId,
+          agent_slug: agentSlug,
+          title: titleFromMessage(message),
+          archived: false,
+        })
+        .select("id")
+        .single();
+
+      if (newConvErr) {
+        const { data: newConv2, error: newConvErr2 } = await supabaseAdmin
+          .from("conversations")
+          .insert({
+            user_id: userId,
+            agent_slug: agentSlug,
+            title: titleFromMessage(message),
+          })
+          .select("id")
+          .single();
+
+        if (newConvErr2) return res.status(500).json({ error: "Création conversation impossible.", detail: newConvErr2.message });
+        conversationId = newConv2.id;
+      } else {
+        conversationId = newConv.id;
+      }
+    }
+
+    // SAVE user message
+    const { error: insUserErr } = await supabaseAdmin.from("messages").insert({
+      conversation_id: conversationId,
+      role: "user",
+      content: message,
+      created_at: nowIso(),
+    });
+    if (insUserErr) return res.status(500).json({ error: "Erreur insertion message user.", detail: insUserErr.message });
+
+    // ---- PENDING EMAIL: confirmation => envoi ----
+    const { data: pendingRows } = await supabaseAdmin
+      .from("messages")
+      .select("content, created_at")
+      .eq("conversation_id", conversationId)
+      .eq("role", "system")
+      .like("content", "PENDING_EMAIL:%")
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    const pendingList = (pendingRows || [])
+      .map((r) => parsePendingEmailTag(r.content))
+      .filter(Boolean);
+
+    const lastPending = pendingList.find((p) => p && p._state !== "sent") || null;
+
+    // Cas "envoie le même mail à X"
+    const emailsInMsg = extractEmails(message);
+    const wantsReuse =
+      /m[eê]me mail|m[eê]me email|renvoie|refait|même message|retransmets|envoie à/i.test(message);
+
+    if (!isConfirmSend(message) && wantsReuse && emailsInMsg.length === 1 && lastPending) {
+      const newDraft = { ...lastPending, to: emailsInMsg[0], _state: "pending", updated_at: nowIso() };
+
+      const { error: pendInsErr } = await supabaseAdmin.from("messages").insert({
+        conversation_id: conversationId,
+        role: "system",
+        content: buildPendingEmailTag(newDraft),
+        created_at: nowIso(),
+      });
+      if (pendInsErr) return res.status(500).json({ error: "Erreur stockage brouillon.", detail: pendInsErr.message });
+
+      const assistantText = buildDraftPreview(newDraft);
+
+      const { error: insAsstErr } = await supabaseAdmin.from("messages").insert({
+        conversation_id: conversationId,
+        role: "assistant",
+        content: assistantText,
+        created_at: nowIso(),
+      });
+      if (insAsstErr) return res.status(500).json({ error: "Erreur insertion message assistant.", detail: insAsstErr.message });
+
+      return res.status(200).json({
+        ok: true,
+        conversationId,
+        reply: assistantText,
+        mailSent: false,
+        mailError: "",
+        timings: { total_ms: Date.now() - t0, llm_ms: 0 },
+        memory: { used: false, refreshed: false },
+      });
+    }
+
+    if (isConfirmSend(message)) {
+      if (!lastPending) {
+        const assistantText =
+          "Je n’ai aucun brouillon en attente dans cette conversation. Dites-moi le destinataire (email) + l’objet + le contexte et je vous le présenterai avant envoi.";
+        await supabaseAdmin.from("messages").insert({
+          conversation_id: conversationId,
+          role: "assistant",
+          content: assistantText,
+          created_at: nowIso(),
+        });
+        return res.status(200).json({
+          ok: true,
+          conversationId,
+          reply: assistantText,
+          mailSent: false,
+          mailError: "NO_PENDING",
+          timings: { total_ms: Date.now() - t0, llm_ms: 0 },
+          memory: { used: false, refreshed: false },
+        });
+      }
+
+      const to = safeStr(lastPending.to || "").trim();
+      const subject = safeStr(lastPending.subject || "").trim();
+      const bodyHtml =
+        safeStr(lastPending.body_html || "").trim() ||
+        (safeStr(lastPending.body || "").trim() ? bodyToHtml(lastPending.body) : "");
+
+      if (!looksLikeEmail(to) || !subject || !bodyHtml) {
+        const assistantText =
+          "Je ne peux pas envoyer : brouillon incomplet (destinataire / objet / contenu). Donnez-moi le destinataire exact (email) et/ou ce qu’il manque.";
+        await supabaseAdmin.from("messages").insert({
+          conversation_id: conversationId,
+          role: "assistant",
+          content: assistantText,
+          created_at: nowIso(),
+        });
+        return res.status(200).json({
+          ok: true,
+          conversationId,
+          reply: assistantText,
+          mailSent: false,
+          mailError: "INVALID_PENDING",
+          timings: { total_ms: Date.now() - t0, llm_ms: 0 },
+          memory: { used: false, refreshed: false },
+        });
+      }
+
+      if (!MAKE_URL) {
+        const assistantText =
+          "Impossible d’envoyer : l’URL Make n’est pas configurée côté serveur (MAKE_WEBHOOK_URL manquante).";
+        await supabaseAdmin.from("messages").insert({
+          conversation_id: conversationId,
+          role: "assistant",
+          content: assistantText,
+          created_at: nowIso(),
+        });
+        return res.status(200).json({
+          ok: true,
+          conversationId,
+          reply: assistantText,
+          mailSent: false,
+          mailError: "MAKE_URL_MISSING",
+          timings: { total_ms: Date.now() - t0, llm_ms: 0 },
+          memory: { used: false, refreshed: false },
+        });
+      }
+
+      let mailSent = false;
+      let mailError = "";
+
+      const makeResp = await withTimeout(
+        fetch(MAKE_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            to,
+            cc: Array.isArray(lastPending.cc) ? lastPending.cc : [],
+            bcc: Array.isArray(lastPending.bcc) ? lastPending.bcc : [],
+            subject,
+            body_html: bodyHtml,
+            meta: { conversationId, userId, agentSlug, ts: nowIso() },
+          }),
+        }),
+        15000,
+        "make_webhook"
+      );
+
+      const makeText = await makeResp.text().catch(() => "");
+      if (!makeResp.ok) {
+        mailError = `Make webhook error (${makeResp.status}) ${makeText || ""}`.slice(0, 400);
+      } else {
+        mailSent = true;
+      }
+
+      const assistantText = mailSent
+        ? "Envoi confirmé : l’email a été transmis au workflow d’envoi. Vérifiez Indésirables/Spam et les Éléments envoyés du compte Outlook connecté à Make."
+        : "Je n’ai pas pu envoyer l’email : le workflow a répondu une erreur. Je peux réessayer.";
+
+      const sentMarker = { ...lastPending, _state: "sent", sent_at: nowIso() };
+      await supabaseAdmin.from("messages").insert({
+        conversation_id: conversationId,
+        role: "system",
+        content: buildPendingEmailTag(sentMarker),
+        created_at: nowIso(),
+      });
+
+      await supabaseAdmin.from("messages").insert({
+        conversation_id: conversationId,
+        role: "assistant",
+        content: assistantText,
+        created_at: nowIso(),
+      });
+
+      return res.status(200).json({
+        ok: true,
+        conversationId,
+        reply: assistantText,
+        mailSent,
+        mailError,
+        timings: { total_ms: Date.now() - t0, llm_ms: 0 },
+        memory: { used: false, refreshed: false },
+      });
+    }
+
+    // --- MEMORY ---
+    const { data: memRow } = await supabaseAdmin
+      .from("messages")
+      .select("id, content, created_at")
+      .eq("conversation_id", conversationId)
+      .eq("role", "system")
+      .like("content", "MEMORY:%")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const memoryContent = memRow?.content ? stripMemoryTag(memRow.content) : "";
+    const memoryCreatedAt = memRow?.created_at || null;
+
+    let needMemoryUpdate = !memoryCreatedAt;
+
+    if (memoryCreatedAt) {
+      const { data: ids } = await supabaseAdmin
+        .from("messages")
+        .select("id")
+        .eq("conversation_id", conversationId)
+        .in("role", ["user", "assistant"])
+        .gt("created_at", memoryCreatedAt)
+        .limit(12);
+
+      if ((ids || []).length >= 12) needMemoryUpdate = true;
+    }
+
+    const HISTORY_LIMIT = 18;
+
+    const { data: recentMsgs, error: recentErr } = await supabaseAdmin
+      .from("messages")
+      .select("role, content, created_at")
+      .eq("conversation_id", conversationId)
+      .not("content", "like", "MEMORY:%")
+      .not("content", "like", "PENDING_EMAIL:%")
+      .order("created_at", { ascending: false })
+      .limit(HISTORY_LIMIT);
+
+    if (recentErr) return res.status(500).json({ error: "Erreur lecture historique.", detail: recentErr.message });
+
+    const history = (recentMsgs || []).slice().reverse();
+
+    const mistral = new Mistral({ apiKey: MISTRAL_API_KEY });
+
+    if (needMemoryUpdate) {
+      const { data: sumMsgs, error: sumErr } = await supabaseAdmin
+        .from("messages")
+        .select("role, content, created_at")
+        .eq("conversation_id", conversationId)
+        .not("content", "like", "MEMORY:%")
+        .not("content", "like", "PENDING_EMAIL:%")
+        .order("created_at", { ascending: false })
+        .limit(60);
+
+      if (sumErr) return res.status(500).json({ error: "Erreur lecture messages pour résumé.", detail: sumErr.message });
+
+      const sumHistory = (sumMsgs || []).slice().reverse();
+
+      const summarizerSystem =
+        "Tu es un moteur de synthèse. Produis un résumé court et utile en français.\n" +
+        "- Format : puces courtes.\n" +
+        "- Faits importants, décisions, contraintes, préférences, points en attente.\n" +
+        "- Max 1200 caractères.\n" +
+        "- Ne pas inventer.\n";
+
+      const summarizerUser =
+        (memoryContent ? `Mémoire précédente:\n${memoryContent}\n\n` : "") +
+        "Voici le fil de conversation. Mets à jour la mémoire :\n\n" +
+        sumHistory
+          .map((m) => `${m.role.toUpperCase()}: ${safeStr(m.content).slice(0, 1200)}`)
+          .join("\n");
+
+      const sumResp = await withTimeout(
+        mistral.chat.complete({
+          model: SUMMARY_MODEL,
+          temperature: 0.2,
+          maxTokens: 450,
+          messages: [
+            { role: "system", content: summarizerSystem },
+            { role: "user", content: summarizerUser },
+          ],
+        }),
+        20000,
+        "summary"
+      );
+
+      const newMemory = safeStr(sumResp?.choices?.[0]?.message?.content).trim();
+      if (newMemory) {
+        const { error: memInsErr } = await supabaseAdmin.from("messages").insert({
+          conversation_id: conversationId,
+          role: "system",
+          content: buildMemoryTag(newMemory),
+          created_at: nowIso(),
+        });
+        if (memInsErr) return res.status(500).json({ error: "Erreur écriture mémoire.", detail: memInsErr.message });
+      }
+    }
+
+    const { data: memRow2 } = await supabaseAdmin
+      .from("messages")
+      .select("content")
+      .eq("conversation_id", conversationId)
+      .eq("role", "system")
+      .like("content", "MEMORY:%")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const finalMemory = memRow2?.content ? stripMemoryTag(memRow2.content) : memoryContent;
+
+    // --- LOAD PERSONAL PROMPT (client_agent_configs) + fallback lib/agentPrompts.js ---
+    const { data: cfg } = await supabaseAdmin
+      .from("client_agent_configs")
+      .select("system_prompt, context")
+      .eq("user_id", userId)
+      .eq("agent_id", agent.id)
+      .maybeSingle();
+
+    const personalPrompt = safeStr(cfg?.system_prompt).trim() || pickFallbackPromptForSlug(agentSlug);
+    const contextJson = cfg?.context && typeof cfg.context === "object" ? cfg.context : null;
+
+    // Signature extraction (from personalPrompt)
+    const userFullName = extractUserFullNameFromPrompt(personalPrompt);
+    const signatureBlock = extractSignatureBlockFromPrompt(personalPrompt);
+
+    // --- SYSTEM PROMPT ---
+    const workflowRules =
+      "RÈGLES EMAIL (OBLIGATOIRES) :\n" +
+      "- Quand l’utilisateur demande d’écrire/préparer un mail : tu dois d’abord présenter un BROUILLON (non envoyé) et demander confirmation.\n" +
+      "- Tu n’envoies JAMAIS sans confirmation explicite de l’utilisateur.\n" +
+      "- Tu ne mets jamais d’adresse email si elle n’a pas été donnée par l’utilisateur.\n" +
+      "- Pour préparer un mail, renvoie un JSON STRICT (sans texte autour) avec exactement ces clés : to, subject, body.\n" +
+      "- Si le destinataire manque : mets to à \"\" et pose UNE question : \"À quelle adresse email dois-je l’envoyer ?\".\n" +
+      "- Pour la signature : utilise le nom/prénom et la signature standard fournis dans le prompt (pas de placeholder).\n";
+
+    const ctxBlock = contextJson ? `\nCONTEXTE (JSON):\n${JSON.stringify(contextJson)}\n` : "";
+
+    const systemPrompt =
+      `${workflowRules}\n` +
+      (personalPrompt ? `PROMPT DE L’AGENT (à respecter) :\n${personalPrompt}\n` : "") +
+      `${ctxBlock}\n` +
+      `Tu es ${safeStr(agent.name) || "un agent"} d’Evidenc'IA. Réponds en français, de manière opérationnelle.\n` +
+      (finalMemory ? `\nMÉMOIRE DE LA CONVERSATION:\n${finalMemory}\n` : "");
+
+    const tBeforeLLM = Date.now();
+
+    const completion = await withTimeout(
+      mistral.chat.complete({
+        model: CHAT_MODEL,
+        temperature: 0.4,
+        maxTokens: 900,
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...history.map((m) => ({ role: m.role, content: m.content })),
+          { role: "user", content: message },
+        ],
+      }),
+      25000,
+      "chat"
+    );
+
+    let assistantText = safeStr(completion?.choices?.[0]?.message?.content).trim();
+    if (!assistantText) assistantText = "Réponse vide.";
+
+    // --- DRAFT EMAIL HANDLING ---
+    const obj = extractFirstJsonObject(assistantText);
+    const isDraft =
+      obj &&
+      typeof obj === "object" &&
+      Object.prototype.hasOwnProperty.call(obj, "to") &&
+      Object.prototype.hasOwnProperty.call(obj, "subject") &&
+      Object.prototype.hasOwnProperty.call(obj, "body");
+
+    if (isDraft) {
+      const to = safeStr(obj.to).trim();
+      const subject = safeStr(obj.subject).trim();
+      let bodyText = safeStr(obj.body).trim();
+
+      // Ajout/normalisation signature côté serveur (corrige [Votre Prénom])
+      bodyText = ensureSignatureInBody(bodyText, userFullName, signatureBlock);
+
+      // Sécurité : destinataire autorisé uniquement si fourni par l’utilisateur
+      const userEmailsInHistory = [];
+      for (const m of history) {
+        if (m.role === "user") userEmailsInHistory.push(...extractEmails(m.content));
+      }
+      userEmailsInHistory.push(...extractEmails(message));
+      const userProvided = userEmailsInHistory.includes(to);
+
+      // Si to manquant / non fourni par user : on garde le brouillon, mais on demande l’adresse
+      if (!to || !looksLikeEmail(to) || !userProvided) {
+        const storeDraft = { to: "", subject, body: bodyText, _state: "pending", created_at: nowIso() };
+        await supabaseAdmin.from("messages").insert({
+          conversation_id: conversationId,
+          role: "system",
+          content: buildPendingEmailTag(storeDraft),
+          created_at: nowIso(),
+        });
+
+        const assistantOut =
+          buildDraftPreview(storeDraft) +
+          "\n\nÀ quelle adresse email dois-je l’envoyer ?";
+
+        await supabaseAdmin.from("messages").insert({
+          conversation_id: conversationId,
+          role: "assistant",
+          content: assistantOut,
+          created_at: nowIso(),
+        });
+
+        return res.status(200).json({
+          ok: true,
+          conversationId,
+          reply: assistantOut,
+          mailSent: false,
+          mailError: "",
+          timings: { total_ms: Date.now() - t0, llm_ms: Date.now() - tBeforeLLM },
+          memory: { used: Boolean(finalMemory), refreshed: Boolean(needMemoryUpdate) },
+        });
+      }
+
+      const pendingDraft = {
+        to,
+        subject,
+        body: bodyText,
+        body_html: bodyToHtml(bodyText),
+        _state: "pending",
+        created_at: nowIso(),
+      };
+
+      await supabaseAdmin.from("messages").insert({
+        conversation_id: conversationId,
+        role: "system",
+        content: buildPendingEmailTag(pendingDraft),
+        created_at: nowIso(),
+      });
+
+      const preview = buildDraftPreview(pendingDraft);
+
+      await supabaseAdmin.from("messages").insert({
+        conversation_id: conversationId,
+        role: "assistant",
+        content: preview,
+        created_at: nowIso(),
+      });
+
+      return res.status(200).json({
+        ok: true,
+        conversationId,
+        reply: preview,
+        mailSent: false,
+        mailError: "",
+        timings: { total_ms: Date.now() - t0, llm_ms: Date.now() - tBeforeLLM },
+        memory: { used: Boolean(finalMemory), refreshed: Boolean(needMemoryUpdate) },
+      });
+    }
+
+    // --- Normal assistant answer ---
+    const { error: insAsstErr } = await supabaseAdmin.from("messages").insert({
+      conversation_id: conversationId,
+      role: "assistant",
+      content: assistantText,
+      created_at: nowIso(),
+    });
+
+    if (insAsstErr) return res.status(500).json({ error: "Erreur insertion message assistant.", detail: insAsstErr.message });
+
+    return res.status(200).json({
+      ok: true,
+      conversationId,
+      reply: assistantText,
+      mailSent: false,
+      mailError: "",
+      timings: { total_ms: Date.now() - t0, llm_ms: Date.now() - tBeforeLLM },
+      memory: { used: Boolean(finalMemory), refreshed: Boolean(needMemoryUpdate) },
+    });
+  } catch (e) {
+    return res.status(500).json({
+      error: "Server error",
+      details: safeStr(e?.message || e),
+    });
   }
 }
