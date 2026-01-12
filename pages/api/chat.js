@@ -55,6 +55,18 @@ function stripMemoryTag(content) {
   return t.startsWith("MEMORY:\n") ? t.slice("MEMORY:\n".length) : t;
 }
 
+// -------- PROMPTS HELPERS (IMPORTANT) --------
+function getPromptString(v) {
+  if (!v) return "";
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "object") {
+    if (typeof v.systemPrompt === "string") return v.systemPrompt.trim();
+    if (typeof v.prompt === "string") return v.prompt.trim();
+  }
+  return "";
+}
+
+// -------- DRAFT EMAIL STORAGE --------
 const DRAFT_PREFIX = "DRAFT_EMAIL:\n";
 
 function buildDraftTag(obj) {
@@ -88,7 +100,6 @@ function extractFirstJsonObject(text) {
   const raw = safeStr(text).trim();
   if (!raw) return null;
 
-  // 1) Chercher un bloc ```json ... ```
   const fenceJson = new RegExp("```\\s*json\\s*([\\s\\S]*?)```", "i");
   const mJson = raw.match(fenceJson);
   if (mJson?.[1]) {
@@ -97,7 +108,6 @@ function extractFirstJsonObject(text) {
     if (parsed) return parsed;
   }
 
-  // 2) Chercher un bloc ``` ... ``` (sans préciser json)
   const fenceAny = new RegExp("```\\s*([\\s\\S]*?)```", "i");
   const mAny = raw.match(fenceAny);
   if (mAny?.[1]) {
@@ -106,7 +116,6 @@ function extractFirstJsonObject(text) {
     if (parsed) return parsed;
   }
 
-  // 3) Chercher un objet JSON par scan d’accolades (top-level)
   const scanned = scanFirstBalancedObject(raw);
   if (scanned) {
     const parsed = tryParseJson(scanned);
@@ -529,7 +538,6 @@ export default async function handler(req, res) {
             assistantText =
               "Envoi confirmé : l’email a été transmis au workflow d’envoi. Vérifiez Indésirables/Spam et les Éléments envoyés du compte Outlook connecté à Make.";
 
-            // Marque le brouillon comme “consommé” (pour éviter de renvoyer un ancien mail)
             await supabaseAdmin.from("messages").insert({
               conversation_id: conversationId,
               role: "system",
@@ -558,44 +566,10 @@ export default async function handler(req, res) {
       });
     }
 
-    // --- PROMPTS: GLOBAL + AGENT + PERSO ---
-    // 1) Prompt global (priorité: lib/agentPrompts.__GLOBAL__ ; sinon fallback ci-dessous)
-    const GLOBAL_PROMPT_FALLBACK =
-      "RÈGLES GLOBALES (s’appliquent à tous les agents)\n\n" +
-      "1) commmence toutes tes conversations par : Bonjour, comment puis-je vous aider?\n\n" +
-      "2) Priorité aux informations de l’utilisateur\n" +
-      "- Toute information fournie par l’utilisateur dans la conversation est considérée comme disponible et exploitable.\n" +
-      "- Ne dis jamais “je ne trouve pas cette information” si l’utilisateur vient de la fournir. Utilise-la.\n\n" +
-      "3) Pas de refus génériques\n" +
-      "- Tu n’écris pas “je ne peux pas vous aider” de façon générale.\n" +
-      "- Si une demande sort de ton périmètre exact, tu proposes:\n" +
-      "  (a) ce que tu peux faire immédiatement (structurer, plan d’action, questions, modèle de message),\n" +
-      "  (b) si nécessaire, quel agent est plus adapté.\n\n" +
-      "4) Clarification minimale\n" +
-      "- Si un élément manque réellement, pose UNE seule question courte et précise.\n" +
-      "- Sinon, avance avec des hypothèses explicites.\n\n" +
-      "5) Style\n" +
-      "- Pas de salutations répétées. Pas de “Bonjour je suis …” sauf demande explicite.\n" +
-      "- Réponse professionnelle, directe, orientée action.\n" +
-      "- Ne jamais inventer de faits. Si incertain, le dire.\n\n" +
-      "6) Sources & documents\n" +
-      "- Si des sources (URLs/PDF) sont fournies, tu les utilises en priorité.\n" +
-      "- Si une source est illisible/inaccessible, tu l’indiques et proposes une alternative.\n\n" +
-      "7) Règle de sortie pour l’envoi d’email (Make / Outlook)\n" +
-      "- Quand l'utilisateur te demande d'ecrire ou de préparer un mail, tu dois lui présenter avant envoi.\n" +
-      "- Tu attends toujours sa confirmation pour envoyer le mail.\n" +
-      "- Si la tâche consiste à envoyer un email via Make, tu dois produire uniquement un JSON strict (aucun texte autour) avec exactement ces clés : to, subject, body\n";
+    // --- PROMPTS (GLOBAL + AGENT + PERSO) ---
+    const globalPrompt = getPromptString(agentPrompts?.__GLOBAL__);
+    const agentFallbackPrompt = getPromptString(agentPrompts?.[agentSlug]);
 
-    const globalFromLib = safeStr(
-      agentPrompts?.__GLOBAL__ || agentPrompts?.GLOBAL_PROMPT || agentPrompts?.global || ""
-    ).trim();
-    const globalPrompt = globalFromLib || GLOBAL_PROMPT_FALLBACK;
-
-    // 2) Prompt agent fallback (lib/agentPrompts[agentSlug])
-    const agentFallbackPrompt =
-      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts[agentSlug]).trim()) || "";
-
-    // 3) Prompt perso (Supabase client_agent_configs.system_prompt)
     const { data: cfg } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -605,7 +579,6 @@ export default async function handler(req, res) {
 
     const customPrompt = safeStr(cfg?.system_prompt).trim();
 
-    // 4) Règles d’exécution email (ton mécanisme de brouillon + confirmation)
     const workflowRules =
       "RÈGLES D’EXÉCUTION (EMAIL / MAKE) :\n" +
       "- Tu NE DOIS JAMAIS envoyer un email automatiquement.\n" +
@@ -616,11 +589,9 @@ export default async function handler(req, res) {
       "- Si une info manque réellement : tu poses UNE question.\n" +
       "- Réponse en français, ton professionnel.\n";
 
-    // IMPORTANT: on injecte TOUJOURS global + agent + perso (si dispo) + mémoire
-    // Ordre choisi: règles d'exécution -> global -> agent -> perso -> identité -> mémoire
     const systemPrompt =
       `${workflowRules}\n` +
-      `\n--- PROMPT GLOBAL ---\n${globalPrompt}\n` +
+      (globalPrompt ? `\n--- PROMPT GLOBAL ---\n${globalPrompt}\n` : "") +
       (agentFallbackPrompt ? `\n--- PROMPT AGENT ---\n${agentFallbackPrompt}\n` : "") +
       (customPrompt ? `\n--- PROMPT PERSO UTILISATEUR ---\n${customPrompt}\n` : "") +
       `\nTu es ${safeStr(agent.name) || "un agent"} d’Evidenc'IA.\n` +
@@ -646,7 +617,7 @@ export default async function handler(req, res) {
     let assistantText = safeStr(completion?.choices?.[0]?.message?.content).trim();
     if (!assistantText) assistantText = "Réponse vide.";
 
-    // --- DRAFT DETECTION (on stocke un brouillon côté serveur, on n’envoie jamais ici) ---
+    // --- DRAFT DETECTION (stockage brouillon; pas d’envoi) ---
     let mailSent = false;
     let mailError = "";
 
@@ -672,12 +643,11 @@ export default async function handler(req, res) {
         to: safeStr(obj.to).trim(),
         subject: safeStr(obj.subject).trim(),
         body: safeStr(obj.body).trim(),
-        body_html: safeStr(obj.body_html || obj.body_html).trim(),
+        body_html: safeStr(obj.body_html || "").trim(),
         cc: Array.isArray(obj.cc) ? obj.cc : [],
         bcc: Array.isArray(obj.bcc) ? obj.bcc : [],
       };
 
-      // Stockage brouillon (caché UI) pour éviter amnésie
       await supabaseAdmin.from("messages").insert({
         conversation_id: conversationId,
         role: "system",
@@ -685,15 +655,11 @@ export default async function handler(req, res) {
         created_at: nowIso(),
       });
 
-      // Affichage utilisateur : brouillon lisible + demande confirmation
       assistantText = buildDraftPreview(draft);
-
-      // Important : on NE déclenche PAS Make ici
       mailSent = false;
       mailError = "";
     }
 
-    // SAVE assistant message (lisible)
     const { error: insAsstErr } = await supabaseAdmin.from("messages").insert({
       conversation_id: conversationId,
       role: "assistant",
