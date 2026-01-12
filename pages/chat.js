@@ -201,7 +201,6 @@ export default function ChatPage() {
     const conv = (conversations || []).find((c) => c.id === conversationId);
     const currentTitle = conv?.title || DEFAULT_TITLE;
 
-    // Si la conv a été créée "vide", on la renomme au 1er message
     if (!currentTitle || currentTitle === DEFAULT_TITLE) {
       const newTitle = titleFromMessage(firstUserMessage);
       try {
@@ -217,7 +216,7 @@ export default function ChatPage() {
       .eq("user_id", uid)
       .eq("agent_slug", slug)
       .order("created_at", { ascending: false })
-      .limit(10);
+      .limit(25);
 
     if (error) {
       const { data: data2, error: error2 } = await supabase
@@ -226,7 +225,7 @@ export default function ChatPage() {
         .eq("user_id", uid)
         .eq("agent_slug", slug)
         .order("created_at", { ascending: false })
-        .limit(10);
+        .limit(25);
 
       if (error2) {
         setErrorMsg("Impossible de charger l'historique.");
@@ -248,8 +247,7 @@ export default function ChatPage() {
   }
 
   async function ensureConversationExistsWithGreeting() {
-    // Si aucune conversation, on en crée une immédiatement + greeting
-    const { list, firstId } = await refreshConversations(userId, agentSlug);
+    const { firstId } = await refreshConversations(userId, agentSlug);
 
     if (firstId) {
       setSelectedConvId(firstId);
@@ -257,7 +255,6 @@ export default function ChatPage() {
       return;
     }
 
-    // Aucune conversation => on crée + greeting + on charge
     const convId = await createConversationNow(DEFAULT_TITLE);
     if (!convId) {
       setSelectedConvId("");
@@ -268,7 +265,6 @@ export default function ChatPage() {
     await refreshConversations(userId, agentSlug);
     setSelectedConvId(convId);
 
-    // IMPORTANT : greeting avant toute action user
     await initGreetingIfEmpty(convId);
     await loadMessages(convId);
   }
@@ -321,7 +317,7 @@ export default function ChatPage() {
     })();
   }, []);
 
-  // Une fois userId + agentSlug connus : on garantit une conversation existante + greeting
+  // Une fois userId + agentSlug connus
   useEffect(() => {
     if (!userId || !agentSlug) return;
     (async () => {
@@ -342,9 +338,55 @@ export default function ChatPage() {
     await refreshConversations(userId, agentSlug);
     setSelectedConvId(convId);
 
-    // Greeting doit s’afficher immédiatement
     await initGreetingIfEmpty(convId);
     await loadMessages(convId);
+  }
+
+  async function handleDeleteConversation(conversationId) {
+    if (!conversationId) return;
+
+    const ok = window.confirm("Supprimer cette conversation ?");
+    if (!ok) return;
+
+    const token = await getAccessToken();
+    if (!token) {
+      setErrorMsg("Session expirée. Reconnectez-vous.");
+      return;
+    }
+
+    try {
+      const resp = await fetch("/api/conversations/delete", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ conversationId }),
+      });
+
+      const json = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        setErrorMsg(json?.error || "Suppression impossible.");
+        return;
+      }
+
+      // Refresh + sélection
+      const { list, firstId } = await refreshConversations(userId, agentSlug);
+
+      if (selectedConvId === conversationId) {
+        if (firstId) {
+          setSelectedConvId(firstId);
+          await loadMessages(firstId);
+        } else {
+          await ensureConversationExistsWithGreeting();
+        }
+      } else {
+        // rien à faire
+        setConversations(list || []);
+      }
+    } catch (_) {
+      setErrorMsg("Suppression impossible.");
+    }
   }
 
   async function sendMessage() {
@@ -355,7 +397,6 @@ export default function ChatPage() {
     try {
       let convId = selectedConvId;
 
-      // Si aucune conv sélectionnée (cas rare), on en crée tout de suite + greeting, puis on envoie
       if (!convId) {
         convId = await createConversationNow(DEFAULT_TITLE);
         if (!convId) {
@@ -380,13 +421,11 @@ export default function ChatPage() {
       const userText = input.trim();
       setInput("");
 
-      // Optimistic UI (après greeting)
       setMessages((prev) => [
         ...(prev || []),
         { id: "tmp-" + Date.now(), role: "user", content: userText, created_at: new Date().toISOString() },
       ]);
 
-      // Renommer la conversation au 1er message (si elle était "Nouvelle conversation")
       await updateConversationTitleIfNeeded(convId, userText);
       await refreshConversations(userId, agentSlug);
 
@@ -484,6 +523,20 @@ export default function ChatPage() {
                 }}
                 title={c.title || ""}
               >
+                <button
+                  type="button"
+                  style={styles.convDeleteBtn}
+                  title="Supprimer"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleDeleteConversation(c.id);
+                  }}
+                  aria-label="Supprimer la conversation"
+                >
+                  ×
+                </button>
+
                 <div style={styles.convTitle}>{c.title || "Conversation"}</div>
                 <div style={styles.convMeta}>
                   {c.created_at ? new Date(c.created_at).toLocaleString("fr-FR") : ""}
@@ -695,7 +748,7 @@ const styles = {
     position: "relative",
     zIndex: 1,
     display: "grid",
-    gridTemplateColumns: "320px minmax(0, 1fr)", // minmax(0,1fr) empêche les débordements/coupures en grid
+    gridTemplateColumns: "320px minmax(0, 1fr)",
     gap: 14,
     padding: 14,
     flex: "1 1 auto",
@@ -739,10 +792,9 @@ const styles = {
     cursor: "pointer",
   },
 
-  // IMPORTANT : anti-coupure liée à scrollbar / grid
   convList: {
     padding: 10,
-    paddingRight: 14, // évite que la scrollbar rogne visuellement le contenu
+    paddingRight: 14,
     display: "grid",
     gap: 8,
     overflowY: "auto",
@@ -753,7 +805,6 @@ const styles = {
     scrollbarGutter: "stable",
   },
 
-  // IMPORTANT : minWidth:0 + boxSizing pour que le texte ne soit plus tronqué anormalement
   convItem: {
     width: "100%",
     minWidth: 0,
@@ -764,9 +815,26 @@ const styles = {
     border: "1px solid rgba(255,255,255,0.10)",
     background: "rgba(0,0,0,0.26)",
     color: "#fff",
-    padding: 10,
+    padding: 12,
     cursor: "pointer",
     overflow: "hidden",
+    position: "relative",
+  },
+
+  convDeleteBtn: {
+    position: "absolute",
+    top: 10,
+    right: 10,
+    width: 26,
+    height: 26,
+    borderRadius: 999,
+    border: "1px solid rgba(255,60,60,0.45)",
+    background: "rgba(255,60,60,0.10)",
+    color: "rgba(255,120,120,0.95)",
+    cursor: "pointer",
+    fontWeight: 900,
+    lineHeight: "24px",
+    textAlign: "center",
   },
 
   convItemActive: {
@@ -774,17 +842,17 @@ const styles = {
     background: "rgba(255,140,0,0.08)",
   },
 
-  // Titre sur 2 lignes max (clamp) au lieu d’une coupe sèche
   convTitle: {
     width: "100%",
     minWidth: 0,
     fontSize: 12,
     fontWeight: 900,
-    marginBottom: 4,
+    marginBottom: 6,
     overflow: "hidden",
     display: "-webkit-box",
     WebkitLineClamp: 2,
     WebkitBoxOrient: "vertical",
+    paddingRight: 34, // réserve la place de la croix
   },
 
   convMeta: {
@@ -796,6 +864,7 @@ const styles = {
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
+    paddingRight: 34,
   },
 
   chatCol: {
