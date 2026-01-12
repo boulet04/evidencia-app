@@ -34,31 +34,6 @@ function looksLikeEmail(s) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
 
-function extractEmails(text) {
-  const s = safeStr(text);
-  const re = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-  const m = s.match(re);
-  return Array.from(new Set((m || []).map((x) => x.trim())));
-}
-
-function isConfirmSend(text) {
-  const t = safeStr(text).trim().toLowerCase();
-  if (!t) return false;
-  return (
-    t === "ok envoie" ||
-    t === "ok envoi" ||
-    t === "ok, envoie" ||
-    t === "ok, envoi" ||
-    t === "envoie" ||
-    t === "envoye" ||
-    t === "envoyer" ||
-    t === "oui envoie" ||
-    t === "oui, envoie" ||
-    t === "valide" ||
-    t === "je confirme"
-  );
-}
-
 async function withTimeout(promise, ms, label) {
   let timer;
   const timeout = new Promise((_, rej) => {
@@ -80,16 +55,22 @@ function stripMemoryTag(content) {
   return t.startsWith("MEMORY:\n") ? t.slice("MEMORY:\n".length) : t;
 }
 
-function buildPendingEmailTag(obj) {
-  return `PENDING_EMAIL:\n${JSON.stringify(obj)}`;
+const DRAFT_PREFIX = "DRAFT_EMAIL:\n";
+
+function buildDraftTag(obj) {
+  return `${DRAFT_PREFIX}${JSON.stringify(obj)}`;
 }
 
-function parsePendingEmailTag(content) {
+function stripDraftTag(content) {
   const t = safeStr(content);
-  if (!t.startsWith("PENDING_EMAIL:\n")) return null;
-  const raw = t.slice("PENDING_EMAIL:\n".length).trim();
+  return t.startsWith(DRAFT_PREFIX) ? t.slice(DRAFT_PREFIX.length) : "";
+}
+
+function tryParseJson(s) {
+  const t = safeStr(s).trim();
+  if (!t.startsWith("{") || !t.endsWith("}")) return null;
   try {
-    const obj = JSON.parse(raw);
+    const obj = JSON.parse(t);
     return obj && typeof obj === "object" ? obj : null;
   } catch {
     return null;
@@ -107,6 +88,7 @@ function extractFirstJsonObject(text) {
   const raw = safeStr(text).trim();
   if (!raw) return null;
 
+  // 1) Chercher un bloc ```json ... ```
   const fenceJson = new RegExp("```\\s*json\\s*([\\s\\S]*?)```", "i");
   const mJson = raw.match(fenceJson);
   if (mJson?.[1]) {
@@ -115,6 +97,7 @@ function extractFirstJsonObject(text) {
     if (parsed) return parsed;
   }
 
+  // 2) Chercher un bloc ``` ... ``` (sans préciser json)
   const fenceAny = new RegExp("```\\s*([\\s\\S]*?)```", "i");
   const mAny = raw.match(fenceAny);
   if (mAny?.[1]) {
@@ -123,6 +106,7 @@ function extractFirstJsonObject(text) {
     if (parsed) return parsed;
   }
 
+  // 3) Chercher un objet JSON par scan d’accolades (top-level)
   const scanned = scanFirstBalancedObject(raw);
   if (scanned) {
     const parsed = tryParseJson(scanned);
@@ -130,17 +114,6 @@ function extractFirstJsonObject(text) {
   }
 
   return null;
-}
-
-function tryParseJson(s) {
-  const t = safeStr(s).trim();
-  if (!t.startsWith("{") || !t.endsWith("}")) return null;
-  try {
-    const obj = JSON.parse(t);
-    return obj && typeof obj === "object" ? obj : null;
-  } catch {
-    return null;
-  }
 }
 
 function scanFirstBalancedObject(text) {
@@ -154,9 +127,13 @@ function scanFirstBalancedObject(text) {
     const ch = s[i];
 
     if (inStr) {
-      if (esc) esc = false;
-      else if (ch === "\\") esc = true;
-      else if (ch === '"') inStr = false;
+      if (esc) {
+        esc = false;
+      } else if (ch === "\\") {
+        esc = true;
+      } else if (ch === '"') {
+        inStr = false;
+      }
       continue;
     }
 
@@ -173,146 +150,74 @@ function scanFirstBalancedObject(text) {
 
     if (ch === "}") {
       if (depth > 0) depth--;
-      if (depth === 0 && start !== -1) return s.slice(start, i + 1);
+      if (depth === 0 && start !== -1) {
+        return s.slice(start, i + 1);
+      }
     }
   }
   return null;
 }
 
+function normalizeConfirm(s) {
+  return safeStr(s)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function isSendConfirmation(message) {
+  const m = normalizeConfirm(message);
+  return m === "ok envoie" || m === "ok envoi" || m === "ok envoyer";
+}
+
 function htmlToText(html) {
-  let t = safeStr(html);
-  t = t.replace(/<\s*br\s*\/?>/gi, "\n");
-  t = t.replace(/<\/p>\s*<p>/gi, "\n\n");
-  t = t.replace(/<\/?p>/gi, "");
-  t = t.replace(/<\/?div>/gi, "");
-  t = t.replace(/<\/?strong>/gi, "");
-  t = t.replace(/<\/?em>/gi, "");
-  t = t.replace(/<[^>]+>/g, "");
-  t = t.replace(/\n{3,}/g, "\n\n");
-  return t.trim();
+  const s = safeStr(html);
+  if (!s) return "";
+  return s
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>\s*/gi, "\n\n")
+    .replace(/<p[^>]*>/gi, "")
+    .replace(/<\/div>\s*/gi, "\n")
+    .replace(/<div[^>]*>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function buildDraftPreview(draft) {
-  const to = safeStr(draft.to || "").trim();
-  const subject = safeStr(draft.subject || "").trim();
-  const body =
-    safeStr(draft.body || "").trim() ||
-    (draft.body_html ? htmlToText(draft.body_html) : "");
+  const to = safeStr(draft.to).trim() || "[À COMPLETER]";
+  const subject = safeStr(draft.subject).trim() || "[À COMPLETER]";
+  const bodyText =
+    safeStr(draft.body).trim() ||
+    htmlToText(draft.body_html) ||
+    "[Contenu à compléter]";
 
-  const lines = [];
-  lines.push("Voici le brouillon du mail (non envoyé) :");
-  lines.push("");
-  lines.push(`- Destinataire : ${to || "[À COMPLETER]"}`);
-  lines.push(`- Objet : ${subject || "[À COMPLETER]"}`);
-  lines.push("");
-  lines.push(body || "[Contenu à compléter]");
-  lines.push("");
-  lines.push('Si vous confirmez, écrivez "ok envoie" pour que je l’envoie.');
-  return lines.join("\n");
+  return (
+    "Voici le brouillon du mail (non envoyé) :\n\n" +
+    `Destinataire : ${to}\n` +
+    `Objet : ${subject}\n\n` +
+    bodyText +
+    "\n\n" +
+    "Si vous confirmez, écrivez : ok envoie"
+  );
 }
 
-/**
- * Signature: on l’extrait du prompt perso (Prénom/Nom + bloc "En-tête / signature standard").
- * Si le modèle met un placeholder ou oublie, on complète côté serveur.
- */
-function extractUserFullNameFromPrompt(promptText) {
-  const p = safeStr(promptText);
+async function getLatestDraft(supabaseAdmin, conversationId) {
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("content, created_at")
+    .eq("conversation_id", conversationId)
+    .eq("role", "system")
+    .like("content", "DRAFT_EMAIL:%")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-  const first = (p.match(/Prénom\s*:\s*([^\n\r]+)/i)?.[1] || "").trim();
-  const last = (p.match(/Nom\s*:\s*([^\n\r]+)/i)?.[1] || "").trim();
+  if (error || !data?.content) return null;
 
-  if (first && last) return `${first} ${last}`.trim();
-
-  // Fallback: "Tu travailles pour Simon"
-  const workFor = (p.match(/tu\s+travailles\s+pour\s+([^\n\r]+)/i)?.[1] || "").trim();
-  if (workFor) return workFor;
-
-  return "";
-}
-
-function extractSignatureBlockFromPrompt(promptText) {
-  const lines = safeStr(promptText).split(/\r?\n/);
-  const idx = lines.findIndex((l) => l.toLowerCase().includes("en-tête / signature standard"));
-  if (idx === -1) return "";
-
-  // On collecte les lignes suivantes "visibles" (non vides), jusqu’à un séparateur logique
-  const collected = [];
-  for (let i = idx + 1; i < lines.length; i++) {
-    const raw = lines[i];
-    const l = raw.trim();
-
-    // stop sur sections typiques
-    if (!l) {
-      // on tolère 1 ligne vide, mais si on a déjà collecté, on stop
-      if (collected.length > 0) break;
-      continue;
-    }
-    if (/^(MISSION|RÈGLES|UTILISATION|COMPORTEMENT|FORMAT|STYLE|LIMITES|CONFIDENTIALITÉ)\b/i.test(l)) break;
-    if (l.startsWith("-")) break;
-
-    // On supprime l’indentation mais on garde la ligne
-    collected.push(l);
-    if (collected.length >= 8) break;
-  }
-
-  // On évite de renvoyer un bloc ridicule
-  const block = collected.join("\n").trim();
-  return block.length >= 10 ? block : "";
-}
-
-function normalizeBody(body) {
-  // Force des paragraphes séparés par une ligne vide (règle globale)
-  const t = safeStr(body).replace(/\r/g, "").trim();
-  // si déjà bien formaté, on n’abîme pas trop
-  return t.replace(/\n{3,}/g, "\n\n");
-}
-
-function ensureSignatureInBody(body, fullName, signatureBlock) {
-  let t = normalizeBody(body);
-
-  // Si le modèle a laissé un placeholder, on le remplace
-  t = t.replace(/\[Votre\s+Pr[ée]nom\]/gi, fullName || "");
-  t = t.replace(/\[Votre\s+Nom\]/gi, fullName || "");
-  t = t.replace(/\[Votre\s+Pr[ée]nom\s+Nom\]/gi, fullName || "");
-
-  const lower = t.toLowerCase();
-  const hasName = fullName && lower.includes(fullName.toLowerCase());
-  const hasSigBlock = signatureBlock && lower.includes(signatureBlock.split("\n")[0].toLowerCase());
-
-  if (hasName || hasSigBlock) return t;
-
-  // Ajout standard (copiable) : cordialement + nom + bloc entreprise
-  const parts = [];
-  parts.push(t);
-  parts.push("");
-  parts.push("Cordialement,");
-  if (fullName) parts.push(fullName);
-  if (signatureBlock) parts.push(signatureBlock);
-  return parts.join("\n").trim();
-}
-
-function bodyToHtml(bodyText) {
-  // paragraphes => <p>...<br/></p>
-  const t = normalizeBody(bodyText);
-  const escaped = t
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-
-  const paras = escaped.split(/\n{2,}/).map((p) => p.replace(/\n/g, "<br/>"));
-  return paras.map((p) => `<p>${p}</p>`).join("");
-}
-
-function pickFallbackPromptForSlug(slug) {
-  const v = agentPrompts?.[slug];
-  if (!v) return "";
-  if (typeof v === "string") return v;
-  if (typeof v === "object") {
-    return (
-      safeStr(v.system_prompt || v.systemPrompt || v.prompt || v.system || v.text || "")
-    ).trim();
-  }
-  return "";
+  const raw = stripDraftTag(data.content).trim();
+  const obj = tryParseJson(raw);
+  return obj && typeof obj === "object" ? obj : null;
 }
 
 export default async function handler(req, res) {
@@ -333,7 +238,6 @@ export default async function handler(req, res) {
     const MAKE_URL =
       process.env.MAKE_EMAIL_WEBHOOK_URL ||
       process.env.MAKE_WEBHOOK_URL ||
-      process.env.MAKE_EMAIL_WEBHOOK ||
       "";
 
     const CHAT_MODEL = process.env.MISTRAL_MODEL || "mistral-small-latest";
@@ -458,185 +362,8 @@ export default async function handler(req, res) {
     });
     if (insUserErr) return res.status(500).json({ error: "Erreur insertion message user.", detail: insUserErr.message });
 
-    // ---- PENDING EMAIL: confirmation => envoi ----
-    const { data: pendingRows } = await supabaseAdmin
-      .from("messages")
-      .select("content, created_at")
-      .eq("conversation_id", conversationId)
-      .eq("role", "system")
-      .like("content", "PENDING_EMAIL:%")
-      .order("created_at", { ascending: false })
-      .limit(10);
-
-    const pendingList = (pendingRows || [])
-      .map((r) => parsePendingEmailTag(r.content))
-      .filter(Boolean);
-
-    const lastPending = pendingList.find((p) => p && p._state !== "sent") || null;
-
-    // Cas "envoie le même mail à X"
-    const emailsInMsg = extractEmails(message);
-    const wantsReuse =
-      /m[eê]me mail|m[eê]me email|renvoie|refait|même message|retransmets|envoie à/i.test(message);
-
-    if (!isConfirmSend(message) && wantsReuse && emailsInMsg.length === 1 && lastPending) {
-      const newDraft = { ...lastPending, to: emailsInMsg[0], _state: "pending", updated_at: nowIso() };
-
-      const { error: pendInsErr } = await supabaseAdmin.from("messages").insert({
-        conversation_id: conversationId,
-        role: "system",
-        content: buildPendingEmailTag(newDraft),
-        created_at: nowIso(),
-      });
-      if (pendInsErr) return res.status(500).json({ error: "Erreur stockage brouillon.", detail: pendInsErr.message });
-
-      const assistantText = buildDraftPreview(newDraft);
-
-      const { error: insAsstErr } = await supabaseAdmin.from("messages").insert({
-        conversation_id: conversationId,
-        role: "assistant",
-        content: assistantText,
-        created_at: nowIso(),
-      });
-      if (insAsstErr) return res.status(500).json({ error: "Erreur insertion message assistant.", detail: insAsstErr.message });
-
-      return res.status(200).json({
-        ok: true,
-        conversationId,
-        reply: assistantText,
-        mailSent: false,
-        mailError: "",
-        timings: { total_ms: Date.now() - t0, llm_ms: 0 },
-        memory: { used: false, refreshed: false },
-      });
-    }
-
-    if (isConfirmSend(message)) {
-      if (!lastPending) {
-        const assistantText =
-          "Je n’ai aucun brouillon en attente dans cette conversation. Dites-moi le destinataire (email) + l’objet + le contexte et je vous le présenterai avant envoi.";
-        await supabaseAdmin.from("messages").insert({
-          conversation_id: conversationId,
-          role: "assistant",
-          content: assistantText,
-          created_at: nowIso(),
-        });
-        return res.status(200).json({
-          ok: true,
-          conversationId,
-          reply: assistantText,
-          mailSent: false,
-          mailError: "NO_PENDING",
-          timings: { total_ms: Date.now() - t0, llm_ms: 0 },
-          memory: { used: false, refreshed: false },
-        });
-      }
-
-      const to = safeStr(lastPending.to || "").trim();
-      const subject = safeStr(lastPending.subject || "").trim();
-      const bodyHtml =
-        safeStr(lastPending.body_html || "").trim() ||
-        (safeStr(lastPending.body || "").trim() ? bodyToHtml(lastPending.body) : "");
-
-      if (!looksLikeEmail(to) || !subject || !bodyHtml) {
-        const assistantText =
-          "Je ne peux pas envoyer : brouillon incomplet (destinataire / objet / contenu). Donnez-moi le destinataire exact (email) et/ou ce qu’il manque.";
-        await supabaseAdmin.from("messages").insert({
-          conversation_id: conversationId,
-          role: "assistant",
-          content: assistantText,
-          created_at: nowIso(),
-        });
-        return res.status(200).json({
-          ok: true,
-          conversationId,
-          reply: assistantText,
-          mailSent: false,
-          mailError: "INVALID_PENDING",
-          timings: { total_ms: Date.now() - t0, llm_ms: 0 },
-          memory: { used: false, refreshed: false },
-        });
-      }
-
-      if (!MAKE_URL) {
-        const assistantText =
-          "Impossible d’envoyer : l’URL Make n’est pas configurée côté serveur (MAKE_WEBHOOK_URL manquante).";
-        await supabaseAdmin.from("messages").insert({
-          conversation_id: conversationId,
-          role: "assistant",
-          content: assistantText,
-          created_at: nowIso(),
-        });
-        return res.status(200).json({
-          ok: true,
-          conversationId,
-          reply: assistantText,
-          mailSent: false,
-          mailError: "MAKE_URL_MISSING",
-          timings: { total_ms: Date.now() - t0, llm_ms: 0 },
-          memory: { used: false, refreshed: false },
-        });
-      }
-
-      let mailSent = false;
-      let mailError = "";
-
-      const makeResp = await withTimeout(
-        fetch(MAKE_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            to,
-            cc: Array.isArray(lastPending.cc) ? lastPending.cc : [],
-            bcc: Array.isArray(lastPending.bcc) ? lastPending.bcc : [],
-            subject,
-            body_html: bodyHtml,
-            meta: { conversationId, userId, agentSlug, ts: nowIso() },
-          }),
-        }),
-        15000,
-        "make_webhook"
-      );
-
-      const makeText = await makeResp.text().catch(() => "");
-      if (!makeResp.ok) {
-        mailError = `Make webhook error (${makeResp.status}) ${makeText || ""}`.slice(0, 400);
-      } else {
-        mailSent = true;
-      }
-
-      const assistantText = mailSent
-        ? "Envoi confirmé : l’email a été transmis au workflow d’envoi. Vérifiez Indésirables/Spam et les Éléments envoyés du compte Outlook connecté à Make."
-        : "Je n’ai pas pu envoyer l’email : le workflow a répondu une erreur. Je peux réessayer.";
-
-      const sentMarker = { ...lastPending, _state: "sent", sent_at: nowIso() };
-      await supabaseAdmin.from("messages").insert({
-        conversation_id: conversationId,
-        role: "system",
-        content: buildPendingEmailTag(sentMarker),
-        created_at: nowIso(),
-      });
-
-      await supabaseAdmin.from("messages").insert({
-        conversation_id: conversationId,
-        role: "assistant",
-        content: assistantText,
-        created_at: nowIso(),
-      });
-
-      return res.status(200).json({
-        ok: true,
-        conversationId,
-        reply: assistantText,
-        mailSent,
-        mailError,
-        timings: { total_ms: Date.now() - t0, llm_ms: 0 },
-        memory: { used: false, refreshed: false },
-      });
-    }
-
     // --- MEMORY ---
-    const { data: memRow } = await supabaseAdmin
+    const { data: memRow, error: memErr } = await supabaseAdmin
       .from("messages")
       .select("id, content, created_at")
       .eq("conversation_id", conversationId)
@@ -646,13 +373,15 @@ export default async function handler(req, res) {
       .limit(1)
       .maybeSingle();
 
+    if (memErr) return res.status(500).json({ error: "Erreur lecture mémoire.", detail: memErr.message });
+
     const memoryContent = memRow?.content ? stripMemoryTag(memRow.content) : "";
     const memoryCreatedAt = memRow?.created_at || null;
 
     let needMemoryUpdate = !memoryCreatedAt;
 
     if (memoryCreatedAt) {
-      const { data: ids } = await supabaseAdmin
+      const { data: ids, error: idsErr } = await supabaseAdmin
         .from("messages")
         .select("id")
         .eq("conversation_id", conversationId)
@@ -660,6 +389,7 @@ export default async function handler(req, res) {
         .gt("created_at", memoryCreatedAt)
         .limit(12);
 
+      if (idsErr) return res.status(500).json({ error: "Erreur rafraîchissement mémoire.", detail: idsErr.message });
       if ((ids || []).length >= 12) needMemoryUpdate = true;
     }
 
@@ -670,7 +400,7 @@ export default async function handler(req, res) {
       .select("role, content, created_at")
       .eq("conversation_id", conversationId)
       .not("content", "like", "MEMORY:%")
-      .not("content", "like", "PENDING_EMAIL:%")
+      .not("content", "like", "DRAFT_EMAIL:%")
       .order("created_at", { ascending: false })
       .limit(HISTORY_LIMIT);
 
@@ -686,7 +416,7 @@ export default async function handler(req, res) {
         .select("role, content, created_at")
         .eq("conversation_id", conversationId)
         .not("content", "like", "MEMORY:%")
-        .not("content", "like", "PENDING_EMAIL:%")
+        .not("content", "like", "DRAFT_EMAIL:%")
         .order("created_at", { ascending: false })
         .limit(60);
 
@@ -746,7 +476,89 @@ export default async function handler(req, res) {
 
     const finalMemory = memRow2?.content ? stripMemoryTag(memRow2.content) : memoryContent;
 
-    // --- LOAD PERSONAL PROMPT (client_agent_configs) + fallback lib/agentPrompts.js ---
+    // --- DRAFT CONFIRMATION PATH (ENVOI UNIQUEMENT SUR "ok envoie") ---
+    if (isSendConfirmation(message)) {
+      let assistantText = "";
+      let mailSent = false;
+      let mailError = "";
+
+      const draft = await getLatestDraft(supabaseAdmin, conversationId);
+
+      if (!draft) {
+        assistantText =
+          "Je n’ai aucun brouillon en attente dans cette conversation. Dites-moi le destinataire (email) + l’objet + le contexte et je vous le présenterai avant envoi.";
+      } else {
+        const to = safeStr(draft.to).trim();
+        const subject = safeStr(draft.subject).trim();
+        const bodyText = safeStr(draft.body).trim() || htmlToText(draft.body_html);
+
+        if (!looksLikeEmail(to) || !subject || !bodyText) {
+          mailError = "Brouillon invalide (to/subject/body).";
+          assistantText =
+            "Je ne peux pas envoyer : le brouillon est incomplet (destinataire / objet / contenu). Je peux le reformuler si vous me confirmez les champs manquants.";
+        } else if (!MAKE_URL) {
+          mailError = "MAKE_WEBHOOK_URL non configurée.";
+          assistantText =
+            "Le workflow d’envoi d’email n’est pas configuré côté serveur (MAKE_WEBHOOK_URL manquante). Je peux préparer le mail, mais pas l’envoyer.";
+        } else {
+          const makeResp = await withTimeout(
+            fetch(MAKE_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                to,
+                subject,
+                body: bodyText,
+                body_html: safeStr(draft.body_html || ""),
+                cc: Array.isArray(draft.cc) ? draft.cc : [],
+                bcc: Array.isArray(draft.bcc) ? draft.bcc : [],
+                meta: { conversationId, userId, agentSlug, ts: nowIso() },
+              }),
+            }),
+            12000,
+            "make_webhook_send"
+          );
+
+          const makeText = await makeResp.text().catch(() => "");
+          if (!makeResp.ok) {
+            mailError = `Make webhook error (${makeResp.status}) ${makeText || ""}`.slice(0, 400);
+            assistantText =
+              "Je n’ai pas pu envoyer l’email : le workflow a répondu une erreur. Je peux réessayer ou vous afficher le payload exact envoyé.";
+          } else {
+            mailSent = true;
+            assistantText =
+              "Envoi confirmé : l’email a été transmis au workflow d’envoi. Vérifiez Indésirables/Spam et les Éléments envoyés du compte Outlook connecté à Make.";
+
+            // Marque le brouillon comme “consommé” (pour éviter de renvoyer un ancien mail)
+            await supabaseAdmin.from("messages").insert({
+              conversation_id: conversationId,
+              role: "system",
+              content: `${DRAFT_PREFIX}__SENT__`,
+              created_at: nowIso(),
+            });
+          }
+        }
+      }
+
+      await supabaseAdmin.from("messages").insert({
+        conversation_id: conversationId,
+        role: "assistant",
+        content: assistantText,
+        created_at: nowIso(),
+      });
+
+      return res.status(200).json({
+        ok: true,
+        conversationId,
+        reply: assistantText,
+        mailSent,
+        mailError,
+        timings: { total_ms: Date.now() - t0, llm_ms: 0 },
+        memory: { used: Boolean(finalMemory), refreshed: Boolean(needMemoryUpdate) },
+      });
+    }
+
+    // --- SYSTEM PROMPT (inclut prompt perso agent + mémoire) ---
     const { data: cfg } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -754,30 +566,26 @@ export default async function handler(req, res) {
       .eq("agent_id", agent.id)
       .maybeSingle();
 
-    const personalPrompt = safeStr(cfg?.system_prompt).trim() || pickFallbackPromptForSlug(agentSlug);
-    const contextJson = cfg?.context && typeof cfg.context === "object" ? cfg.context : null;
+    const customPrompt = safeStr(cfg?.system_prompt).trim();
+    const fallbackPrompt =
+      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts[agentSlug]).trim()) ||
+      "";
 
-    // Signature extraction (from personalPrompt)
-    const userFullName = extractUserFullNameFromPrompt(personalPrompt);
-    const signatureBlock = extractSignatureBlockFromPrompt(personalPrompt);
-
-    // --- SYSTEM PROMPT ---
     const workflowRules =
-      "RÈGLES EMAIL (OBLIGATOIRES) :\n" +
-      "- Quand l’utilisateur demande d’écrire/préparer un mail : tu dois d’abord présenter un BROUILLON (non envoyé) et demander confirmation.\n" +
-      "- Tu n’envoies JAMAIS sans confirmation explicite de l’utilisateur.\n" +
-      "- Tu ne mets jamais d’adresse email si elle n’a pas été donnée par l’utilisateur.\n" +
-      "- Pour préparer un mail, renvoie un JSON STRICT (sans texte autour) avec exactement ces clés : to, subject, body.\n" +
-      "- Si le destinataire manque : mets to à \"\" et pose UNE question : \"À quelle adresse email dois-je l’envoyer ?\".\n" +
-      "- Pour la signature : utilise le nom/prénom et la signature standard fournis dans le prompt (pas de placeholder).\n";
-
-    const ctxBlock = contextJson ? `\nCONTEXTE (JSON):\n${JSON.stringify(contextJson)}\n` : "";
+      "RÈGLES D’EXÉCUTION (EMAIL / MAKE) :\n" +
+      "- Tu NE DOIS JAMAIS envoyer un email automatiquement.\n" +
+      "- Quand l’utilisateur demande d’écrire/préparer un mail : tu produis un BROUILLON.\n" +
+      "- Le BROUILLON doit contenir au minimum : to, subject, body.\n" +
+      "- Tu demandes ensuite confirmation explicite : l’utilisateur doit écrire exactement : ok envoie\n" +
+      "- Tant que la confirmation n’est pas donnée : aucun envoi.\n" +
+      "- Si une info manque réellement : tu poses UNE question.\n" +
+      "- Réponse en français, ton professionnel.\n";
 
     const systemPrompt =
       `${workflowRules}\n` +
-      (personalPrompt ? `PROMPT DE L’AGENT (à respecter) :\n${personalPrompt}\n` : "") +
-      `${ctxBlock}\n` +
-      `Tu es ${safeStr(agent.name) || "un agent"} d’Evidenc'IA. Réponds en français, de manière opérationnelle.\n` +
+      (customPrompt ? `${customPrompt}\n` : "") +
+      (!customPrompt && fallbackPrompt ? `${fallbackPrompt}\n` : "") +
+      `\nTu es ${safeStr(agent.name) || "un agent"} d’Evidenc'IA.\n` +
       (finalMemory ? `\nMÉMOIRE DE LA CONVERSATION:\n${finalMemory}\n` : "");
 
     const tBeforeLLM = Date.now();
@@ -800,100 +608,54 @@ export default async function handler(req, res) {
     let assistantText = safeStr(completion?.choices?.[0]?.message?.content).trim();
     if (!assistantText) assistantText = "Réponse vide.";
 
-    // --- DRAFT EMAIL HANDLING ---
+    // --- DRAFT DETECTION (on stocke un brouillon côté serveur, on n’envoie jamais ici) ---
+    let mailSent = false;
+    let mailError = "";
+
     const obj = extractFirstJsonObject(assistantText);
-    const isDraft =
+
+    const hasDraftShape =
       obj &&
       typeof obj === "object" &&
-      Object.prototype.hasOwnProperty.call(obj, "to") &&
-      Object.prototype.hasOwnProperty.call(obj, "subject") &&
-      Object.prototype.hasOwnProperty.call(obj, "body");
+      safeStr(obj.to).trim() &&
+      safeStr(obj.subject).trim() &&
+      (safeStr(obj.body).trim() || safeStr(obj.body_html).trim());
 
-    if (isDraft) {
-      const to = safeStr(obj.to).trim();
-      const subject = safeStr(obj.subject).trim();
-      let bodyText = safeStr(obj.body).trim();
+    const hasActionSend =
+      obj &&
+      typeof obj === "object" &&
+      safeStr(obj.action).trim().toLowerCase() === "send_email" &&
+      safeStr(obj.to).trim() &&
+      safeStr(obj.subject).trim() &&
+      (safeStr(obj.body).trim() || safeStr(obj.body_html).trim());
 
-      // Ajout/normalisation signature côté serveur (corrige [Votre Prénom])
-      bodyText = ensureSignatureInBody(bodyText, userFullName, signatureBlock);
-
-      // Sécurité : destinataire autorisé uniquement si fourni par l’utilisateur
-      const userEmailsInHistory = [];
-      for (const m of history) {
-        if (m.role === "user") userEmailsInHistory.push(...extractEmails(m.content));
-      }
-      userEmailsInHistory.push(...extractEmails(message));
-      const userProvided = userEmailsInHistory.includes(to);
-
-      // Si to manquant / non fourni par user : on garde le brouillon, mais on demande l’adresse
-      if (!to || !looksLikeEmail(to) || !userProvided) {
-        const storeDraft = { to: "", subject, body: bodyText, _state: "pending", created_at: nowIso() };
-        await supabaseAdmin.from("messages").insert({
-          conversation_id: conversationId,
-          role: "system",
-          content: buildPendingEmailTag(storeDraft),
-          created_at: nowIso(),
-        });
-
-        const assistantOut =
-          buildDraftPreview(storeDraft) +
-          "\n\nÀ quelle adresse email dois-je l’envoyer ?";
-
-        await supabaseAdmin.from("messages").insert({
-          conversation_id: conversationId,
-          role: "assistant",
-          content: assistantOut,
-          created_at: nowIso(),
-        });
-
-        return res.status(200).json({
-          ok: true,
-          conversationId,
-          reply: assistantOut,
-          mailSent: false,
-          mailError: "",
-          timings: { total_ms: Date.now() - t0, llm_ms: Date.now() - tBeforeLLM },
-          memory: { used: Boolean(finalMemory), refreshed: Boolean(needMemoryUpdate) },
-        });
-      }
-
-      const pendingDraft = {
-        to,
-        subject,
-        body: bodyText,
-        body_html: bodyToHtml(bodyText),
-        _state: "pending",
-        created_at: nowIso(),
+    if (hasDraftShape || hasActionSend) {
+      const draft = {
+        to: safeStr(obj.to).trim(),
+        subject: safeStr(obj.subject).trim(),
+        body: safeStr(obj.body).trim(),
+        body_html: safeStr(obj.body_html || obj.body_html).trim(),
+        cc: Array.isArray(obj.cc) ? obj.cc : [],
+        bcc: Array.isArray(obj.bcc) ? obj.bcc : [],
       };
 
+      // Stockage brouillon (caché UI) pour éviter amnésie
       await supabaseAdmin.from("messages").insert({
         conversation_id: conversationId,
         role: "system",
-        content: buildPendingEmailTag(pendingDraft),
+        content: buildDraftTag(draft),
         created_at: nowIso(),
       });
 
-      const preview = buildDraftPreview(pendingDraft);
+      // Affichage utilisateur : brouillon lisible + demande confirmation
+      assistantText = buildDraftPreview(draft);
 
-      await supabaseAdmin.from("messages").insert({
-        conversation_id: conversationId,
-        role: "assistant",
-        content: preview,
-        created_at: nowIso(),
-      });
-
-      return res.status(200).json({
-        ok: true,
-        conversationId,
-        reply: preview,
-        mailSent: false,
-        mailError: "",
-        timings: { total_ms: Date.now() - t0, llm_ms: Date.now() - tBeforeLLM },
-        memory: { used: Boolean(finalMemory), refreshed: Boolean(needMemoryUpdate) },
-      });
+      // Important : on NE déclenche PAS Make ici
+      mailSent = false;
+      mailError = "";
     }
 
-    // --- Normal assistant answer ---
+    // SAVE assistant message (lisible)
     const { error: insAsstErr } = await supabaseAdmin.from("messages").insert({
       conversation_id: conversationId,
       role: "assistant",
@@ -907,10 +669,16 @@ export default async function handler(req, res) {
       ok: true,
       conversationId,
       reply: assistantText,
-      mailSent: false,
-      mailError: "",
-      timings: { total_ms: Date.now() - t0, llm_ms: Date.now() - tBeforeLLM },
-      memory: { used: Boolean(finalMemory), refreshed: Boolean(needMemoryUpdate) },
+      mailSent,
+      mailError,
+      timings: {
+        total_ms: Date.now() - t0,
+        llm_ms: Date.now() - tBeforeLLM,
+      },
+      memory: {
+        used: Boolean(finalMemory),
+        refreshed: Boolean(needMemoryUpdate),
+      },
     });
   } catch (e) {
     return res.status(500).json({
