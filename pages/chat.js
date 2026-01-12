@@ -22,7 +22,6 @@ export default function ChatPage() {
   const [conversations, setConversations] = useState([]);
   const [selectedConvId, setSelectedConvId] = useState("");
   const [messages, setMessages] = useState([]);
-  const [deletingConvId, setDeletingConvId] = useState("");
 
   // --- Input ---
   const [input, setInput] = useState("");
@@ -158,6 +157,7 @@ export default function ChatPage() {
       // Ne pas afficher les messages techniques
       if (m.role === "system") return false;
       if ((m.content || "").startsWith("MEMORY:")) return false;
+      if ((m.content || "").startsWith("PENDING_EMAIL:")) return false;
       return true;
     });
 
@@ -249,7 +249,7 @@ export default function ChatPage() {
 
   async function ensureConversationExistsWithGreeting() {
     // Si aucune conversation, on en crée une immédiatement + greeting
-    const { firstId } = await refreshConversations(userId, agentSlug);
+    const { list, firstId } = await refreshConversations(userId, agentSlug);
 
     if (firstId) {
       setSelectedConvId(firstId);
@@ -271,65 +271,6 @@ export default function ChatPage() {
     // IMPORTANT : greeting avant toute action user
     await initGreetingIfEmpty(convId);
     await loadMessages(convId);
-  }
-
-  // --- SUPPRESSION CONVERSATION (croix rouge) ---
-  async function deleteConversation(conversationIdToDelete) {
-    if (!conversationIdToDelete || deletingConvId) return;
-
-    const ok = window.confirm("Supprimer définitivement cette conversation ?");
-    if (!ok) return;
-
-    setErrorMsg("");
-    setDeletingConvId(conversationIdToDelete);
-
-    try {
-      const token = await getAccessToken();
-      if (!token) {
-        setErrorMsg("Session expirée. Reconnectez-vous.");
-        setDeletingConvId("");
-        return;
-      }
-
-      const resp = await fetch("/api/conversations/delete", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ conversationId: conversationIdToDelete }),
-      });
-
-      const json = await resp.json().catch(() => null);
-
-      if (!resp.ok || !json?.ok) {
-        setErrorMsg(json?.error || "Suppression impossible.");
-        setDeletingConvId("");
-        return;
-      }
-
-      // Mettre à jour l'UI immédiatement
-      const remaining = (conversations || []).filter((c) => c.id !== conversationIdToDelete);
-      setConversations(remaining);
-
-      // Si on a supprimé la conversation active
-      if (selectedConvId === conversationIdToDelete) {
-        const nextId = remaining?.[0]?.id || "";
-        if (nextId) {
-          setSelectedConvId(nextId);
-          await loadMessages(nextId);
-        } else {
-          setSelectedConvId("");
-          setMessages([]);
-          await ensureConversationExistsWithGreeting();
-        }
-      }
-
-      setDeletingConvId("");
-    } catch (_) {
-      setErrorMsg("Erreur lors de la suppression.");
-      setDeletingConvId("");
-    }
   }
 
   // Init page: session + agent + conversations
@@ -530,52 +471,25 @@ export default function ChatPage() {
           </div>
 
           <div style={styles.convList}>
-            {(conversations || []).map((c) => {
-              const active = selectedConvId === c.id;
-              const isDeleting = deletingConvId === c.id;
-
-              return (
-                <div key={c.id} style={styles.convItemWrap}>
-                  <button
-                    style={{
-                      ...styles.convItem,
-                      ...(active ? styles.convItemActive : {}),
-                      paddingRight: 44, // laisse la place à la croix
-                    }}
-                    onClick={async () => {
-                      if (isDeleting) return;
-                      setSelectedConvId(c.id);
-                      await loadMessages(c.id);
-                    }}
-                    title={c.title || ""}
-                    disabled={isDeleting}
-                  >
-                    <div style={styles.convTitle}>{c.title || "Conversation"}</div>
-                    <div style={styles.convMeta}>
-                      {c.created_at ? new Date(c.created_at).toLocaleString("fr-FR") : ""}
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    title="Supprimer"
-                    aria-label="Supprimer la conversation"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      if (!isDeleting) deleteConversation(c.id);
-                    }}
-                    disabled={isDeleting}
-                    style={{
-                      ...styles.convDeleteBtn,
-                      ...(isDeleting ? styles.convDeleteBtnDisabled : {}),
-                    }}
-                  >
-                    <XIcon />
-                  </button>
+            {(conversations || []).map((c) => (
+              <button
+                key={c.id}
+                style={{
+                  ...styles.convItem,
+                  ...(selectedConvId === c.id ? styles.convItemActive : {}),
+                }}
+                onClick={async () => {
+                  setSelectedConvId(c.id);
+                  await loadMessages(c.id);
+                }}
+                title={c.title || ""}
+              >
+                <div style={styles.convTitle}>{c.title || "Conversation"}</div>
+                <div style={styles.convMeta}>
+                  {c.created_at ? new Date(c.created_at).toLocaleString("fr-FR") : ""}
                 </div>
-              );
-            })}
+              </button>
+            ))}
           </div>
         </aside>
 
@@ -679,8 +593,20 @@ function MicIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <path d="M12 18v3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M8 21h8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d="M12 18v3"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 21h8"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
@@ -689,15 +615,6 @@ function StopIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <rect x="7" y="7" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="2" />
-    </svg>
-  );
-}
-
-function XIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }
@@ -731,10 +648,11 @@ const styles = {
     background: "rgba(0,0,0,0.28)",
     backdropFilter: "blur(10px)",
     flex: "0 0 auto",
+    minWidth: 0,
   },
-  topLeft: { display: "flex", alignItems: "center", gap: 12 },
-  topCenter: { display: "flex", justifyContent: "center", alignItems: "center" },
-  topRight: { display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12 },
+  topLeft: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
+  topCenter: { display: "flex", justifyContent: "center", alignItems: "center", minWidth: 0 },
+  topRight: { display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12, minWidth: 0 },
 
   backBtn: {
     padding: "8px 14px",
@@ -761,6 +679,7 @@ const styles = {
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
+    minWidth: 0,
   },
   logoutBtn: {
     padding: "8px 14px",
@@ -776,12 +695,13 @@ const styles = {
     position: "relative",
     zIndex: 1,
     display: "grid",
-    gridTemplateColumns: "320px 1fr",
+    gridTemplateColumns: "320px minmax(0, 1fr)", // minmax(0,1fr) empêche les débordements/coupures en grid
     gap: 14,
     padding: 14,
     flex: "1 1 auto",
     minHeight: 0,
     overflow: "hidden",
+    minWidth: 0,
   },
 
   sidebar: {
@@ -793,6 +713,7 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     minHeight: 0,
+    minWidth: 0,
   },
   sideTop: {
     padding: 12,
@@ -801,6 +722,7 @@ const styles = {
     justifyContent: "space-between",
     borderBottom: "1px solid rgba(255,255,255,0.10)",
     flex: "0 0 auto",
+    minWidth: 0,
   },
   sideTitle: {
     fontWeight: 900,
@@ -816,23 +738,27 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
   },
+
+  // IMPORTANT : anti-coupure liée à scrollbar / grid
   convList: {
     padding: 10,
+    paddingRight: 14, // évite que la scrollbar rogne visuellement le contenu
     display: "grid",
     gap: 8,
     overflowY: "auto",
     overflowX: "hidden",
     flex: "1 1 auto",
     minHeight: 0,
+    minWidth: 0,
+    scrollbarGutter: "stable",
   },
 
-  // Wrapper pour éviter "button dans button"
-  convItemWrap: {
-    position: "relative",
-  },
-
+  // IMPORTANT : minWidth:0 + boxSizing pour que le texte ne soit plus tronqué anormalement
   convItem: {
     width: "100%",
+    minWidth: 0,
+    boxSizing: "border-box",
+    display: "block",
     textAlign: "left",
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,0.10)",
@@ -842,43 +768,34 @@ const styles = {
     cursor: "pointer",
     overflow: "hidden",
   },
+
   convItemActive: {
     border: "1px solid rgba(255,140,0,0.42)",
     background: "rgba(255,140,0,0.08)",
   },
+
+  // Titre sur 2 lignes max (clamp) au lieu d’une coupe sèche
   convTitle: {
+    width: "100%",
+    minWidth: 0,
     fontSize: 12,
     fontWeight: 900,
     marginBottom: 4,
     overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
+    display: "-webkit-box",
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: "vertical",
   },
+
   convMeta: {
+    width: "100%",
+    minWidth: 0,
     fontSize: 11,
     fontWeight: 700,
     color: "rgba(238,242,255,0.60)",
-  },
-
-  // Croix rouge (positionnée en haut à droite de la carte)
-  convDeleteBtn: {
-    position: "absolute",
-    top: 8,
-    right: 8,
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    border: "1px solid rgba(255,70,70,0.55)",
-    background: "rgba(255,70,70,0.16)",
-    color: "rgba(255,150,150,0.98)",
-    cursor: "pointer",
-    display: "grid",
-    placeItems: "center",
-    zIndex: 5,
-  },
-  convDeleteBtnDisabled: {
-    opacity: 0.55,
-    cursor: "not-allowed",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
 
   chatCol: {
@@ -890,6 +807,7 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     minHeight: 0,
+    minWidth: 0,
   },
 
   agentHeader: {
@@ -899,6 +817,7 @@ const styles = {
     gap: 12,
     borderBottom: "1px solid rgba(255,255,255,0.10)",
     flex: "0 0 auto",
+    minWidth: 0,
   },
   avatar: {
     width: 72,
@@ -918,18 +837,20 @@ const styles = {
     background: "rgba(255,255,255,0.06)",
     flexShrink: 0,
   },
-  agentMeta: { display: "grid", gap: 6 },
+  agentMeta: { display: "grid", gap: 6, minWidth: 0 },
   agentName: {
     fontSize: 18,
     fontWeight: 900,
     color: "#ffffff",
     textShadow: "0 2px 12px rgba(0,0,0,0.60)",
+    minWidth: 0,
   },
   agentDesc: {
     fontSize: 13,
     fontWeight: 800,
     color: "rgba(238,242,255,0.75)",
     lineHeight: 1.35,
+    minWidth: 0,
   },
 
   chatBox: {
@@ -938,10 +859,12 @@ const styles = {
     overflowX: "hidden",
     flex: "1 1 auto",
     minHeight: 0,
+    minWidth: 0,
   },
   msgRow: {
     display: "flex",
     marginBottom: 10,
+    minWidth: 0,
   },
   bubble: {
     maxWidth: "78%",
@@ -978,6 +901,7 @@ const styles = {
     borderTop: "1px solid rgba(255,255,255,0.10)",
     background: "rgba(0,0,0,0.18)",
     flex: "0 0 auto",
+    minWidth: 0,
   },
   textarea: {
     flex: 1,
@@ -991,6 +915,7 @@ const styles = {
     minHeight: 44,
     maxHeight: 140,
     fontWeight: 700,
+    minWidth: 0,
   },
   micBtn: {
     width: 44,
@@ -1003,6 +928,7 @@ const styles = {
     fontWeight: 900,
     display: "grid",
     placeItems: "center",
+    flex: "0 0 auto",
   },
   micBtnOn: {
     background: "rgba(255,140,0,0.12)",
@@ -1021,6 +947,7 @@ const styles = {
     fontWeight: 900,
     cursor: "pointer",
     minWidth: 110,
+    flex: "0 0 auto",
   },
 
   center: {
