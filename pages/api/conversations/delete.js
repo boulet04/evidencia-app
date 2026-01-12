@@ -1,14 +1,30 @@
 // pages/api/conversations/delete.js
-import { supabaseAdmin } from "../../../lib/supabaseAdmin";
+import * as supabaseModule from "../../../lib/supabaseAdmin";
+
+function getSupabaseAdmin() {
+  // Compatible export default OU export nommé
+  return supabaseModule.supabaseAdmin || supabaseModule.default;
+}
 
 export default async function handler(req, res) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
+
+  // Preflight éventuel
+  if (req.method === "OPTIONS") return res.status(200).end();
 
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
+    const supabaseAdmin = getSupabaseAdmin();
+    if (!supabaseAdmin) {
+      return res.status(500).json({
+        ok: false,
+        error: "supabaseAdmin is undefined (check lib/supabaseAdmin export).",
+      });
+    }
+
     const auth = req.headers.authorization || "";
     const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
 
@@ -23,7 +39,10 @@ export default async function handler(req, res) {
       return res.status(401).json({ ok: false, error: "Invalid token" });
     }
 
-    const { conversationId } = req.body || {};
+    // Body peut être déjà parsé (objet) ou string
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const conversationId = body.conversationId;
+
     if (!conversationId) {
       return res.status(400).json({ ok: false, error: "Missing conversationId" });
     }
@@ -31,7 +50,7 @@ export default async function handler(req, res) {
     // Vérifie ownership
     const { data: conv, error: convErr } = await supabaseAdmin
       .from("conversations")
-      .select("id,user_id")
+      .select("id, user_id")
       .eq("id", conversationId)
       .maybeSingle();
 
@@ -56,6 +75,9 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ ok: true });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: (e?.message || "Server error").toString() });
+    return res.status(500).json({
+      ok: false,
+      error: (e?.message || "Server error").toString(),
+    });
   }
 }
