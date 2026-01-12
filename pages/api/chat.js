@@ -2,14 +2,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { Mistral } from "@mistralai/mistralai";
 
-/**
- * Objectifs :
- * - Zéro "amnésie" : mémoire persistante par conversation (rolling summary stocké en DB)
- * - Performance : fenêtre courte de messages + mémoire, modèles "small" par défaut
- * - Envoi email : webhook Make réel, confirmation uniquement si Make répond OK
- * - Compat Vercel : accepte MAKE_WEBHOOK_URL (et MAKE_EMAIL_WEBHOOK_URL si présent)
- */
-
 function safeStr(v) {
   return (v ?? "").toString();
 }
@@ -41,19 +33,6 @@ function looksLikeEmail(s) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
 
-function tryParseActionJson(text) {
-  const t = safeStr(text).trim();
-  if (!t.startsWith("{") || !t.endsWith("}")) return null;
-  try {
-    const obj = JSON.parse(t);
-    if (!obj || typeof obj !== "object") return null;
-    if (!obj.action) return null;
-    return obj;
-  } catch {
-    return null;
-  }
-}
-
 async function withTimeout(promise, ms, label) {
   let timer;
   const timeout = new Promise((_, rej) => {
@@ -67,13 +46,111 @@ async function withTimeout(promise, ms, label) {
 }
 
 function buildMemoryTag(content) {
-  // Tag clair pour filtrer via LIKE en PostgREST
   return `MEMORY:\n${content}`;
 }
 
 function stripMemoryTag(content) {
   const t = safeStr(content);
   return t.startsWith("MEMORY:\n") ? t.slice("MEMORY:\n".length) : t;
+}
+
+/**
+ * Extrait un objet JSON d’un texte même si :
+ * - enveloppé dans ```json ... ```
+ * - enveloppé dans ``` ... ```
+ * - précédé/suivi de texte
+ * - ou si le modèle renvoie { ... } au milieu
+ */
+function extractFirstJsonObject(text) {
+  const raw = safeStr(text).trim();
+  if (!raw) return null;
+
+  // 1) Chercher un bloc ```json ... ```
+  const fenceJson = new RegExp("```\\s*json\\s*([\\s\\S]*?)```", "i");
+  const mJson = raw.match(fenceJson);
+  if (mJson?.[1]) {
+    const inside = mJson[1].trim();
+    const parsed = tryParseJson(inside);
+    if (parsed) return parsed;
+  }
+
+  // 2) Chercher un bloc ``` ... ``` (sans préciser json)
+  const fenceAny = new RegExp("```\\s*([\\s\\S]*?)```", "i");
+  const mAny = raw.match(fenceAny);
+  if (mAny?.[1]) {
+    const inside = mAny[1].trim();
+    const parsed = tryParseJson(inside);
+    if (parsed) return parsed;
+  }
+
+  // 3) Chercher un objet JSON par scan d’accolades (top-level)
+  const scanned = scanFirstBalancedObject(raw);
+  if (scanned) {
+    const parsed = tryParseJson(scanned);
+    if (parsed) return parsed;
+  }
+
+  return null;
+}
+
+function tryParseJson(s) {
+  const t = safeStr(s).trim();
+  if (!t.startsWith("{") || !t.endsWith("}")) return null;
+  try {
+    const obj = JSON.parse(t);
+    return obj && typeof obj === "object" ? obj : null;
+  } catch {
+    return null;
+  }
+}
+
+function scanFirstBalancedObject(text) {
+  const s = safeStr(text);
+  let start = -1;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+
+    if (inStr) {
+      if (esc) {
+        esc = false;
+      } else if (ch === "\\") {
+        esc = true;
+      } else if (ch === '"') {
+        inStr = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inStr = true;
+      continue;
+    }
+
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+      continue;
+    }
+
+    if (ch === "}") {
+      if (depth > 0) depth--;
+      if (depth === 0 && start !== -1) {
+        return s.slice(start, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
+function extractAction(text) {
+  const obj = extractFirstJsonObject(text);
+  if (!obj || typeof obj !== "object") return null;
+  if (!obj.action) return null;
+  return obj;
 }
 
 export default async function handler(req, res) {
@@ -87,18 +164,15 @@ export default async function handler(req, res) {
   const t0 = Date.now();
 
   try {
-    // ENV
     const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 
-    // IMPORTANT : chez vous c’est MAKE_WEBHOOK_URL
     const MAKE_URL =
       process.env.MAKE_EMAIL_WEBHOOK_URL ||
       process.env.MAKE_WEBHOOK_URL ||
       "";
 
-    // Modèles (rapides par défaut)
     const CHAT_MODEL = process.env.MISTRAL_MODEL || "mistral-small-latest";
     const SUMMARY_MODEL = process.env.MISTRAL_SUMMARY_MODEL || "mistral-small-latest";
 
@@ -195,7 +269,6 @@ export default async function handler(req, res) {
         .single();
 
       if (newConvErr) {
-        // fallback si colonne archived absente
         const { data: newConv2, error: newConvErr2 } = await supabaseAdmin
           .from("conversations")
           .insert({
@@ -222,8 +295,7 @@ export default async function handler(req, res) {
     });
     if (insUserErr) return res.status(500).json({ error: "Erreur insertion message user.", detail: insUserErr.message });
 
-    // --- MEMORY (rolling summary) ---
-    // 1) Charger la dernière mémoire
+    // --- MEMORY ---
     const { data: memRow, error: memErr } = await supabaseAdmin
       .from("messages")
       .select("id, content, created_at")
@@ -239,41 +311,21 @@ export default async function handler(req, res) {
     const memoryContent = memRow?.content ? stripMemoryTag(memRow.content) : "";
     const memoryCreatedAt = memRow?.created_at || null;
 
-    // 2) Déterminer s’il faut rafraîchir la mémoire
-    // Rafraîchit si au moins 12 messages user/assistant depuis la dernière mémoire (ou si aucune mémoire)
     let needMemoryUpdate = !memoryCreatedAt;
 
     if (memoryCreatedAt) {
-      const { data: countRows, error: countErr } = await supabaseAdmin
+      const { data: ids, error: idsErr } = await supabaseAdmin
         .from("messages")
-        .select("id", { count: "exact", head: true })
+        .select("id")
         .eq("conversation_id", conversationId)
         .in("role", ["user", "assistant"])
-        .gt("created_at", memoryCreatedAt);
+        .gt("created_at", memoryCreatedAt)
+        .limit(12);
 
-      if (countErr) return res.status(500).json({ error: "Erreur calcul rafraîchissement mémoire.", detail: countErr.message });
-      const countSince = countRows?.length ?? 0; // head:true => souvent [], on exploite surtout count côté PostgREST
-      // Certaines configs Supabase ne renvoient pas countRows. On force une stratégie stable :
-      // si head:true ne donne pas count exploitable, on bascule sur un fetch limité.
-      // Ici, si countRows est vide, on ne conclut pas ; on fait un fetch court.
-      if (countSince >= 12) needMemoryUpdate = true;
-      if (countSince === 0) {
-        // fallback : fetch 12 ids after memoryCreatedAt
-        const { data: ids, error: idsErr } = await supabaseAdmin
-          .from("messages")
-          .select("id")
-          .eq("conversation_id", conversationId)
-          .in("role", ["user", "assistant"])
-          .gt("created_at", memoryCreatedAt)
-          .limit(12);
-
-        if (idsErr) return res.status(500).json({ error: "Erreur fallback rafraîchissement mémoire.", detail: idsErr.message });
-        if ((ids || []).length >= 12) needMemoryUpdate = true;
-      }
+      if (idsErr) return res.status(500).json({ error: "Erreur rafraîchissement mémoire.", detail: idsErr.message });
+      if ((ids || []).length >= 12) needMemoryUpdate = true;
     }
 
-    // 3) Charger une fenêtre d’historique pour le chat (rapide)
-    // On envoie au modèle : mémoire + derniers 18 messages (hors mémoire)
     const HISTORY_LIMIT = 18;
 
     const { data: recentMsgs, error: recentErr } = await supabaseAdmin
@@ -288,11 +340,9 @@ export default async function handler(req, res) {
 
     const history = (recentMsgs || []).slice().reverse();
 
-    // 4) Si besoin, générer une nouvelle mémoire (summary) et la stocker
     const mistral = new Mistral({ apiKey: MISTRAL_API_KEY });
 
     if (needMemoryUpdate) {
-      // On prend un extrait plus large pour résumer sans exploser en tokens
       const { data: sumMsgs, error: sumErr } = await supabaseAdmin
         .from("messages")
         .select("role, content, created_at")
@@ -307,15 +357,14 @@ export default async function handler(req, res) {
 
       const summarizerSystem =
         "Tu es un moteur de synthèse. Produis un résumé court et utile en français.\n" +
-        "Contraintes :\n" +
         "- Format : puces courtes.\n" +
-        "- Contenu : faits importants, décisions, contraintes, préférences utilisateur, points en attente.\n" +
-        "- Longueur : max 1200 caractères.\n" +
+        "- Faits importants, décisions, contraintes, préférences, points en attente.\n" +
+        "- Max 1200 caractères.\n" +
         "- Ne pas inventer.\n";
 
       const summarizerUser =
         (memoryContent ? `Mémoire précédente:\n${memoryContent}\n\n` : "") +
-        "Voici le fil de conversation (extraits). Mets à jour la mémoire :\n\n" +
+        "Voici le fil de conversation. Mets à jour la mémoire :\n\n" +
         sumHistory
           .map((m) => `${m.role.toUpperCase()}: ${safeStr(m.content).slice(0, 1200)}`)
           .join("\n");
@@ -346,7 +395,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // Relire la mémoire la plus récente (si on vient de la rafraîchir)
     const { data: memRow2 } = await supabaseAdmin
       .from("messages")
       .select("content")
@@ -359,18 +407,18 @@ export default async function handler(req, res) {
 
     const finalMemory = memRow2?.content ? stripMemoryTag(memRow2.content) : memoryContent;
 
-    // --- Prompt anti-hallucination d'exécution (email) ---
+    // --- SYSTEM PROMPT ---
     const workflowRules =
       "RÈGLES D’EXÉCUTION (IMPORTANT) :\n" +
-      "- Tu n’affirmes JAMAIS qu’un email a été envoyé si tu n’as pas reçu une confirmation d’exécution.\n" +
-      "- Si l’utilisateur valide l’envoi d’un email ET que tu as toutes les infos, tu réponds UNIQUEMENT par un JSON brut (sans texte) au format :\n" +
-      '{ "action":"send_email", "to":"email@domaine.com", "cc":[], "bcc":[], "subject":"...", "body_html":"<p>...</p>" }\n' +
-      "- Si une info manque (destinataire, objet, contenu), tu poses UNE question précise.\n";
+      "- Tu n’affirmes JAMAIS qu’un email a été envoyé sans confirmation technique.\n" +
+      "- Si l’utilisateur valide l’envoi d’un email et que tu as toutes les infos, tu renvoies UNIQUEMENT un JSON BRUT (pas de markdown, pas de ```), au format:\n" +
+      '{ "action":"send_email","to":"...","cc":[],"bcc":[],"subject":"...","body_html":"<p>...</p>" }\n' +
+      "- Si une info manque, tu poses UNE question.\n";
 
     const systemPrompt =
       `${workflowRules}\n` +
       `Tu es ${safeStr(agent.name) || "un agent"} d’Evidenc'IA. Réponds en français, de manière opérationnelle.\n` +
-      (finalMemory ? `\nMÉMOIRE DE LA CONVERSATION (à respecter):\n${finalMemory}\n` : "");
+      (finalMemory ? `\nMÉMOIRE DE LA CONVERSATION:\n${finalMemory}\n` : "");
 
     const tBeforeLLM = Date.now();
 
@@ -392,11 +440,11 @@ export default async function handler(req, res) {
     let assistantText = safeStr(completion?.choices?.[0]?.message?.content).trim();
     if (!assistantText) assistantText = "Réponse vide.";
 
-    // --- ACTION : send_email ---
+    // --- ACTION EXECUTION ---
     let mailSent = false;
     let mailError = "";
 
-    const action = tryParseActionJson(assistantText);
+    const action = extractAction(assistantText);
 
     if (action?.action === "send_email") {
       const to = safeStr(action.to).trim();
@@ -424,12 +472,7 @@ export default async function handler(req, res) {
               bcc,
               subject,
               body_html: bodyHtml,
-              meta: {
-                conversationId,
-                userId,
-                agentSlug,
-                ts: nowIso(),
-              },
+              meta: { conversationId, userId, agentSlug, ts: nowIso() },
             }),
           }),
           12000,
@@ -438,18 +481,24 @@ export default async function handler(req, res) {
 
         const makeText = await makeResp.text().catch(() => "");
         if (!makeResp.ok) {
-          mailError = `Make webhook error (${makeResp.status}) ${makeText || ""}`.slice(0, 300);
+          mailError = `Make webhook error (${makeResp.status}) ${makeText || ""}`.slice(0, 400);
           assistantText =
             "Je n’ai pas pu envoyer l’email : le workflow a répondu une erreur. Je peux réessayer ou vous afficher le payload exact envoyé.";
         } else {
           mailSent = true;
           assistantText =
-            "Email envoyé via le workflow automatique. Si vous ne le voyez pas, vérifiez le dossier Indésirables/Spam et les Éléments envoyés du compte Outlook connecté à Make.";
+            "Email envoyé via le workflow automatique. Si vous ne le voyez pas, vérifiez Indésirables/Spam et les Éléments envoyés du compte Outlook connecté à Make.";
         }
+      }
+    } else {
+      // Si le modèle renvoie un JSON mais non détecté auparavant, on veut le savoir via mailError.
+      // Ici, si le message contient "action" mais qu'on n'a pas pu parser, on le signale.
+      if (/action\s*["']?\s*:\s*["']?send_email/i.test(assistantText)) {
+        mailError = "Action détectée dans le texte mais JSON non parsable. (Probablement markdown/code fence mal formé.)";
       }
     }
 
-    // SAVE assistant message
+    // SAVE assistant message (on enregistre la réponse finale lisible, pas le JSON)
     const { error: insAsstErr } = await supabaseAdmin.from("messages").insert({
       conversation_id: conversationId,
       role: "assistant",
