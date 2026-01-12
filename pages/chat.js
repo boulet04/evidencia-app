@@ -22,6 +22,7 @@ export default function ChatPage() {
   const [conversations, setConversations] = useState([]);
   const [selectedConvId, setSelectedConvId] = useState("");
   const [messages, setMessages] = useState([]);
+  const [deletingConvId, setDeletingConvId] = useState("");
 
   // --- Input ---
   const [input, setInput] = useState("");
@@ -153,15 +154,15 @@ export default function ChatPage() {
       return [];
     }
 
-  const list = (data || []).filter((m) => {
-  // Ne pas afficher les messages techniques
-  if (m.role === "system") return false;
-  if ((m.content || "").startsWith("MEMORY:")) return false;
-  return true;
-});
-setMessages(list);
-return list;
+    const list = (data || []).filter((m) => {
+      // Ne pas afficher les messages techniques
+      if (m.role === "system") return false;
+      if ((m.content || "").startsWith("MEMORY:")) return false;
+      return true;
+    });
 
+    setMessages(list);
+    return list;
   }
 
   async function createConversationNow(initialTitle = DEFAULT_TITLE) {
@@ -248,7 +249,7 @@ return list;
 
   async function ensureConversationExistsWithGreeting() {
     // Si aucune conversation, on en crée une immédiatement + greeting
-    const { list, firstId } = await refreshConversations(userId, agentSlug);
+    const { firstId } = await refreshConversations(userId, agentSlug);
 
     if (firstId) {
       setSelectedConvId(firstId);
@@ -270,6 +271,65 @@ return list;
     // IMPORTANT : greeting avant toute action user
     await initGreetingIfEmpty(convId);
     await loadMessages(convId);
+  }
+
+  // --- SUPPRESSION CONVERSATION (croix rouge) ---
+  async function deleteConversation(conversationIdToDelete) {
+    if (!conversationIdToDelete || deletingConvId) return;
+
+    const ok = window.confirm("Supprimer définitivement cette conversation ?");
+    if (!ok) return;
+
+    setErrorMsg("");
+    setDeletingConvId(conversationIdToDelete);
+
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        setErrorMsg("Session expirée. Reconnectez-vous.");
+        setDeletingConvId("");
+        return;
+      }
+
+      const resp = await fetch("/api/conversations/delete", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ conversationId: conversationIdToDelete }),
+      });
+
+      const json = await resp.json().catch(() => null);
+
+      if (!resp.ok || !json?.ok) {
+        setErrorMsg(json?.error || "Suppression impossible.");
+        setDeletingConvId("");
+        return;
+      }
+
+      // Mettre à jour l'UI immédiatement
+      const remaining = (conversations || []).filter((c) => c.id !== conversationIdToDelete);
+      setConversations(remaining);
+
+      // Si on a supprimé la conversation active
+      if (selectedConvId === conversationIdToDelete) {
+        const nextId = remaining?.[0]?.id || "";
+        if (nextId) {
+          setSelectedConvId(nextId);
+          await loadMessages(nextId);
+        } else {
+          setSelectedConvId("");
+          setMessages([]);
+          await ensureConversationExistsWithGreeting();
+        }
+      }
+
+      setDeletingConvId("");
+    } catch (_) {
+      setErrorMsg("Erreur lors de la suppression.");
+      setDeletingConvId("");
+    }
   }
 
   // Init page: session + agent + conversations
@@ -470,25 +530,52 @@ return list;
           </div>
 
           <div style={styles.convList}>
-            {(conversations || []).map((c) => (
-              <button
-                key={c.id}
-                style={{
-                  ...styles.convItem,
-                  ...(selectedConvId === c.id ? styles.convItemActive : {}),
-                }}
-                onClick={async () => {
-                  setSelectedConvId(c.id);
-                  await loadMessages(c.id);
-                }}
-                title={c.title || ""}
-              >
-                <div style={styles.convTitle}>{c.title || "Conversation"}</div>
-                <div style={styles.convMeta}>
-                  {c.created_at ? new Date(c.created_at).toLocaleString("fr-FR") : ""}
+            {(conversations || []).map((c) => {
+              const active = selectedConvId === c.id;
+              const isDeleting = deletingConvId === c.id;
+
+              return (
+                <div key={c.id} style={styles.convItemWrap}>
+                  <button
+                    style={{
+                      ...styles.convItem,
+                      ...(active ? styles.convItemActive : {}),
+                      paddingRight: 44, // laisse la place à la croix
+                    }}
+                    onClick={async () => {
+                      if (isDeleting) return;
+                      setSelectedConvId(c.id);
+                      await loadMessages(c.id);
+                    }}
+                    title={c.title || ""}
+                    disabled={isDeleting}
+                  >
+                    <div style={styles.convTitle}>{c.title || "Conversation"}</div>
+                    <div style={styles.convMeta}>
+                      {c.created_at ? new Date(c.created_at).toLocaleString("fr-FR") : ""}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    title="Supprimer"
+                    aria-label="Supprimer la conversation"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (!isDeleting) deleteConversation(c.id);
+                    }}
+                    disabled={isDeleting}
+                    style={{
+                      ...styles.convDeleteBtn,
+                      ...(isDeleting ? styles.convDeleteBtnDisabled : {}),
+                    }}
+                  >
+                    <XIcon />
+                  </button>
                 </div>
-              </button>
-            ))}
+              );
+            })}
           </div>
         </aside>
 
@@ -592,20 +679,8 @@ function MicIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <path
-        d="M12 18v3"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M8 21h8"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+      <path d="M12 18v3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M8 21h8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -614,6 +689,15 @@ function StopIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <rect x="7" y="7" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="2" />
+    </svg>
+  );
+}
+
+function XIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }
@@ -741,7 +825,14 @@ const styles = {
     flex: "1 1 auto",
     minHeight: 0,
   },
+
+  // Wrapper pour éviter "button dans button"
+  convItemWrap: {
+    position: "relative",
+  },
+
   convItem: {
+    width: "100%",
     textAlign: "left",
     borderRadius: 14,
     border: "1px solid rgba(255,255,255,0.10)",
@@ -767,6 +858,27 @@ const styles = {
     fontSize: 11,
     fontWeight: 700,
     color: "rgba(238,242,255,0.60)",
+  },
+
+  // Croix rouge (positionnée en haut à droite de la carte)
+  convDeleteBtn: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    border: "1px solid rgba(255,70,70,0.55)",
+    background: "rgba(255,70,70,0.16)",
+    color: "rgba(255,150,150,0.98)",
+    cursor: "pointer",
+    display: "grid",
+    placeItems: "center",
+    zIndex: 5,
+  },
+  convDeleteBtnDisabled: {
+    opacity: 0.55,
+    cursor: "not-allowed",
   },
 
   chatCol: {
