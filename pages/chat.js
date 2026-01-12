@@ -26,15 +26,7 @@ export default function ChatPage() {
   // --- Input ---
   const [input, setInput] = useState("");
   const endRef = useRef(null);
-
-  // IMPORTANT: ref textarea pour garder le focus
   const textareaRef = useRef(null);
-  const focusInput = () => {
-    // RAF => garantit le focus après le re-render
-    if (typeof window !== "undefined") {
-      window.requestAnimationFrame(() => textareaRef.current?.focus?.());
-    }
-  };
 
   // --- Micro / dictée (Web Speech API) ---
   const recognitionRef = useRef(null);
@@ -111,7 +103,6 @@ export default function ChatPage() {
         else interim += txt;
       }
       setInput((finalTextRef.current + interim).trim());
-      focusInput();
     };
 
     rec.onerror = () => setListening(false);
@@ -130,7 +121,6 @@ export default function ChatPage() {
     } catch (_) {}
     recognitionRef.current = null;
     setListening(false);
-    focusInput();
   }
 
   async function initGreetingIfEmpty(conversationId) {
@@ -168,7 +158,6 @@ export default function ChatPage() {
       // Ne pas afficher les messages techniques
       if (m.role === "system") return false;
       if ((m.content || "").startsWith("MEMORY:")) return false;
-      if ((m.content || "").startsWith("PENDING_EMAIL:")) return false;
       return true;
     });
 
@@ -228,7 +217,7 @@ export default function ChatPage() {
       .eq("user_id", uid)
       .eq("agent_slug", slug)
       .order("created_at", { ascending: false })
-      .limit(10);
+      .limit(20);
 
     if (error) {
       const { data: data2, error: error2 } = await supabase
@@ -237,7 +226,7 @@ export default function ChatPage() {
         .eq("user_id", uid)
         .eq("agent_slug", slug)
         .order("created_at", { ascending: false })
-        .limit(10);
+        .limit(20);
 
       if (error2) {
         setErrorMsg("Impossible de charger l'historique.");
@@ -265,7 +254,6 @@ export default function ChatPage() {
     if (firstId) {
       setSelectedConvId(firstId);
       await loadMessages(firstId);
-      focusInput();
       return;
     }
 
@@ -274,7 +262,6 @@ export default function ChatPage() {
     if (!convId) {
       setSelectedConvId("");
       setMessages([]);
-      focusInput();
       return;
     }
 
@@ -284,7 +271,63 @@ export default function ChatPage() {
     // IMPORTANT : greeting avant toute action user
     await initGreetingIfEmpty(convId);
     await loadMessages(convId);
-    focusInput();
+  }
+
+  // Suppression conversation (croix rouge)
+  async function deleteConversation(conversationId) {
+    setErrorMsg("");
+    const token = await getAccessToken();
+    if (!token) {
+      setErrorMsg("Session expirée. Reconnectez-vous.");
+      return;
+    }
+
+    try {
+      const resp = await fetch("/api/conversations/delete", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ conversationId }),
+      });
+
+      const json = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        setErrorMsg(json?.error || "Suppression impossible.");
+        return;
+      }
+
+      // Refresh liste
+      const { list, firstId } = await refreshConversations(userId, agentSlug);
+
+      // Si on vient de supprimer la conversation sélectionnée : bascule sur la première, sinon crée une nouvelle
+      if (selectedConvId === conversationId) {
+        if (firstId) {
+          setSelectedConvId(firstId);
+          await loadMessages(firstId);
+        } else {
+          const newId = await createConversationNow(DEFAULT_TITLE);
+          if (newId) {
+            await refreshConversations(userId, agentSlug);
+            setSelectedConvId(newId);
+            await initGreetingIfEmpty(newId);
+            await loadMessages(newId);
+          } else {
+            setSelectedConvId("");
+            setMessages([]);
+          }
+        }
+      } else {
+        // Si autre conv supprimée, on garde la sélection et on laisse les messages tels quels
+        // (optionnel) rien à faire
+      }
+
+      // Remet le focus dans la zone de saisie (confort)
+      setTimeout(() => textareaRef.current?.focus?.(), 0);
+    } catch (_) {
+      setErrorMsg("Erreur suppression conversation.");
+    }
   }
 
   // Init page: session + agent + conversations
@@ -341,6 +384,7 @@ export default function ChatPage() {
     (async () => {
       setErrorMsg("");
       await ensureConversationExistsWithGreeting();
+      setTimeout(() => textareaRef.current?.focus?.(), 0);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, agentSlug]);
@@ -350,7 +394,6 @@ export default function ChatPage() {
     const convId = await createConversationNow(DEFAULT_TITLE);
     if (!convId) {
       setErrorMsg("Impossible de créer une nouvelle conversation.");
-      focusInput();
       return;
     }
 
@@ -360,15 +403,12 @@ export default function ChatPage() {
     // Greeting doit s’afficher immédiatement
     await initGreetingIfEmpty(convId);
     await loadMessages(convId);
-    focusInput();
+
+    setTimeout(() => textareaRef.current?.focus?.(), 0);
   }
 
   async function sendMessage() {
-    if (!input.trim() || sending) {
-      focusInput();
-      return;
-    }
-
+    if (!input.trim() || sending) return;
     setErrorMsg("");
     setSending(true);
 
@@ -380,6 +420,8 @@ export default function ChatPage() {
         convId = await createConversationNow(DEFAULT_TITLE);
         if (!convId) {
           setErrorMsg("Impossible de créer une conversation.");
+          setSending(false);
+          setTimeout(() => textareaRef.current?.focus?.(), 0);
           return;
         }
         await refreshConversations(userId, agentSlug);
@@ -392,11 +434,16 @@ export default function ChatPage() {
       const token = await getAccessToken();
       if (!token) {
         setErrorMsg("Session expirée. Reconnectez-vous.");
+        setSending(false);
+        setTimeout(() => textareaRef.current?.focus?.(), 0);
         return;
       }
 
       const userText = input.trim();
       setInput("");
+
+      // Garder le focus dans la zone de saisie
+      setTimeout(() => textareaRef.current?.focus?.(), 0);
 
       // Optimistic UI (après greeting)
       setMessages((prev) => [
@@ -426,6 +473,8 @@ export default function ChatPage() {
       if (!resp.ok) {
         setErrorMsg(json?.error || "Erreur lors de l’envoi.");
         await loadMessages(convId);
+        setSending(false);
+        setTimeout(() => textareaRef.current?.focus?.(), 0);
         return;
       }
 
@@ -435,11 +484,12 @@ export default function ChatPage() {
       }
 
       await loadMessages(convId);
+      setSending(false);
+      setTimeout(() => textareaRef.current?.focus?.(), 0);
     } catch (_) {
       setErrorMsg("Erreur lors de l’envoi.");
-    } finally {
       setSending(false);
-      focusInput();
+      setTimeout(() => textareaRef.current?.focus?.(), 0);
     }
   }
 
@@ -490,24 +540,39 @@ export default function ChatPage() {
 
           <div style={styles.convList}>
             {(conversations || []).map((c) => (
-              <button
-                key={c.id}
-                style={{
-                  ...styles.convItem,
-                  ...(selectedConvId === c.id ? styles.convItemActive : {}),
-                }}
-                onClick={async () => {
-                  setSelectedConvId(c.id);
-                  await loadMessages(c.id);
-                  focusInput();
-                }}
-                title={c.title || ""}
-              >
-                <div style={styles.convTitle}>{c.title || "Conversation"}</div>
-                <div style={styles.convMeta}>
-                  {c.created_at ? new Date(c.created_at).toLocaleString("fr-FR") : ""}
-                </div>
-              </button>
+              <div key={c.id} style={styles.convRow}>
+                <button
+                  style={{
+                    ...styles.convItem,
+                    ...(selectedConvId === c.id ? styles.convItemActive : {}),
+                  }}
+                  onClick={async () => {
+                    setSelectedConvId(c.id);
+                    await loadMessages(c.id);
+                    setTimeout(() => textareaRef.current?.focus?.(), 0);
+                  }}
+                  title={c.title || ""}
+                >
+                  <div style={styles.convTitle}>{c.title || "Conversation"}</div>
+                  <div style={styles.convMeta}>
+                    {c.created_at ? new Date(c.created_at).toLocaleString("fr-FR") : ""}
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  style={styles.convDeleteBtn}
+                  title="Supprimer la conversation"
+                  aria-label="Supprimer"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    deleteConversation(c.id);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
             ))}
           </div>
         </aside>
@@ -569,7 +634,6 @@ export default function ChatPage() {
 
             <button
               type="button"
-              onMouseDown={(e) => e.preventDefault()} // empêche le focus de quitter le textarea
               onClick={() => {
                 if (!micSupported) return;
                 if (listening) stopMic();
@@ -588,8 +652,10 @@ export default function ChatPage() {
             </button>
 
             <button
-              onMouseDown={(e) => e.preventDefault()} // empêche le focus de quitter le textarea
-              onClick={sendMessage}
+              onClick={() => {
+                sendMessage();
+                setTimeout(() => textareaRef.current?.focus?.(), 0);
+              }}
               disabled={sending || !input.trim()}
               style={styles.sendBtn}
             >
@@ -768,6 +834,15 @@ const styles = {
     flex: "1 1 auto",
     minHeight: 0,
   },
+
+  // Ligne conv + croix
+  convRow: {
+    display: "grid",
+    gridTemplateColumns: "1fr 34px",
+    gap: 8,
+    alignItems: "stretch",
+  },
+
   convItem: {
     textAlign: "left",
     borderRadius: 14,
@@ -777,23 +852,42 @@ const styles = {
     padding: 10,
     cursor: "pointer",
     overflow: "hidden",
+    width: "100%",
   },
   convItemActive: {
     border: "1px solid rgba(255,140,0,0.42)",
     background: "rgba(255,140,0,0.08)",
   },
+
+  // Titre sur 2 lignes max (plus lisible, moins “coupé”)
   convTitle: {
     fontSize: 12,
     fontWeight: 900,
-    marginBottom: 4,
+    marginBottom: 6,
     overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
+    display: "-webkit-box",
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: "vertical",
+    lineHeight: 1.25,
   },
   convMeta: {
     fontSize: 11,
     fontWeight: 700,
     color: "rgba(238,242,255,0.60)",
+  },
+
+  convDeleteBtn: {
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(255, 0, 0, 0.10)",
+    color: "rgba(255, 90, 90, 0.95)",
+    cursor: "pointer",
+    fontWeight: 900,
+    fontSize: 18,
+    lineHeight: "18px",
+    display: "grid",
+    placeItems: "center",
+    userSelect: "none",
   },
 
   chatCol: {
