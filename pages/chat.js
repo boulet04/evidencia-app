@@ -34,6 +34,32 @@ export default function ChatPage() {
   const [micSupported, setMicSupported] = useState(false);
   const [listening, setListening] = useState(false);
 
+    // --- Responsive (mobile) ---
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const mq = window.matchMedia("(max-width: 900px)");
+    const apply = () => setIsMobile(!!mq.matches);
+
+    apply();
+
+    // compat Safari / vieux Chrome
+    if (mq.addEventListener) mq.addEventListener("change", apply);
+    else mq.addListener(apply);
+
+    window.addEventListener("resize", apply);
+
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", apply);
+      else mq.removeListener(apply);
+
+      window.removeEventListener("resize", apply);
+    };
+  }, []);
+
+
   const DEFAULT_TITLE = "Nouvelle conversation";
 
   function safeStr(v) {
