@@ -556,7 +556,16 @@ export default function ChatPage() {
       </header>
 
       <div style={styles.shell}>
-        <aside style={styles.sidebar}>
+      <div
+        style={{
+          ...styles.shell,
+          gridTemplateColumns: isMobile ? "1fr" : "320px 1fr",
+          gridTemplateRows: isMobile ? "260px 1fr" : undefined,
+          padding: isMobile ? 10 : styles.shell.padding,
+          gap: isMobile ? 10 : styles.shell.gap,
+        }}
+      >
+
           <div style={styles.sideTop}>
             <div style={styles.sideTitle}>Historique</div>
             <button style={styles.newBtn} onClick={handleNewConversation} title="Nouvelle conversation">
