@@ -27,7 +27,9 @@ export default function ChatPage() {
   const finalTextRef = useRef("");
   const [micSupported, setMicSupported] = useState(false);
   const [listening, setListening] = useState(false);
-  const [micSupported, setMicSupported] = useState(false);
+
+  // Mobile layout helper
+  const [isMobile, setIsMobile] = useState(false);
 
   const DEFAULT_TITLE = "Nouvelle conversation";
 
@@ -67,23 +69,24 @@ export default function ChatPage() {
 
     setMicSupported(Boolean(SR));
   }, []);
+
+  // Detect mobile (used by shell/aside/section inline styles)
   useEffect(() => {
-  if (typeof window === "undefined") return;
+    if (typeof window === "undefined") return;
 
-  const mq = window.matchMedia("(max-width: 900px)");
+    const mq = window.matchMedia("(max-width: 900px)");
+    const apply = () => setIsMobile(mq.matches);
 
-  const apply = () => setIsMobile(mq.matches);
-  apply();
+    apply();
 
-  if (mq.addEventListener) mq.addEventListener("change", apply);
-  else mq.addListener(apply);
+    if (mq.addEventListener) mq.addEventListener("change", apply);
+    else mq.addListener(apply);
 
-  return () => {
-    if (mq.removeEventListener) mq.removeEventListener("change", apply);
-    else mq.removeListener(apply);
-  };
-}, []);
-
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", apply);
+      else mq.removeListener(apply);
+    };
+  }, []);
 
   function startMic() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -518,7 +521,7 @@ export default function ChatPage() {
         </div>
       </header>
 
-         <div
+      <div
         style={{
           ...styles.shell,
           gridTemplateColumns: isMobile ? "1fr" : "320px 1fr",
@@ -527,14 +530,12 @@ export default function ChatPage() {
           gap: isMobile ? 10 : styles.shell.gap,
         }}
       >
-
         <aside
           style={{
             ...styles.sidebar,
             ...(isMobile ? { height: "100%" } : {}),
           }}
         >
-
           <div style={styles.sideTop}>
             <div style={styles.sideTitle}>Historique</div>
             <button style={styles.newBtn} onClick={handleNewConversation} title="Nouvelle conversation">
@@ -587,7 +588,6 @@ export default function ChatPage() {
             ...(isMobile ? { height: "100%" } : {}),
           }}
         >
-
           <div style={styles.agentHeader}>
             {agentAvatar ? (
               <img src={agentAvatar} alt={agentName} style={styles.avatar} />
