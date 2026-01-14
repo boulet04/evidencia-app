@@ -326,7 +326,6 @@ async function buildSourcesBlock(supabaseAdmin, context) {
       continue;
     }
 
-    // fichiers en storage
     if ((type === "file" || type === "pdf" || type === "document") && path) {
       if (isTextLikeSource(mime, name || path)) {
         const raw = await fetchTextFromStorage(supabaseAdmin, bucket, path);
@@ -704,7 +703,6 @@ export default async function handler(req, res) {
     }
 
     // --- PROMPTS ---
-    // prompt perso (user+agent) + context (sources)
     const { data: cfg } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -714,17 +712,14 @@ export default async function handler(req, res) {
 
     const customPrompt = safeStr(cfg?.system_prompt).trim();
 
-    // fallback “agent” (fichier)
     const fallbackPrompt =
       (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts[agentSlug]?.systemPrompt).trim()) || "";
 
-    // global prompt (DB d’abord, sinon fallback fichier)
     const globalPromptDb = await getGlobalSystemPromptFromDb(supabaseAdmin);
     const globalPromptFile =
       (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts.__GLOBAL__?.systemPrompt).trim()) || "";
     const globalPrompt = globalPromptDb || globalPromptFile;
 
-    // sources (CSV/TXT/MD/JSON injectés)
     const sourcesBlock = await buildSourcesBlock(supabaseAdmin, cfg?.context || null);
 
     const workflowRules =
@@ -766,7 +761,6 @@ export default async function handler(req, res) {
     let assistantText = safeStr(completion?.choices?.[0]?.message?.content).trim();
     if (!assistantText) assistantText = "Réponse vide.";
 
-    // --- DRAFT DETECTION (JSON OU TEXTE) ---
     let mailSent = false;
     let mailError = "";
 
