@@ -500,7 +500,16 @@ export default function ChatPage() {
         </div>
       </header>
 
-      <div style={styles.shell}>
+         <div
+        style={{
+          ...styles.shell,
+          gridTemplateColumns: isMobile ? "1fr" : "320px 1fr",
+          gridTemplateRows: isMobile ? "260px 1fr" : undefined,
+          padding: isMobile ? 10 : styles.shell.padding,
+          gap: isMobile ? 10 : styles.shell.gap,
+        }}
+      >
+
         <aside style={styles.sidebar}>
           <div style={styles.sideTop}>
             <div style={styles.sideTitle}>Historique</div>
