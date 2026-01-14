@@ -563,7 +563,13 @@ export default function ChatPage() {
           </div>
         </aside>
 
-        <section style={styles.chatCol}>
+        <section
+          style={{
+            ...styles.chatCol,
+            ...(isMobile ? { height: "100%" } : {}),
+          }}
+        >
+
           <div style={styles.agentHeader}>
             {agentAvatar ? (
               <img src={agentAvatar} alt={agentName} style={styles.avatar} />
