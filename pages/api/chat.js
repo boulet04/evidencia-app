@@ -241,14 +241,7 @@ function extractDraftFromPlainText(text) {
 
   const body = bodyLines.join("\n").trim();
 
-  return {
-    to,
-    subject,
-    body,
-    body_html: "",
-    cc: [],
-    bcc: [],
-  };
+  return { to, subject, body, body_html: "", cc: [], bcc: [] };
 }
 
 async function getLatestDraft(supabaseAdmin, conversationId) {
@@ -267,33 +260,6 @@ async function getLatestDraft(supabaseAdmin, conversationId) {
   const raw = stripDraftTag(data.content).trim();
   const obj = tryParseJson(raw);
   return obj && typeof obj === "object" ? obj : null;
-}
-
-// NOUVEAU : lit le prompt global depuis Supabase (console) via un agent slug "__global__"
-async function getGlobalPromptFromDb({ supabaseAdmin, userId }) {
-  const globalSlug = safeStr(process.env.GLOBAL_AGENT_SLUG || "__global__").trim() || "__global__";
-
-  try {
-    const { data: globalAgent, error: gaErr } = await supabaseAdmin
-      .from("agents")
-      .select("id")
-      .eq("slug", globalSlug)
-      .maybeSingle();
-
-    if (gaErr || !globalAgent?.id) return "";
-
-    const { data: cfgGlobal, error: cfgErr } = await supabaseAdmin
-      .from("client_agent_configs")
-      .select("system_prompt")
-      .eq("user_id", userId)
-      .eq("agent_id", globalAgent.id)
-      .maybeSingle();
-
-    if (cfgErr) return "";
-    return safeStr(cfgGlobal?.system_prompt).trim();
-  } catch {
-    return "";
-  }
 }
 
 export default async function handler(req, res) {
@@ -547,6 +513,58 @@ export default async function handler(req, res) {
 
     const finalMemory = memRow2?.content ? stripMemoryTag(memRow2.content) : memoryContent;
 
+    // --- PROMPTS (GLOBAL + PERSO) ---
+    // Global: commun à tous les users/agents (modifié via console admin -> Supabase)
+    const { data: gRow } = await supabaseAdmin
+      .from("global_prompts")
+      .select("content, updated_at")
+      .eq("key", "GLOBAL_SYSTEM_PROMPT")
+      .maybeSingle();
+
+    const globalPromptFromDb = safeStr(gRow?.content).trim();
+    const globalUpdatedAt = gRow?.updated_at || null;
+
+    // Perso: par user + agent
+    const { data: cfg } = await supabaseAdmin
+      .from("client_agent_configs")
+      .select("system_prompt, context")
+      .eq("user_id", userId)
+      .eq("agent_id", agent.id)
+      .maybeSingle();
+
+    const customPrompt = safeStr(cfg?.system_prompt).trim();
+
+    // Fallback local (si pas de prompt perso)
+    const fallbackPrompt =
+      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts[agentSlug]?.systemPrompt).trim()) || "";
+
+    // Règles d’exécution côté modèle (sécurité + protocole email)
+    // (La signature n’est PAS ici : elle doit être dans le prompt perso)
+    const workflowRules =
+      "RÈGLES D’EXÉCUTION (EMAIL / MAKE) :\n" +
+      "- Tu NE DOIS JAMAIS envoyer un email automatiquement.\n" +
+      "- Quand l’utilisateur demande d’écrire/préparer un mail : tu produis un BROUILLON.\n" +
+      "- Quand la tâche consiste à préparer un email via Make : tu produis uniquement un JSON strict avec exactement ces clés : to, subject, body (aucun texte autour).\n" +
+      "- Tu demandes ensuite confirmation explicite : l’utilisateur doit écrire exactement : ok envoie\n" +
+      "- Tant que la confirmation n’est pas donnée : aucun envoi.\n" +
+      "- Si une info manque réellement : tu poses UNE question.\n" +
+      "- Réponse en français, ton professionnel.\n";
+
+    const systemPrompt =
+      `${workflowRules}\n` +
+      (globalPromptFromDb ? `${globalPromptFromDb}\n` : "") +
+      (customPrompt ? `${customPrompt}\n` : "") +
+      (!customPrompt && fallbackPrompt ? `${fallbackPrompt}\n` : "") +
+      `\nTu es ${safeStr(agent.name) || "un agent"} d’Evidenc'IA.\n` +
+      (finalMemory ? `\nMÉMOIRE DE LA CONVERSATION:\n${finalMemory}\n` : "");
+
+    const prompt_debug = {
+      global_used: Boolean(globalPromptFromDb),
+      global_updated_at: globalUpdatedAt,
+      custom_used: Boolean(customPrompt),
+      fallback_used: !customPrompt && Boolean(fallbackPrompt),
+    };
+
     // --- DRAFT CONFIRMATION PATH (ENVOI UNIQUEMENT SUR "ok envoie") ---
     if (isSendConfirmation(message)) {
       let assistantText = "";
@@ -555,6 +573,7 @@ export default async function handler(req, res) {
 
       let draft = await getLatestDraft(supabaseAdmin, conversationId);
 
+      // Si pas de DRAFT_EMAIL enregistré, on tente de parser le dernier message assistant
       if (!draft) {
         const { data: lastAsst } = await supabaseAdmin
           .from("messages")
@@ -579,7 +598,7 @@ export default async function handler(req, res) {
 
       if (!draft) {
         assistantText =
-          "Je n’ai aucun brouillon en attente dans cette conversation. Dites-moi le destinataire (email) + l’objet + le contexte et je vous le présenterai avant envoi.";
+          "Je n’ai aucun brouillon en attente dans cette conversation. Donnez le destinataire (email) + l’objet + le contexte et je vous présenterai le brouillon avant envoi.";
       } else {
         const to = safeStr(draft.to).trim();
         const subject = safeStr(draft.subject).trim();
@@ -588,7 +607,7 @@ export default async function handler(req, res) {
         if (!looksLikeEmail(to) || !subject || !bodyText) {
           mailError = "Brouillon invalide (to/subject/body).";
           assistantText =
-            "Je ne peux pas envoyer : le brouillon est incomplet (destinataire / objet / contenu). Je peux le reformuler si vous me confirmez les champs manquants.";
+            "Je ne peux pas envoyer : le brouillon est incomplet (destinataire / objet / contenu). Dites-moi ce qu’il manque et je le complète.";
         } else if (!MAKE_URL) {
           mailError = "MAKE_WEBHOOK_URL non configurée.";
           assistantText =
@@ -647,51 +666,11 @@ export default async function handler(req, res) {
         mailError,
         timings: { total_ms: Date.now() - t0, llm_ms: 0 },
         memory: { used: Boolean(finalMemory), refreshed: Boolean(needMemoryUpdate) },
+        prompt_debug,
       });
     }
 
-    // --- SYSTEM PROMPT (GLOBAL DB + prompt perso agent + mémoire) ---
-
-    // Prompt perso (console) pour cet agent
-    const { data: cfg } = await supabaseAdmin
-      .from("client_agent_configs")
-      .select("system_prompt, context")
-      .eq("user_id", userId)
-      .eq("agent_id", agent.id)
-      .maybeSingle();
-
-    const customPrompt = safeStr(cfg?.system_prompt).trim();
-
-    // Prompt global (console) via agent "__global__" (ou GLOBAL_AGENT_SLUG)
-    const globalPromptFromDb = await getGlobalPromptFromDb({ supabaseAdmin, userId });
-
-    // Fallbacks (code) : on les garde au cas où (mais DB prioritaire)
-    const fallbackPrompt =
-      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts[agentSlug]?.systemPrompt).trim()) || "";
-
-    const globalPromptFromCode =
-      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts.__GLOBAL__?.systemPrompt).trim()) || "";
-
-    const globalPrompt = globalPromptFromDb || globalPromptFromCode;
-
-    const workflowRules =
-      "RÈGLES D’EXÉCUTION (EMAIL / MAKE) :\n" +
-      "- Tu NE DOIS JAMAIS envoyer un email automatiquement.\n" +
-      "- Quand l’utilisateur demande d’écrire/préparer un mail : tu produis un BROUILLON.\n" +
-      "- Idéalement, renvoie un JSON STRICT avec : {\"to\":\"...\",\"subject\":\"...\",\"body\":\"...\"} (sans markdown).\n" +
-      "- Tu demandes ensuite confirmation explicite : l’utilisateur doit écrire exactement : ok envoie\n" +
-      "- Tant que la confirmation n’est pas donnée : aucun envoi.\n" +
-      "- Si une info manque réellement : tu poses UNE question.\n" +
-      "- Réponse en français, ton professionnel.\n";
-
-    const systemPrompt =
-      `${workflowRules}\n` +
-      (globalPrompt ? `${globalPrompt}\n` : "") +
-      (customPrompt ? `${customPrompt}\n` : "") +
-      (!customPrompt && fallbackPrompt ? `${fallbackPrompt}\n` : "") +
-      `\nTu es ${safeStr(agent.name) || "un agent"} d’Evidenc'IA.\n` +
-      (finalMemory ? `\nMÉMOIRE DE LA CONVERSATION:\n${finalMemory}\n` : "");
-
+    // --- LLM CALL ---
     const tBeforeLLM = Date.now();
 
     const completion = await withTimeout(
@@ -762,7 +741,7 @@ export default async function handler(req, res) {
       mailError = "";
     }
 
-    // SAVE assistant message (lisible)
+    // SAVE assistant message
     const { error: insAsstErr } = await supabaseAdmin.from("messages").insert({
       conversation_id: conversationId,
       role: "assistant",
@@ -770,7 +749,9 @@ export default async function handler(req, res) {
       created_at: nowIso(),
     });
 
-    if (insAsstErr) return res.status(500).json({ error: "Erreur insertion message assistant.", detail: insAsstErr.message });
+    if (insAsstErr) {
+      return res.status(500).json({ error: "Erreur insertion message assistant.", detail: insAsstErr.message });
+    }
 
     return res.status(200).json({
       ok: true,
@@ -778,14 +759,9 @@ export default async function handler(req, res) {
       reply: assistantText,
       mailSent,
       mailError,
-      timings: {
-        total_ms: Date.now() - t0,
-        llm_ms: Date.now() - tBeforeLLM,
-      },
-      memory: {
-        used: Boolean(finalMemory),
-        refreshed: Boolean(needMemoryUpdate),
-      },
+      timings: { total_ms: Date.now() - t0, llm_ms: Date.now() - tBeforeLLM },
+      memory: { used: Boolean(finalMemory), refreshed: Boolean(needMemoryUpdate) },
+      prompt_debug,
     });
   } catch (e) {
     return res.status(500).json({
