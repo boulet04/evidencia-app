@@ -3,62 +3,30 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 
 export default function ChatPage() {
-  // --- Session / user ---
   const [sessionEmail, setSessionEmail] = useState("");
   const [userId, setUserId] = useState("");
 
-  // --- Agent ---
   const [agentSlug, setAgentSlug] = useState("");
   const [agentName, setAgentName] = useState("");
   const [agentDesc, setAgentDesc] = useState("");
   const [agentAvatar, setAgentAvatar] = useState("");
 
-  // --- UI state ---
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  // --- Conversations / messages ---
   const [conversations, setConversations] = useState([]);
   const [selectedConvId, setSelectedConvId] = useState("");
   const [messages, setMessages] = useState([]);
 
-  // --- Input ---
   const [input, setInput] = useState("");
   const endRef = useRef(null);
   const textareaRef = useRef(null);
 
-  // --- Micro / dictée (Web Speech API) ---
   const recognitionRef = useRef(null);
   const finalTextRef = useRef("");
   const [micSupported, setMicSupported] = useState(false);
   const [listening, setListening] = useState(false);
-
-    // --- Responsive (mobile) ---
-  const [isMobile, setIsMobile] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const mq = window.matchMedia("(max-width: 900px)");
-    const apply = () => setIsMobile(!!mq.matches);
-
-    apply();
-
-    // compat Safari / vieux Chrome
-    if (mq.addEventListener) mq.addEventListener("change", apply);
-    else mq.addListener(apply);
-
-    window.addEventListener("resize", apply);
-
-    return () => {
-      if (mq.removeEventListener) mq.removeEventListener("change", apply);
-      else mq.removeListener(apply);
-
-      window.removeEventListener("resize", apply);
-    };
-  }, []);
-
 
   const DEFAULT_TITLE = "Nouvelle conversation";
 
@@ -86,12 +54,10 @@ export default function ChatPage() {
     window.location.href = "/login";
   }
 
-  // Auto-scroll
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Init speech recognition support
   useEffect(() => {
     const SR =
       typeof window !== "undefined"
@@ -162,9 +128,7 @@ export default function ChatPage() {
         },
         body: JSON.stringify({ agentSlug, conversationId }),
       });
-    } catch (_) {
-      // Non bloquant
-    }
+    } catch (_) {}
   }
 
   async function loadMessages(conversationId) {
@@ -181,9 +145,10 @@ export default function ChatPage() {
     }
 
     const list = (data || []).filter((m) => {
-      // Ne pas afficher les messages techniques
       if (m.role === "system") return false;
       if ((m.content || "").startsWith("MEMORY:")) return false;
+      if ((m.content || "").startsWith("DRAFT_EMAIL:")) return false;
+      if ((m.content || "").startsWith("DRAFT_EMAIL_SENT:")) return false;
       return true;
     });
 
@@ -194,7 +159,6 @@ export default function ChatPage() {
   async function createConversationNow(initialTitle = DEFAULT_TITLE) {
     if (!userId || !agentSlug) return "";
 
-    // Try with archived (si colonne existe)
     const { data, error } = await supabase
       .from("conversations")
       .insert({
@@ -208,7 +172,6 @@ export default function ChatPage() {
 
     if (!error && data?.id) return data.id;
 
-    // Fallback sans archived
     const { data: data2, error: error2 } = await supabase
       .from("conversations")
       .insert({
@@ -227,7 +190,6 @@ export default function ChatPage() {
     const conv = (conversations || []).find((c) => c.id === conversationId);
     const currentTitle = conv?.title || DEFAULT_TITLE;
 
-    // Si la conv a été créée "vide", on la renomme au 1er message
     if (!currentTitle || currentTitle === DEFAULT_TITLE) {
       const newTitle = titleFromMessage(firstUserMessage);
       try {
@@ -274,8 +236,7 @@ export default function ChatPage() {
   }
 
   async function ensureConversationExistsWithGreeting() {
-    // Si aucune conversation, on en crée une immédiatement + greeting
-    const { list, firstId } = await refreshConversations(userId, agentSlug);
+    const { firstId } = await refreshConversations(userId, agentSlug);
 
     if (firstId) {
       setSelectedConvId(firstId);
@@ -283,7 +244,6 @@ export default function ChatPage() {
       return;
     }
 
-    // Aucune conversation => on crée + greeting + on charge
     const convId = await createConversationNow(DEFAULT_TITLE);
     if (!convId) {
       setSelectedConvId("");
@@ -294,12 +254,10 @@ export default function ChatPage() {
     await refreshConversations(userId, agentSlug);
     setSelectedConvId(convId);
 
-    // IMPORTANT : greeting avant toute action user
     await initGreetingIfEmpty(convId);
     await loadMessages(convId);
   }
 
-  // Suppression conversation (croix rouge)
   async function deleteConversation(conversationId) {
     setErrorMsg("");
     const token = await getAccessToken();
@@ -324,10 +282,8 @@ export default function ChatPage() {
         return;
       }
 
-      // Refresh liste
-      const { list, firstId } = await refreshConversations(userId, agentSlug);
+      const { firstId } = await refreshConversations(userId, agentSlug);
 
-      // Si on vient de supprimer la conversation sélectionnée : bascule sur la première, sinon crée une nouvelle
       if (selectedConvId === conversationId) {
         if (firstId) {
           setSelectedConvId(firstId);
@@ -344,19 +300,14 @@ export default function ChatPage() {
             setMessages([]);
           }
         }
-      } else {
-        // Si autre conv supprimée, on garde la sélection et on laisse les messages tels quels
-        // (optionnel) rien à faire
       }
 
-      // Remet le focus dans la zone de saisie (confort)
       setTimeout(() => textareaRef.current?.focus?.(), 0);
     } catch (_) {
       setErrorMsg("Erreur suppression conversation.");
     }
   }
 
-  // Init page: session + agent + conversations
   useEffect(() => {
     (async () => {
       try {
@@ -404,7 +355,6 @@ export default function ChatPage() {
     })();
   }, []);
 
-  // Une fois userId + agentSlug connus : on garantit une conversation existante + greeting
   useEffect(() => {
     if (!userId || !agentSlug) return;
     (async () => {
@@ -426,7 +376,6 @@ export default function ChatPage() {
     await refreshConversations(userId, agentSlug);
     setSelectedConvId(convId);
 
-    // Greeting doit s’afficher immédiatement
     await initGreetingIfEmpty(convId);
     await loadMessages(convId);
 
@@ -441,7 +390,6 @@ export default function ChatPage() {
     try {
       let convId = selectedConvId;
 
-      // Si aucune conv sélectionnée (cas rare), on en crée tout de suite + greeting, puis on envoie
       if (!convId) {
         convId = await createConversationNow(DEFAULT_TITLE);
         if (!convId) {
@@ -468,16 +416,13 @@ export default function ChatPage() {
       const userText = input.trim();
       setInput("");
 
-      // Garder le focus dans la zone de saisie
       setTimeout(() => textareaRef.current?.focus?.(), 0);
 
-      // Optimistic UI (après greeting)
       setMessages((prev) => [
         ...(prev || []),
         { id: "tmp-" + Date.now(), role: "user", content: userText, created_at: new Date().toISOString() },
       ]);
 
-      // Renommer la conversation au 1er message (si elle était "Nouvelle conversation")
       await updateConversationTitleIfNeeded(convId, userText);
       await refreshConversations(userId, agentSlug);
 
@@ -556,16 +501,7 @@ export default function ChatPage() {
       </header>
 
       <div style={styles.shell}>
-      <div
-        style={{
-          ...styles.shell,
-          gridTemplateColumns: isMobile ? "1fr" : "320px 1fr",
-          gridTemplateRows: isMobile ? "260px 1fr" : undefined,
-          padding: isMobile ? 10 : styles.shell.padding,
-          gap: isMobile ? 10 : styles.shell.gap,
-        }}
-      >
-
+        <aside style={styles.sidebar}>
           <div style={styles.sideTop}>
             <div style={styles.sideTitle}>Historique</div>
             <button style={styles.newBtn} onClick={handleNewConversation} title="Nouvelle conversation">
@@ -575,7 +511,7 @@ export default function ChatPage() {
 
           <div style={styles.convList}>
             {(conversations || []).map((c) => (
-              <div key={c.id} style={styles.convRow}>
+              <div key={c.id} style={styles.convItemWrap}>
                 <button
                   style={{
                     ...styles.convItem,
@@ -863,19 +799,16 @@ const styles = {
   convList: {
     padding: 10,
     display: "grid",
-    gap: 8,
+    gap: 10,
     overflowY: "auto",
     overflowX: "hidden",
     flex: "1 1 auto",
     minHeight: 0,
   },
 
-  // Ligne conv + croix
-  convRow: {
-    display: "grid",
-    gridTemplateColumns: "1fr 34px",
-    gap: 8,
-    alignItems: "stretch",
+  // Wrapper relatif pour placer la croix en absolute (robuste, toujours visible)
+  convItemWrap: {
+    position: "relative",
   },
 
   convItem: {
@@ -884,7 +817,7 @@ const styles = {
     border: "1px solid rgba(255,255,255,0.10)",
     background: "rgba(0,0,0,0.26)",
     color: "#fff",
-    padding: 10,
+    padding: "12px 40px 12px 12px", // place pour la croix à droite
     cursor: "pointer",
     overflow: "hidden",
     width: "100%",
@@ -894,15 +827,12 @@ const styles = {
     background: "rgba(255,140,0,0.08)",
   },
 
-  // Titre sur 2 lignes max (plus lisible, moins “coupé”)
   convTitle: {
     fontSize: 12,
     fontWeight: 900,
     marginBottom: 6,
-    overflow: "hidden",
-    display: "-webkit-box",
-    WebkitLineClamp: 2,
-    WebkitBoxOrient: "vertical",
+    whiteSpace: "normal",
+    wordBreak: "break-word",
     lineHeight: 1.25,
   },
   convMeta: {
@@ -912,7 +842,12 @@ const styles = {
   },
 
   convDeleteBtn: {
-    borderRadius: 12,
+    position: "absolute",
+    top: 10,
+    right: 10,
+    width: 28,
+    height: 28,
+    borderRadius: 10,
     border: "1px solid rgba(255,255,255,0.12)",
     background: "rgba(255, 0, 0, 0.10)",
     color: "rgba(255, 90, 90, 0.95)",
@@ -923,6 +858,7 @@ const styles = {
     display: "grid",
     placeItems: "center",
     userSelect: "none",
+    zIndex: 2,
   },
 
   chatCol: {
