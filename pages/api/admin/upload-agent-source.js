@@ -83,7 +83,6 @@ export default async function handler(req, res) {
     if (!name) return res.status(400).json({ error: "fileName manquant." });
     if (!base64) return res.status(400).json({ error: "base64 manquant." });
 
-    // IMPORTANT: plus de défaut "application/pdf"
     const mime = safeStr(mimeType) || guessMimeFromName(name);
 
     const b64 = base64.includes(",") ? base64.split(",").pop() : base64;
