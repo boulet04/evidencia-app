@@ -512,7 +512,9 @@ export default function Admin() {
               <div style={{ height: 10 }} />
 
               <div style={styles.uploadBox}>
-                <div style={styles.uploadTitle}>Uploader un fichier dans le bucket <b>agent_sources</b> (PDF, CSV, Word, Excel, TXT, etc).</div>
+                <div style={styles.uploadTitle}>
+                  Uploader un fichier dans le bucket <b>agent_sources</b> (PDF, CSV, Word, Excel, TXT, etc).
+                </div>
                 <input
                   type="file"
                   accept=".pdf,.csv,.txt,.md,.json,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
