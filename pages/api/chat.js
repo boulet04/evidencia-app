@@ -156,10 +156,7 @@ function scanFirstBalancedObject(text) {
 }
 
 function normalizeConfirm(s) {
-  return safeStr(s)
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
+  return safeStr(s).trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function isSendConfirmation(message) {
@@ -184,10 +181,7 @@ function htmlToText(html) {
 function buildDraftPreview(draft) {
   const to = safeStr(draft.to).trim() || "[À COMPLETER]";
   const subject = safeStr(draft.subject).trim() || "[À COMPLETER]";
-  const bodyText =
-    safeStr(draft.body).trim() ||
-    htmlToText(draft.body_html) ||
-    "[Contenu à compléter]";
+  const bodyText = safeStr(draft.body).trim() || htmlToText(draft.body_html) || "[Contenu à compléter]";
 
   return (
     "Voici le brouillon du mail (non envoyé) :\n\n" +
@@ -200,7 +194,7 @@ function buildDraftPreview(draft) {
 }
 
 /**
- * NOUVEAU : extraction d’un brouillon depuis un texte (si le modèle n’a pas renvoyé du JSON).
+ * Extraction d’un brouillon depuis un texte (si le modèle n’a pas renvoyé du JSON).
  * Supporte par ex :
  * - To: xxx@yyy.com
  * - Destinataire : xxx@yyy.com
@@ -211,9 +205,7 @@ function extractDraftFromPlainText(text) {
   const raw = safeStr(text || "").trim();
   if (!raw) return null;
 
-  // Retire gras markdown éventuel **To:**, **Subject:**
   const cleaned = raw.replace(/\*\*/g, "");
-
   const lines = cleaned.split(/\r?\n/).map((l) => l.trim());
   if (!lines.length) return null;
 
@@ -224,38 +216,31 @@ function extractDraftFromPlainText(text) {
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
 
-    // To / Destinataire
     let m = l.match(/^(to|destinataire)\s*:\s*(.+)$/i);
     if (m && !to) {
       to = safeStr(m[2]).trim();
       continue;
     }
 
-    // Subject / Objet
     m = l.match(/^(subject|objet)\s*:\s*(.+)$/i);
     if (m && !subject) {
       subject = safeStr(m[2]).trim();
-      // le corps commence après une éventuelle ligne vide suivante
       bodyStartIdx = i + 1;
       continue;
     }
   }
 
-  // Si on n’a pas trouvé to+subject : ce n’est pas un draft exploitable
   if (!to || !subject) return null;
 
-  // Corps = tout après subject (en sautant une ligne vide initiale)
   let bodyLines = [];
   if (bodyStartIdx >= 0 && bodyStartIdx < lines.length) {
     let j = bodyStartIdx;
-    // saute les lignes vides
     while (j < lines.length && !lines[j]) j++;
     bodyLines = lines.slice(j);
   }
 
   const body = bodyLines.join("\n").trim();
 
-  // corps peut être vide (ex: test), on accepte quand même mais l’envoi exigera un contenu
   return {
     to,
     subject,
@@ -284,6 +269,33 @@ async function getLatestDraft(supabaseAdmin, conversationId) {
   return obj && typeof obj === "object" ? obj : null;
 }
 
+// NOUVEAU : lit le prompt global depuis Supabase (console) via un agent slug "__global__"
+async function getGlobalPromptFromDb({ supabaseAdmin, userId }) {
+  const globalSlug = safeStr(process.env.GLOBAL_AGENT_SLUG || "__global__").trim() || "__global__";
+
+  try {
+    const { data: globalAgent, error: gaErr } = await supabaseAdmin
+      .from("agents")
+      .select("id")
+      .eq("slug", globalSlug)
+      .maybeSingle();
+
+    if (gaErr || !globalAgent?.id) return "";
+
+    const { data: cfgGlobal, error: cfgErr } = await supabaseAdmin
+      .from("client_agent_configs")
+      .select("system_prompt")
+      .eq("user_id", userId)
+      .eq("agent_id", globalAgent.id)
+      .maybeSingle();
+
+    if (cfgErr) return "";
+    return safeStr(cfgGlobal?.system_prompt).trim();
+  } catch {
+    return "";
+  }
+}
+
 export default async function handler(req, res) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -299,10 +311,7 @@ export default async function handler(req, res) {
     const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 
-    const MAKE_URL =
-      process.env.MAKE_EMAIL_WEBHOOK_URL ||
-      process.env.MAKE_WEBHOOK_URL ||
-      "";
+    const MAKE_URL = process.env.MAKE_EMAIL_WEBHOOK_URL || process.env.MAKE_WEBHOOK_URL || "";
 
     const CHAT_MODEL = process.env.MISTRAL_MODEL || "mistral-small-latest";
     const SUMMARY_MODEL = process.env.MISTRAL_SUMMARY_MODEL || "mistral-small-latest";
@@ -324,7 +333,7 @@ export default async function handler(req, res) {
     const userId = userData.user.id;
 
     // BODY
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
     const agentSlug = safeStr(body.agentSlug || body.agent_slug).trim().toLowerCase();
     const message = safeStr(body.message || body.content).trim();
     let conversationId = safeStr(body.conversationId || body.conversation_id).trim() || null;
@@ -498,9 +507,7 @@ export default async function handler(req, res) {
       const summarizerUser =
         (memoryContent ? `Mémoire précédente:\n${memoryContent}\n\n` : "") +
         "Voici le fil de conversation. Mets à jour la mémoire :\n\n" +
-        sumHistory
-          .map((m) => `${m.role.toUpperCase()}: ${safeStr(m.content).slice(0, 1200)}`)
-          .join("\n");
+        sumHistory.map((m) => `${m.role.toUpperCase()}: ${safeStr(m.content).slice(0, 1200)}`).join("\n");
 
       const sumResp = await withTimeout(
         mistral.chat.complete({
@@ -548,7 +555,6 @@ export default async function handler(req, res) {
 
       let draft = await getLatestDraft(supabaseAdmin, conversationId);
 
-      // NOUVEAU : si pas de DRAFT_EMAIL enregistré, on tente de parser le dernier message assistant
       if (!draft) {
         const { data: lastAsst } = await supabaseAdmin
           .from("messages")
@@ -562,7 +568,6 @@ export default async function handler(req, res) {
         const parsed = extractDraftFromPlainText(lastAsst?.content || "");
         if (parsed) {
           draft = parsed;
-          // on le stocke pour fiabiliser les prochains “ok envoie”
           await supabaseAdmin.from("messages").insert({
             conversation_id: conversationId,
             role: "system",
@@ -617,7 +622,6 @@ export default async function handler(req, res) {
             assistantText =
               "Envoi confirmé : l’email a été transmis au workflow d’envoi. Vérifiez Indésirables/Spam et les Éléments envoyés du compte Outlook connecté à Make.";
 
-            // Marque le brouillon comme “consommé”
             await supabaseAdmin.from("messages").insert({
               conversation_id: conversationId,
               role: "system",
@@ -646,7 +650,9 @@ export default async function handler(req, res) {
       });
     }
 
-    // --- SYSTEM PROMPT (inclut prompt perso agent + mémoire) ---
+    // --- SYSTEM PROMPT (GLOBAL DB + prompt perso agent + mémoire) ---
+
+    // Prompt perso (console) pour cet agent
     const { data: cfg } = await supabaseAdmin
       .from("client_agent_configs")
       .select("system_prompt, context")
@@ -655,13 +661,18 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     const customPrompt = safeStr(cfg?.system_prompt).trim();
-    const fallbackPrompt =
-      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts[agentSlug]?.systemPrompt).trim()) ||
-      "";
 
-    const globalPrompt =
-      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts.__GLOBAL__?.systemPrompt).trim()) ||
-      "";
+    // Prompt global (console) via agent "__global__" (ou GLOBAL_AGENT_SLUG)
+    const globalPromptFromDb = await getGlobalPromptFromDb({ supabaseAdmin, userId });
+
+    // Fallbacks (code) : on les garde au cas où (mais DB prioritaire)
+    const fallbackPrompt =
+      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts[agentSlug]?.systemPrompt).trim()) || "";
+
+    const globalPromptFromCode =
+      (agentPrompts && typeof agentPrompts === "object" && safeStr(agentPrompts.__GLOBAL__?.systemPrompt).trim()) || "";
+
+    const globalPrompt = globalPromptFromDb || globalPromptFromCode;
 
     const workflowRules =
       "RÈGLES D’EXÉCUTION (EMAIL / MAKE) :\n" +
@@ -734,13 +745,11 @@ export default async function handler(req, res) {
         bcc: Array.isArray(obj.bcc) ? obj.bcc : [],
       };
     } else {
-      // NOUVEAU : fallback si le modèle renvoie un brouillon en texte (To/Subject)
       const parsed = extractDraftFromPlainText(assistantText);
       if (parsed) draft = parsed;
     }
 
     if (draft) {
-      // Stockage brouillon (caché UI)
       await supabaseAdmin.from("messages").insert({
         conversation_id: conversationId,
         role: "system",
@@ -748,7 +757,6 @@ export default async function handler(req, res) {
         created_at: nowIso(),
       });
 
-      // Affichage utilisateur : brouillon lisible + demande confirmation
       assistantText = buildDraftPreview(draft);
       mailSent = false;
       mailError = "";
