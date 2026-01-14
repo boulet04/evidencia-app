@@ -510,7 +510,13 @@ export default function ChatPage() {
         }}
       >
 
-        <aside style={styles.sidebar}>
+        <aside
+          style={{
+            ...styles.sidebar,
+            ...(isMobile ? { height: "100%" } : {}),
+          }}
+        >
+
           <div style={styles.sideTop}>
             <div style={styles.sideTitle}>Historique</div>
             <button style={styles.newBtn} onClick={handleNewConversation} title="Nouvelle conversation">
