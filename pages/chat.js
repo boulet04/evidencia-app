@@ -27,6 +27,7 @@ export default function ChatPage() {
   const finalTextRef = useRef("");
   const [micSupported, setMicSupported] = useState(false);
   const [listening, setListening] = useState(false);
+  const [micSupported, setMicSupported] = useState(false);
 
   const DEFAULT_TITLE = "Nouvelle conversation";
 
@@ -66,6 +67,23 @@ export default function ChatPage() {
 
     setMicSupported(Boolean(SR));
   }, []);
+  useEffect(() => {
+  if (typeof window === "undefined") return;
+
+  const mq = window.matchMedia("(max-width: 900px)");
+
+  const apply = () => setIsMobile(mq.matches);
+  apply();
+
+  if (mq.addEventListener) mq.addEventListener("change", apply);
+  else mq.addListener(apply);
+
+  return () => {
+    if (mq.removeEventListener) mq.removeEventListener("change", apply);
+    else mq.removeListener(apply);
+  };
+}, []);
+
 
   function startMic() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
