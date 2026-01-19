@@ -1,0 +1,293 @@
+import { useEffect, useState } from "react";
+import { supabase } from "../lib/supabaseClient";
+
+export default function Agents() {
+  const [loading, setLoading] = useState(true);
+  const [agents, setAgents] = useState([]);
+  const [email, setEmail] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function boot() {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session) {
+        window.location.href = "/login";
+        return;
+      }
+      if (!mounted) return;
+
+      setEmail(session.user.email || "");
+
+      // Lire rôle
+      const { data: p, error: pErr } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+
+      const admin = !pErr && p?.role === "admin";
+      if (!mounted) return;
+      setIsAdmin(admin);
+
+      // Admin => tous les agents
+      if (admin) {
+        const { data, error } = await supabase
+          .from("agents")
+          .select("*")
+          .order("name", { ascending: true });
+
+        if (!mounted) return;
+        setAgents(error ? [] : data || []);
+        setLoading(false);
+        return;
+      }
+
+      // User normal => uniquement agents assignés via user_agents
+      const { data: uaRows, error: uaErr } = await supabase
+        .from("user_agents")
+        .select("agent_id")
+        .eq("user_id", session.user.id);
+
+      if (!mounted) return;
+
+      const agentIds = (uaRows || []).map((r) => r.agent_id).filter(Boolean);
+
+      // Aucun agent assigné => liste vide (affichage message)
+      if (uaErr || agentIds.length === 0) {
+        setAgents([]);
+        setLoading(false);
+        return;
+      }
+
+      const { data: aData, error: aErr } = await supabase
+        .from("agents")
+        .select("*")
+        .in("id", agentIds)
+        .order("name", { ascending: true });
+
+      if (!mounted) return;
+      setAgents(aErr ? [] : aData || []);
+      setLoading(false);
+    }
+
+    boot();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  async function logout() {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
+  }
+
+  if (loading) {
+    return (
+      <main style={styles.page}>
+        <div style={styles.center}>Chargement…</div>
+      </main>
+    );
+  }
+
+  return (
+    <main style={styles.page}>
+      <div style={styles.bg} aria-hidden="true">
+        <div style={styles.bgLogo} />
+        <div style={styles.bgVeils} />
+      </div>
+
+      <header style={styles.topbar}>
+        <img src="/images/logolong.png" alt="Evidenc’IA" style={styles.brandLogo} />
+
+        <div style={styles.topRight}>
+          <span style={styles.userChip}>{email}</span>
+
+          {isAdmin ? (
+            <button
+              onClick={() => (window.location.href = "/admin")}
+              style={styles.btnGhost}
+            >
+              Console admin
+            </button>
+          ) : null}
+
+          <button onClick={logout} style={styles.btnGhost}>
+            Déconnexion
+          </button>
+        </div>
+      </header>
+
+      <section style={styles.shell}>
+        <h1 style={styles.h1}>Choisissez votre agent</h1>
+
+        {agents.length === 0 ? (
+          <div style={styles.empty}>
+            Aucun agent n’est assigné à cet utilisateur.
+            <div style={{ marginTop: 8, opacity: 0.8 }}>
+              Demande à l’admin d’assigner au moins un agent dans la Console admin.
+            </div>
+          </div>
+        ) : (
+          <>
+            <p style={styles.p}>Cliquez sur un agent pour ouvrir son espace.</p>
+
+            <div style={styles.grid}>
+              {agents.map((a) => (
+                <button
+                  key={a.id}
+                  style={styles.card}
+                  onClick={() => (window.location.href = `/chat?agent=${a.slug}`)}
+                >
+                  <div style={styles.avatarWrap}>
+                    <img src={a.avatar_url} alt={a.name} style={styles.avatar} />
+                  </div>
+
+                  <div style={styles.meta}>
+                    <div style={styles.name}>{a.name}</div>
+                    <div style={styles.desc}>{a.description}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+      </section>
+    </main>
+  );
+}
+
+/**
+ * CORRECTIF "B" (global) — on force les <button> et <a> à hériter la couleur
+ * afin d’éviter le texte noir par défaut sur mobile/selon navigateur.
+ */
+const styles = {
+  page: {
+    minHeight: "100vh",
+    position: "relative",
+    overflow: "hidden",
+    fontFamily: "Segoe UI, Arial, sans-serif",
+    color: "#eef2ff",
+    background: "linear-gradient(135deg,#05060a,#0a0d16)",
+  },
+
+  bg: { position: "absolute", inset: 0, zIndex: 0 },
+
+  bgLogo: {
+    position: "absolute",
+    inset: 0,
+    backgroundImage: "url('/images/logopc.png')",
+    backgroundSize: "contain",
+    backgroundPosition: "center",
+    backgroundRepeat: "no-repeat",
+    opacity: 0.05,
+  },
+
+  bgVeils: {
+    position: "absolute",
+    inset: 0,
+    background:
+      "radial-gradient(900px 600px at 55% 42%, rgba(255,140,40,.22), transparent 62%)," +
+      "radial-gradient(900px 600px at 35% 55%, rgba(80,120,255,.18), transparent 62%)," +
+      "linear-gradient(to bottom, rgba(0,0,0,.62), rgba(0,0,0,.22), rgba(0,0,0,.66))",
+  },
+
+  topbar: {
+    position: "relative",
+    zIndex: 2,
+    padding: "16px 20px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    background: "rgba(0,0,0,.35)",
+    backdropFilter: "blur(10px)",
+    borderBottom: "1px solid rgba(255,255,255,.1)",
+  },
+
+  brandLogo: { height: 32 },
+
+  topRight: { display: "flex", alignItems: "center", gap: 10 },
+
+  userChip: {
+    padding: "8px 12px",
+    background: "rgba(255,255,255,.12)",
+    borderRadius: 999,
+    fontWeight: 800,
+    color: "inherit",
+  },
+
+  btnGhost: {
+    padding: "10px 14px",
+    borderRadius: 999,
+    background: "rgba(255,255,255,.1)",
+    color: "inherit",
+    fontWeight: 900,
+    border: "1px solid rgba(255,255,255,.2)",
+    cursor: "pointer",
+    WebkitTextFillColor: "currentColor",
+  },
+
+  shell: {
+    position: "relative",
+    zIndex: 1,
+    padding: 20,
+    maxWidth: 1100,
+    margin: "0 auto",
+  },
+
+  h1: { fontSize: 32, fontWeight: 900, marginBottom: 6 },
+  p: { opacity: 0.8, marginBottom: 20 },
+
+  empty: {
+    marginTop: 18,
+    padding: 16,
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,.12)",
+    background: "rgba(0,0,0,.35)",
+    fontWeight: 800,
+  },
+
+  grid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+    gap: 20,
+  },
+
+  card: {
+    display: "flex",
+    gap: 14,
+    padding: 18,
+    background: "rgba(0,0,0,.45)",
+    borderRadius: 20,
+    backdropFilter: "blur(10px)",
+    border: "1px solid rgba(255,255,255,.12)",
+    cursor: "pointer",
+    color: "inherit",
+    WebkitTextFillColor: "currentColor",
+  },
+
+  avatarWrap: { width: 64, height: 64 },
+
+  avatar: {
+    width: "100%",
+    height: "100%",
+    borderRadius: "50%",
+    objectFit: "cover",
+    objectPosition: "top",
+  },
+
+  meta: { display: "grid", gap: 4, color: "inherit" },
+  name: { fontSize: 18, fontWeight: 900, color: "inherit" },
+  desc: { opacity: 0.75, fontWeight: 700, color: "inherit" },
+
+  center: {
+    minHeight: "100vh",
+    display: "grid",
+    placeItems: "center",
+    fontSize: 20,
+  },
+};
