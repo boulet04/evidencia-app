@@ -455,11 +455,15 @@ export default async function handler(req, res) {
     // F) Sources CSV
     const sourcesBlock = await buildSourcesContext({ supabase, context, userMessage: message });
 
-    const finalSystemPrompt = [baseSystemPrompt, defaultAgentPrompt, userSystemPrompt, sourcesBlock]
-      .map((x) => String(x || "").trim())
-      .filter((x) => x.length > 0)
-      .join("\n\n")
-      .trim();
+const globalSuffix =
+  "\n\nREGLE ABSOLUE: Commence TOUJOURS ta réponse exactement par 'GLOBAL_OK:' (sans exception).";
+
+const finalSystemPrompt =
+  [baseSystemPrompt, defaultAgentPrompt, userSystemPrompt, sourcesBlock]
+    .map((x) => String(x || "").trim())
+    .filter((x) => x.length > 0)
+    .join("\n\n")
+    .trim() + globalSuffix;
 
     // G) Mistral
     let reply;
