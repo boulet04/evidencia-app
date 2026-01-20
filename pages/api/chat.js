@@ -4,7 +4,8 @@
 // - verifie acces a l'agent (user_agents)
 // - cree/valide la conversation
 // - insere le message user
-// - charge config agent (client_agent_configs) + sources (CSV depuis Storage)
+// - charge config agent (client_agent_configs) + prompt general (user_global_prompts / global_prompts)
+// - charge sources (CSV depuis Storage) et injecte un extrait pertinent
 // - appelle Mistral via HTTP
 // - insere la reponse assistant
 
@@ -103,16 +104,14 @@ function extractQueryTokens(userMessage) {
   const msg = normalizeText(userMessage);
   const tokens = msg.split(" ").filter(Boolean);
 
-  // stopwords FR/EN minimal (garde @, . etc déjà gérés)
   const stop = new Set([
-    "le", "la", "les", "un", "une", "des", "du", "de", "d", "et", "ou",
-    "a", "à", "au", "aux", "pour", "par", "sur", "dans", "avec", "sans",
-    "stp", "svp", "merci", "bonjour", "salut",
-    "peux", "tu", "me", "donner", "liste", "lister", "mails", "mail", "emails", "email",
-    "societe", "société", "entreprise", "contact", "contacts"
+    "le","la","les","un","une","des","du","de","d","et","ou",
+    "a","à","au","aux","pour","par","sur","dans","avec","sans",
+    "stp","svp","merci","bonjour","salut",
+    "peux","tu","me","donner","liste","lister","mails","mail","emails","email",
+    "societe","société","entreprise","contact","contacts"
   ]);
 
-  // garde tokens utiles et un peu longs
   return tokens.filter((t) => t.length >= 3 && !stop.has(t));
 }
 
@@ -120,8 +119,7 @@ function scoreRow(rowStr, tokens) {
   let score = 0;
   for (const t of tokens) {
     if (rowStr.includes(t)) score += 2;
-    // bonus si token ressemble à un domaine (ex: bcontact.fr)
-    if (t.includes(".") && rowStr.includes(t)) score += 2;
+    if (t.includes(".") && rowStr.includes(t)) score += 2; // domaine
   }
   return score;
 }
@@ -156,38 +154,33 @@ async function downloadTextFromStorage(supabase, bucket, path) {
     throw err;
   }
 
-  // data est un Blob (Node 18+)
   if (typeof data.text === "function") {
     return await data.text();
   }
 
-  // fallback: arrayBuffer -> Buffer
   const ab = await data.arrayBuffer();
   return Buffer.from(ab).toString("utf-8");
 }
 
 function buildSourceContextBlock({ fileName, headers, sampleRows, warning }) {
-  // on évite de balancer tout le fichier : max 20 lignes, max 8k chars
   const lines = [];
 
   lines.push(`SOURCE CSV: ${fileName}`);
   if (headers?.length) {
     lines.push(`Colonnes: ${headers.join(", ")}`);
   }
-
   if (warning) {
     lines.push(`Note: ${warning}`);
   }
 
   if (!sampleRows || sampleRows.length === 0) {
     lines.push("Aucune ligne pertinente trouvée pour la demande actuelle.");
-    lines.push("=> IMPORTANT: demander le nom exact de la société ou le domaine email (ex: bcontact.fr) pour filtrer.");
+    lines.push("=> Demander le nom exact de la société ou le domaine email (ex: bcontact.fr) pour filtrer.");
     return lines.join("\n");
   }
 
   lines.push("Lignes pertinentes (extrait limité):");
   for (const r of sampleRows) {
-    // format compact clé=val
     const entries = Object.entries(r || {})
       .slice(0, 12)
       .map(([k, v]) => `${k}=${String(v || "").replace(/\s+/g, " ").trim()}`)
@@ -210,23 +203,20 @@ async function buildSourcesContext({ supabase, context, userMessage }) {
     const path = src?.path || "";
     const bucket = src?.bucket || "agent_sources";
 
-    // On traite uniquement les CSV
     const isCsv =
-      mime.toLowerCase().includes("text/csv") ||
-      name.toLowerCase().endsWith(".csv") ||
-      path.toLowerCase().endsWith(".csv");
+      String(mime).toLowerCase().includes("text/csv") ||
+      String(name).toLowerCase().endsWith(".csv") ||
+      String(path).toLowerCase().endsWith(".csv");
 
-    if (!isCsv) continue;
-    if (!path) continue;
+    if (!isCsv || !path) continue;
 
     let text = "";
     let warning = "";
 
     try {
       text = await downloadTextFromStorage(supabase, bucket, path);
-      // garde-fou taille (évite énorme injection prompt)
       if (text.length > 1_200_000) {
-        warning = `Fichier très volumineux (${text.length} chars). Seules les premières lignes peuvent être exploitées.`;
+        warning = `Fichier volumineux (${text.length} chars) : exploitation partielle.`;
         text = text.slice(0, 250_000);
       }
     } catch (e) {
@@ -242,8 +232,6 @@ async function buildSourcesContext({ supabase, context, userMessage }) {
     }
 
     const { headers, rows } = parseCsv(text);
-
-    // filtre lignes pertinentes selon le message user
     const relevant = topRelevantRows(rows, userMessage, 20);
 
     blocks.push(
@@ -258,16 +246,57 @@ async function buildSourcesContext({ supabase, context, userMessage }) {
 
   if (blocks.length === 0) return "";
 
-  // Règles d'utilisation des sources (évite extraction massive)
   const guardrails = [
     "REGLES IMPORTANTES (DONNEES INTERNES):",
     "- Utiliser ces sources uniquement pour répondre à la demande.",
     "- Ne JAMAIS lister tout le fichier ni fournir des extractions massives.",
-    "- Si la société / le domaine n'est pas précisé, poser une question de clarification (nom exact ou domaine).",
+    "- Si la société / le domaine n'est pas précisé, poser une question de clarification.",
     "- Limiter la réponse à un petit nombre de résultats (ex: 10) et proposer d'affiner.",
   ].join("\n");
 
   return `\n\n${guardrails}\n\n${blocks.join("\n\n---\n\n")}`;
+}
+
+async function loadGlobalPrompt({ supabase, userId }) {
+  // 1) Prompt général user (user_global_prompts)
+  try {
+    const { data, error } = await supabase
+      .from("user_global_prompts")
+      .select("global_prompt")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!error && data?.global_prompt && String(data.global_prompt).trim()) {
+      return String(data.global_prompt).trim();
+    }
+  } catch {}
+
+  // 2) Fallback global_prompts (même structure chez toi)
+  try {
+    const { data, error } = await supabase
+      .from("global_prompts")
+      .select("global_prompt")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!error && data?.global_prompt && String(data.global_prompt).trim()) {
+      return String(data.global_prompt).trim();
+    }
+  } catch {}
+
+  // 3) Dernier fallback: première ligne global_prompts (si tu veux un défaut global)
+  try {
+    const { data, error } = await supabase
+      .from("global_prompts")
+      .select("global_prompt")
+      .limit(1);
+
+    if (!error && Array.isArray(data) && data[0]?.global_prompt && String(data[0].global_prompt).trim()) {
+      return String(data[0].global_prompt).trim();
+    }
+  } catch {}
+
+  return "";
 }
 
 async function callMistral({ systemPrompt, history, userMessage }) {
@@ -417,7 +446,7 @@ export default async function handler(req, res) {
     }
 
     // C) Charger config agent user (system_prompt + context)
-    let systemPrompt = "";
+    let agentSystemPrompt = "";
     let context = {};
 
     const { data: cfgRow, error: cfgErr } = await supabase
@@ -429,7 +458,7 @@ export default async function handler(req, res) {
 
     if (cfgErr) throw new Error(`Supabase client_agent_configs select error: ${cfgErr.message}`);
 
-    if (cfgRow?.system_prompt) systemPrompt = cfgRow.system_prompt;
+    if (cfgRow?.system_prompt) agentSystemPrompt = cfgRow.system_prompt;
     if (cfgRow?.context && typeof cfgRow.context === "object") context = cfgRow.context;
 
     // D) Historique (dernier 20 messages user/assistant)
@@ -457,14 +486,23 @@ export default async function handler(req, res) {
 
     if (insUserErr) throw new Error(`Supabase insert user message error: ${insUserErr.message}`);
 
-    // F) Charger sources (CSV) et enrichir le system prompt
+    // F) Prompt général + sources
+    const globalPrompt = await loadGlobalPrompt({ supabase, userId: user.id });
+
     const sourcesBlock = await buildSourcesContext({
       supabase,
       context,
       userMessage: message,
     });
 
-    const finalSystemPrompt = `${systemPrompt || ""}${sourcesBlock || ""}`.trim();
+    const finalSystemPrompt = [
+      globalPrompt ? `PROMPT GENERAL:\n${globalPrompt}` : "",
+      agentSystemPrompt || "",
+      sourcesBlock || "",
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+      .trim();
 
     // G) Appel Mistral
     const reply = await callMistral({
