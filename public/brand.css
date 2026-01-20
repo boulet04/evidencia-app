@@ -9,7 +9,6 @@
   --evi-border: rgba(255,255,255,0.08);
   --evi-border-strong: rgba(255,255,255,0.14);
 
-  /* ORANGE + VIF (tu peux ajuster ici uniquement) */
   --evi-accent: #ff7a18;
   --evi-accent-weak: rgba(255,122,24,0.12);
   --evi-accent-weak-2: rgba(255,122,24,0.08);
@@ -33,8 +32,13 @@
 }
 
 html, body {
+  margin: 0;
+  padding: 0;
   background: var(--evi-bg);
   color: var(--evi-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 * { box-sizing: border-box; }
