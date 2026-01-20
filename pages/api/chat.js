@@ -1,13 +1,4 @@
 // pages/api/chat.js
-// API Next.js (pages router) :
-// - verifie le token Supabase de l'utilisateur
-// - verifie acces a l'agent (user_agents)
-// - cree/valide la conversation
-// - insere le message user
-// - charge config agent (client_agent_configs) + sources (CSV depuis Storage)
-// - appelle Mistral via HTTP
-// - insere la reponse assistant
-
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -27,7 +18,7 @@ function normalizeText(s) {
   return String(s || "")
     .toLowerCase()
     .replace(/[\u2019']/g, "'")
-    .replace(/[^a-z0-9àâäéèêëïîôöùûüç@._\- ]+/gi, " ")
+    .replace(/[^a-z0-9àâäéèêëïîôöùûüç@._\\- ]+/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -41,7 +32,6 @@ function pickDelimiter(sampleLine) {
   return ",";
 }
 
-// CSV parser simple (support guillemets "...")
 function parseCsv(text) {
   const raw = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const lines = raw.split("\n").filter((l) => l.trim().length > 0);
@@ -58,7 +48,6 @@ function parseCsv(text) {
       const ch = line[i];
 
       if (ch === '"') {
-        // "" -> "
         if (inQuotes && line[i + 1] === '"') {
           cur += '"';
           i++;
@@ -107,16 +96,14 @@ function extractQueryTokens(userMessage) {
   const msg = normalizeText(userMessage);
   const tokens = msg.split(" ").filter(Boolean);
 
-  // stopwords FR/EN minimal (garde @, . etc déjà gérés)
   const stop = new Set([
-    "le", "la", "les", "un", "une", "des", "du", "de", "d", "et", "ou",
-    "a", "à", "au", "aux", "pour", "par", "sur", "dans", "avec", "sans",
-    "stp", "svp", "merci", "bonjour", "salut",
-    "peux", "tu", "me", "donner", "liste", "lister", "mails", "mail", "emails", "email",
-    "societe", "société", "entreprise", "contact", "contacts"
+    "le","la","les","un","une","des","du","de","d","et","ou",
+    "a","à","au","aux","pour","par","sur","dans","avec","sans",
+    "stp","svp","merci","bonjour","salut",
+    "peux","tu","me","donner","liste","lister","mails","mail","emails","email",
+    "societe","société","entreprise","contact","contacts"
   ]);
 
-  // garde tokens utiles et un peu longs
   return tokens.filter((t) => t.length >= 3 && !stop.has(t));
 }
 
@@ -124,7 +111,6 @@ function scoreRow(rowStr, tokens) {
   let score = 0;
   for (const t of tokens) {
     if (rowStr.includes(t)) score += 2;
-    // bonus si token ressemble à un domaine (ex: bcontact.fr)
     if (t.includes(".") && rowStr.includes(t)) score += 2;
   }
   return score;
@@ -160,28 +146,20 @@ async function downloadTextFromStorage(supabase, bucket, path) {
     throw err;
   }
 
-  // data est un Blob (Node 18+)
   if (typeof data.text === "function") {
     return await data.text();
   }
 
-  // fallback: arrayBuffer -> Buffer
   const ab = await data.arrayBuffer();
   return Buffer.from(ab).toString("utf-8");
 }
 
 function buildSourceContextBlock({ fileName, headers, sampleRows, warning }) {
-  // on évite de balancer tout le fichier : max 20 lignes, max 8k chars
   const lines = [];
 
   lines.push(`SOURCE CSV: ${fileName}`);
-  if (headers?.length) {
-    lines.push(`Colonnes: ${headers.join(", ")}`);
-  }
-
-  if (warning) {
-    lines.push(`Note: ${warning}`);
-  }
+  if (headers?.length) lines.push(`Colonnes: ${headers.join(", ")}`);
+  if (warning) lines.push(`Note: ${warning}`);
 
   if (!sampleRows || sampleRows.length === 0) {
     lines.push("Aucune ligne pertinente trouvée pour la demande actuelle.");
@@ -191,7 +169,6 @@ function buildSourceContextBlock({ fileName, headers, sampleRows, warning }) {
 
   lines.push("Lignes pertinentes (extrait limité):");
   for (const r of sampleRows) {
-    // format compact clé=val
     const entries = Object.entries(r || {})
       .slice(0, 12)
       .map(([k, v]) => `${k}=${String(v || "").replace(/\s+/g, " ").trim()}`)
@@ -214,21 +191,18 @@ async function buildSourcesContext({ supabase, context, userMessage }) {
     const path = src?.path || "";
     const bucket = src?.bucket || "agent_sources";
 
-    // On traite uniquement les CSV
     const isCsv =
       mime.toLowerCase().includes("text/csv") ||
       name.toLowerCase().endsWith(".csv") ||
       path.toLowerCase().endsWith(".csv");
 
-    if (!isCsv) continue;
-    if (!path) continue;
+    if (!isCsv || !path) continue;
 
     let text = "";
     let warning = "";
 
     try {
       text = await downloadTextFromStorage(supabase, bucket, path);
-      // garde-fou taille (évite énorme injection prompt)
       if (text.length > 1_200_000) {
         warning = `Fichier très volumineux (${text.length} chars). Seules les premières lignes peuvent être exploitées.`;
         text = text.slice(0, 250_000);
@@ -246,8 +220,6 @@ async function buildSourcesContext({ supabase, context, userMessage }) {
     }
 
     const { headers, rows } = parseCsv(text);
-
-    // filtre lignes pertinentes selon le message user
     const relevant = topRelevantRows(rows, userMessage, 20);
 
     blocks.push(
@@ -262,7 +234,6 @@ async function buildSourcesContext({ supabase, context, userMessage }) {
 
   if (blocks.length === 0) return "";
 
-  // Règles d'utilisation des sources (évite extraction massive)
   const guardrails = [
     "REGLES IMPORTANTES (DONNEES INTERNES):",
     "- Utiliser ces sources uniquement pour répondre à la demande.",
@@ -272,6 +243,21 @@ async function buildSourcesContext({ supabase, context, userMessage }) {
   ].join("\n");
 
   return `\n\n${guardrails}\n\n${blocks.join("\n\n---\n\n")}`;
+}
+
+async function loadBaseSystemPrompt(supabase) {
+  try {
+    const { data, error } = await supabase
+      .from("app_settings")
+      .select("value")
+      .eq("key", "base_system_prompt")
+      .maybeSingle();
+
+    if (error) return "";
+    return safeStr(data?.value).trim();
+  } catch {
+    return "";
+  }
 }
 
 async function callMistral({ systemPrompt, history, userMessage }) {
@@ -329,23 +315,6 @@ async function callMistral({ systemPrompt, history, userMessage }) {
   return reply;
 }
 
-async function loadBaseSystemPrompt(supabase) {
-  // Prompt global appliqué à TOUS les agents.
-  // Géré via /admin/settings (table app_settings, key=base_system_prompt)
-  try {
-    const { data, error } = await supabase
-      .from("app_settings")
-      .select("value")
-      .eq("key", "base_system_prompt")
-      .maybeSingle();
-
-    if (error) return "";
-    return safeStr(data?.value).trim();
-  } catch {
-    return "";
-  }
-}
-
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -389,7 +358,7 @@ export default async function handler(req, res) {
     // A) Charger l'agent + verifier droit (user_agents)
     const { data: agentRow, error: agentErr } = await supabase
       .from("agents")
-      .select("id, slug, name")
+      .select("id, slug, name, default_system_prompt")
       .eq("slug", agentSlug)
       .maybeSingle();
 
@@ -437,8 +406,8 @@ export default async function handler(req, res) {
       convId = convIns.id;
     }
 
-    // C) Charger config agent user (system_prompt + context)
-    let systemPrompt = "";
+    // C) Charger config user (override) + context
+    let userSystemPrompt = "";
     let context = {};
 
     const { data: cfgRow, error: cfgErr } = await supabase
@@ -450,13 +419,15 @@ export default async function handler(req, res) {
 
     if (cfgErr) throw new Error(`Supabase client_agent_configs select error: ${cfgErr.message}`);
 
-    if (cfgRow?.system_prompt) systemPrompt = cfgRow.system_prompt;
+    if (cfgRow?.system_prompt) userSystemPrompt = cfgRow.system_prompt;
     if (cfgRow?.context && typeof cfgRow.context === "object") context = cfgRow.context;
 
-    // Prompt global (applique a tous les agents)
+    const defaultAgentPrompt = safeStr(agentRow?.default_system_prompt).trim();
+
+    // Prompt global
     const baseSystemPrompt = await loadBaseSystemPrompt(supabase);
 
-    // D) Historique (dernier 20 messages user/assistant)
+    // D) Historique (dernier 20)
     const { data: histRows, error: histErr } = await supabase
       .from("messages")
       .select("role, content")
@@ -481,15 +452,16 @@ export default async function handler(req, res) {
 
     if (insUserErr) throw new Error(`Supabase insert user message error: ${insUserErr.message}`);
 
-    // F) Charger sources (CSV) et enrichir le system prompt
+    // F) Sources
     const sourcesBlock = await buildSourcesContext({
       supabase,
       context,
       userMessage: message,
     });
 
-    const finalSystemPrompt = [baseSystemPrompt, systemPrompt, sourcesBlock]
-      .filter((x) => safeStr(x).trim().length > 0)
+    const finalSystemPrompt = [baseSystemPrompt, defaultAgentPrompt, userSystemPrompt, sourcesBlock]
+      .map((x) => safeStr(x).trim())
+      .filter((x) => x.length > 0)
       .join("\n\n")
       .trim();
 
@@ -500,7 +472,7 @@ export default async function handler(req, res) {
       userMessage: message,
     });
 
-    // H) Insert message assistant
+    // H) Insert assistant
     const { error: insAsstErr } = await supabase.from("messages").insert({
       conversation_id: convId,
       role: "assistant",
@@ -512,7 +484,6 @@ export default async function handler(req, res) {
     return json(res, 200, { ok: true, conversationId: convId, reply });
   } catch (err) {
     console.error("/api/chat error:", err);
-
     return json(res, 500, {
       error: "Internal Server Error",
       message: err?.message || String(err),
