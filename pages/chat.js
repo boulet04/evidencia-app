@@ -8,155 +8,241 @@ export default function ChatPage() {
   const router = useRouter();
   const agentSlug = useMemo(() => {
     const q = router.query?.agent;
-    return (typeof q === "string" && q) ? q : "emma";
+    return typeof q === "string" && q ? q : "emma";
   }, [router.query]);
 
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
 
-  const [me, setMe] = useState(null);
-  const [agent, setAgent] = useState({ name: "Agent", description: "", avatar_url: "" });
+  const [user, setUser] = useState(null);
+  const [agent, setAgent] = useState(null);
 
   const [conversations, setConversations] = useState([]);
-  const [conversationId, setConversationId] = useState(null);
+  const [selectedConversationId, setSelectedConversationId] = useState("");
 
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
 
   const endRef = useRef(null);
 
+  // --- Micro (dictée vocale) ---
+  const inputRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+
+    setSpeechSupported(true);
+
+    const rec = new SR();
+    rec.lang = "fr-FR";
+    rec.continuous = false;
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+
+    rec.onresult = (e) => {
+      try {
+        const t = e?.results?.[0]?.[0]?.transcript || "";
+        const chunk = String(t || "").trim();
+        if (!chunk) return;
+        setInput((prev) => (prev ? `${prev} ${chunk}` : chunk));
+        setTimeout(() => inputRef.current?.focus?.(), 0);
+      } catch (_) {}
+    };
+
+    rec.onend = () => setIsRecording(false);
+    rec.onerror = () => setIsRecording(false);
+
+    recognitionRef.current = rec;
+
+    return () => {
+      try {
+        rec.abort();
+      } catch (_) {}
+      recognitionRef.current = null;
+    };
+  }, []);
+
+  function toggleDictation() {
+    if (!speechSupported) {
+      alert("Dictée vocale non supportée sur ce navigateur.");
+      return;
+    }
+    if (!recognitionRef.current) return;
+
+    if (isRecording) {
+      try {
+        recognitionRef.current.stop();
+      } catch (_) {}
+      setIsRecording(false);
+      return;
+    }
+
+    try {
+      recognitionRef.current.start();
+      setIsRecording(true);
+    } catch (_) {
+      setIsRecording(false);
+    }
+  }
+
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
     return data?.session?.access_token || "";
   }
 
-  async function loadMe() {
-    const { data } = await supabase.auth.getUser();
-    return data?.user || null;
-  }
-
-  async function loadAgent() {
-    // Optionnel: table 'agents' (sinon fallback)
-    try {
-      const { data, error } = await supabase
-        .from("agents")
-        .select("name,description,avatar_url")
-        .eq("slug", agentSlug)
-        .maybeSingle();
-      if (!error && data) {
-        setAgent({
-          name: data.name || agentSlug,
-          description: data.description || "",
-          avatar_url: data.avatar_url || "",
-        });
-      } else {
-        setAgent({ name: agentSlug, description: "", avatar_url: "" });
-      }
-    } catch {
-      setAgent({ name: agentSlug, description: "", avatar_url: "" });
-    }
-  }
-
-  async function loadConversations(userId) {
+  async function fetchAgent() {
     const { data, error } = await supabase
-      .from("conversations")
-      .select("id,title,created_at,archived")
-      .eq("user_id", userId)
-      .eq("agent_slug", agentSlug)
-      .eq("archived", false)
-      .order("created_at", { ascending: false })
-      .limit(50);
+      .from("agents")
+      .select("id, slug, name, description, avatar_url")
+      .eq("slug", agentSlug)
+      .maybeSingle();
 
     if (error) throw error;
-    setConversations(data || []);
+    return data;
+  }
+
+  async function fetchConversations(agentId, userId) {
+    const { data, error } = await supabase
+      .from("conversations")
+      .select("id, created_at, title")
+      .eq("agent_id", agentId)
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
     return data || [];
   }
 
-  async function loadMessages(convId) {
-    if (!convId) {
-      setMessages([]);
-      return;
-    }
+  async function createConversation(agentId, userId) {
     const { data, error } = await supabase
-      .from("messages")
-      .select("id,role,content,created_at")
-      .eq("conversation_id", convId)
-      .order("created_at", { ascending: true })
-      .limit(200);
+      .from("conversations")
+      .insert({
+        agent_id: agentId,
+        user_id: userId,
+        title: "Conversation",
+      })
+      .select("id, created_at, title")
+      .single();
 
     if (error) throw error;
-    setMessages(data || []);
+    return data;
   }
 
-  useEffect(() => {
-    (async () => {
-      setLoading(true);
-      setError("");
+  async function fetchMessages(conversationId) {
+    const { data, error } = await supabase
+      .from("messages")
+      .select("id, role, content, created_at")
+      .eq("conversation_id", conversationId)
+      .order("created_at", { ascending: true });
 
-      const user = await loadMe();
-      if (!user) {
+    if (error) throw error;
+    return data || [];
+  }
+
+  async function insertMessage(conversationId, role, content) {
+    const { error } = await supabase.from("messages").insert({
+      conversation_id: conversationId,
+      role,
+      content,
+    });
+    if (error) throw error;
+  }
+
+  async function boot() {
+    setLoading(true);
+    setError("");
+    try {
+      const { data } = await supabase.auth.getUser();
+      const u = data?.user || null;
+      if (!u) {
         window.location.href = "/login";
         return;
       }
-      setMe(user);
+      setUser(u);
 
-      await loadAgent();
+      const a = await fetchAgent();
+      if (!a) {
+        setError("Agent introuvable.");
+        setLoading(false);
+        return;
+      }
+      setAgent(a);
 
+      const convs = await fetchConversations(a.id, u.id);
+      setConversations(convs);
+
+      if (convs.length) {
+        setSelectedConversationId(convs[0].id);
+      } else {
+        const created = await createConversation(a.id, u.id);
+        setConversations([created]);
+        setSelectedConversationId(created.id);
+      }
+    } catch (e) {
+      setError(e?.message || "Erreur interne API");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!router.isReady) return;
+    boot();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.isReady, agentSlug]);
+
+  useEffect(() => {
+    if (!selectedConversationId) return;
+    (async () => {
+      setError("");
       try {
-        const convs = await loadConversations(user.id);
-        const firstId = convs?.[0]?.id || null;
-        setConversationId(firstId);
-        await loadMessages(firstId);
+        const msgs = await fetchMessages(selectedConversationId);
+        setMessages(msgs);
 
-        // Si aucune conversation, on montre un message d'accueil local (pas en DB)
-        if (!firstId) {
-          setMessages([
-            { id: "local-welcome", role: "assistant", content: getFirstMessage(agentSlug, ""), created_at: new Date().toISOString() },
-          ]);
+        // auto 1er message si conversation vide
+        if (!msgs.length && agent?.slug) {
+          const first = getFirstMessage(agent.slug);
+          if (first) {
+            await insertMessage(selectedConversationId, "assistant", first);
+            const updated = await fetchMessages(selectedConversationId);
+            setMessages(updated);
+          }
         }
       } catch (e) {
-        console.error(e);
-        setError("Erreur lors du chargement.");
-      } finally {
-        setLoading(false);
+        setError(e?.message || "Erreur interne API");
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentSlug]);
+  }, [selectedConversationId]);
 
   useEffect(() => {
-    if (endRef.current) endRef.current.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
-
-  async function startNewConversation() {
-    // Juste reset local: la conversation sera créée au 1er envoi via /api/chat
-    setConversationId(null);
-    setMessages([
-      { id: "local-welcome", role: "assistant", content: getFirstMessage(agentSlug, ""), created_at: new Date().toISOString() },
-    ]);
-  }
+    try {
+      endRef.current?.scrollIntoView({ behavior: "smooth" });
+    } catch (_) {}
+  }, [messages]);
 
   async function sendMessage() {
-    setError("");
-    const text = input;
-    const trimmed = text.trim();
-    if (!trimmed || sending) return;
+    const text = String(input || "").trim();
+    if (!text || !selectedConversationId || sending) return;
 
     setSending(true);
-
-    // Optimistic UI
-    const tempId = `tmp-${Date.now()}`;
-    setMessages((prev) => [...prev, { id: tempId, role: "user", content: trimmed, created_at: new Date().toISOString() }]);
+    setError("");
 
     try {
-      const token = await getAccessToken();
-      if (!token) {
-        window.location.href = "/login";
-        return;
-      }
+      await insertMessage(selectedConversationId, "user", text);
+      setInput("");
 
-      const resp = await fetch("/api/chat", {
+      const afterUser = await fetchMessages(selectedConversationId);
+      setMessages(afterUser);
+
+      const token = await getAccessToken();
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -164,140 +250,134 @@ export default function ChatPage() {
         },
         body: JSON.stringify({
           agentSlug,
-          conversationId,
-          message: trimmed,
+          conversationId: selectedConversationId,
+          message: text,
         }),
       });
 
-      const data = await resp.json().catch(() => null);
-      if (!resp.ok) {
-        const msg = data?.message || data?.error || "Erreur interne API";
-        throw new Error(msg);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.error || "Erreur interne API");
       }
 
-      // Clear only on success
-      setInput("");
-
-      // Conversation peut etre creee cote serveur
-      const newConvId = data?.conversationId || conversationId;
-      if (newConvId && newConvId !== conversationId) {
-        setConversationId(newConvId);
+      const reply = data?.reply || "";
+      if (reply) {
+        await insertMessage(selectedConversationId, "assistant", reply);
       }
 
-      // Reload DB state (source of truth)
-      if (me?.id) await loadConversations(me.id);
-      await loadMessages(newConvId);
+      const afterAssistant = await fetchMessages(selectedConversationId);
+      setMessages(afterAssistant);
     } catch (e) {
-      console.error(e);
       setError(e?.message || "Erreur interne API");
-      // Restore input so the user doesn't lose it
-      setInput(text);
-      // Remove optimistic message
-      setMessages((prev) => prev.filter((m) => m.id !== tempId));
     } finally {
       setSending(false);
+      setTimeout(() => inputRef.current?.focus?.(), 0);
     }
   }
 
-  function logout() {
-    supabase.auth.signOut();
-    window.location.href = "/login";
+  function startNewConversation() {
+    if (!agent?.id || !user?.id) return;
+    (async () => {
+      setError("");
+      try {
+        const created = await createConversation(agent.id, user.id);
+        setConversations((prev) => [created, ...prev]);
+        setSelectedConversationId(created.id);
+        setMessages([]);
+      } catch (e) {
+        setError(e?.message || "Erreur interne API");
+      }
+    })();
   }
 
   if (loading) {
     return (
-      <div style={{ padding: 24, fontFamily: "system-ui" }}>
-        Chargement...
+      <div style={{ minHeight: "100vh", background: "#050608", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        Chargement…
       </div>
     );
   }
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#0b0b0b", color: "#fff" }}>
-      {/* Sidebar */}
-      <div style={{ width: 280, borderRight: "1px solid #222", padding: 16, boxSizing: "border-box" }}>
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-          <button onClick={() => router.push("/agents")} style={btnSmall}>
-            ← Retour aux agents
+    <div style={{ minHeight: "100vh", background: "#050608", color: "#fff", display: "flex" }}>
+      <div style={{ width: 280, borderRight: "1px solid #222", padding: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+          <button onClick={() => (window.location.href = "/agents")} style={btnSmall}>
+            Retour aux agents
           </button>
           <button onClick={startNewConversation} style={btnSmall}>
             + Nouvelle
           </button>
         </div>
 
-        <div style={{ fontWeight: 700, marginBottom: 8 }}>Historique</div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, overflow: "auto", maxHeight: "calc(100vh - 120px)" }}>
+        <div style={{ fontWeight: 800, marginBottom: 10 }}>Historique</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {conversations.map((c) => (
             <button
               key={c.id}
-              onClick={async () => {
-                setConversationId(c.id);
-                await loadMessages(c.id);
-              }}
+              onClick={() => setSelectedConversationId(c.id)}
               style={{
                 textAlign: "left",
                 padding: 12,
                 borderRadius: 12,
-                border: conversationId === c.id ? "1px solid #b8860b" : "1px solid #222",
-                background: "#111",
+                border: selectedConversationId === c.id ? "1px solid #b8860b" : "1px solid #222",
+                background: "#0f0f0f",
                 color: "#fff",
                 cursor: "pointer",
               }}
             >
-              <div style={{ fontWeight: 600 }}>{c.title || "(sans titre)"}</div>
-              <div style={{ opacity: 0.6, fontSize: 12 }}>{new Date(c.created_at).toLocaleString()}</div>
+              <div style={{ fontWeight: 800 }}>{c.title || "Conversation"}</div>
+              <div style={{ opacity: 0.7, fontSize: 12 }}>{new Date(c.created_at).toLocaleString()}</div>
             </button>
           ))}
         </div>
       </div>
 
-      {/* Main */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: 16, borderBottom: "1px solid #222" }}>
+        <div style={{ padding: 16, borderBottom: "1px solid #222", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div
-              style={{
-                width: 44,
-                height: 44,
-                borderRadius: "50%",
-                background: "#222",
-                overflow: "hidden",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              {agent.avatar_url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={agent.avatar_url} alt={agent.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-              ) : (
-                <span style={{ fontWeight: 700 }}>{agent.name?.[0]?.toUpperCase() || "A"}</span>
-              )}
-            </div>
+            {agent?.avatar_url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={agent.avatar_url} alt={agent.name} style={{ width: 36, height: 36, borderRadius: 999, objectFit: "cover" }} />
+            ) : (
+              <div style={{ width: 36, height: 36, borderRadius: 999, background: "#111", border: "1px solid #222" }} />
+            )}
             <div>
-              <div style={{ fontWeight: 800 }}>{agent.name}</div>
-              <div style={{ opacity: 0.7, fontSize: 12 }}>{agent.description}</div>
+              <div style={{ fontWeight: 900, fontSize: 18 }}>{agent?.name || "Agent"}</div>
+              <div style={{ opacity: 0.7, fontSize: 12 }}>{agent?.description || ""}</div>
             </div>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ opacity: 0.7, fontSize: 12 }}>{me?.email}</div>
-            <button onClick={logout} style={btnSmall}>Déconnexion</button>
-          </div>
+          <button
+            onClick={async () => {
+              await supabase.auth.signOut();
+              window.location.href = "/login";
+            }}
+            style={btnSmall}
+          >
+            Déconnexion
+          </button>
         </div>
 
-        <div style={{ flex: 1, padding: 16, overflow: "auto" }}>
+        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
           {messages.map((m) => (
-            <div key={m.id} style={{ marginBottom: 12, display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
+            <div
+              key={m.id}
+              style={{
+                display: "flex",
+                justifyContent: m.role === "user" ? "flex-end" : "flex-start",
+                marginBottom: 12,
+              }}
+            >
               <div
                 style={{
-                  maxWidth: "70%",
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  background: m.role === "user" ? "#3a2a00" : "#151515",
-                  border: "1px solid #222",
+                  maxWidth: 760,
                   whiteSpace: "pre-wrap",
+                  padding: 14,
+                  borderRadius: 14,
+                  background: m.role === "user" ? "#b8860b" : "#0f0f0f",
+                  color: m.role === "user" ? "#000" : "#fff",
+                  border: m.role === "user" ? "1px solid #b8860b" : "1px solid #222",
                 }}
               >
                 {m.content}
@@ -314,6 +394,7 @@ export default function ChatPage() {
         <div style={{ padding: 16, borderTop: "1px solid #222", display: "flex", gap: 10 }}>
           <input
             value={input}
+            ref={inputRef}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -333,8 +414,25 @@ export default function ChatPage() {
             }}
             disabled={sending}
           />
+
+          <button
+            type="button"
+            onClick={toggleDictation}
+            disabled={!speechSupported || sending}
+            title={
+              speechSupported
+                ? isRecording
+                  ? "Arrêter la dictée"
+                  : "Dictée vocale"
+                : "Dictée vocale non supportée"
+            }
+            style={{ ...btnSmall, opacity: !speechSupported || sending ? 0.6 : 1, fontSize: 16, padding: "12px 14px" }}
+          >
+            {isRecording ? "⏺" : "🎙"}
+          </button>
+
           <button onClick={sendMessage} style={{ ...btnPrimary, opacity: sending ? 0.7 : 1 }} disabled={sending}>
-            Envoyer
+            {sending ? "Envoi..." : "Envoyer"}
           </button>
         </div>
       </div>
