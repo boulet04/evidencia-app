@@ -1,535 +1,201 @@
 // pages/api/chat.js
-// API Next.js (pages router) :
-// - verifie le token Supabase de l'utilisateur
-// - verifie acces a l'agent (user_agents)
-// - cree/valide la conversation
-// - insere le message user
-// - charge config agent (client_agent_configs) + prompt general (user_global_prompts / global_prompts)
-// - charge sources (CSV depuis Storage) et injecte un extrait pertinent
-// - appelle Mistral via HTTP
-// - insere la reponse assistant
+import supabaseAdmin from "../../lib/supabaseAdmin";
+import agentPromptsImport from "../../lib/agentPrompts";
+import { Mistral } from "@mistralai/mistralai";
 
-import { createClient } from "@supabase/supabase-js";
-
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
-
-function json(res, status, body) {
-  res.status(status).setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(body));
+function getBearerToken(req) {
+  const h = req.headers.authorization || "";
+  const parts = h.split(" ");
+  if (parts.length === 2 && parts[0].toLowerCase() === "bearer") return parts[1];
+  return null;
 }
 
-function normalizeText(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/[\u2019']/g, "'")
-    .replace(/[^a-z0-9àâäéèêëïîôöùûüç@._\- ]+/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+function toPromptMap(mod) {
+  // support default export or named export
+  return mod?.default || mod || {};
 }
 
-function pickDelimiter(sampleLine) {
-  const comma = (sampleLine.match(/,/g) || []).length;
-  const semi = (sampleLine.match(/;/g) || []).length;
-  const tab = (sampleLine.match(/\t/g) || []).length;
-  if (tab >= semi && tab >= comma && tab > 0) return "\t";
-  if (semi >= comma && semi > 0) return ";";
-  return ",";
-}
+async function fetchUserGlobalPrompt({ userId }) {
+  // 1) user_global_prompts (prioritaire)
+  const { data: ugp, error: ugpErr } = await supabaseAdmin
+    .from("user_global_prompts")
+    .select("global_prompt")
+    .eq("user_id", userId)
+    .maybeSingle();
 
-// CSV parser simple (support guillemets "...")
-function parseCsv(text) {
-  const raw = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return { headers: [], rows: [] };
-
-  const delimiter = pickDelimiter(lines[0]);
-
-  const parseLine = (line) => {
-    const out = [];
-    let cur = "";
-    let inQuotes = false;
-
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-
-      if (ch === '"') {
-        // "" -> "
-        if (inQuotes && line[i + 1] === '"') {
-          cur += '"';
-          i++;
-        } else {
-          inQuotes = !inQuotes;
-        }
-        continue;
-      }
-
-      if (!inQuotes && ch === delimiter) {
-        out.push(cur);
-        cur = "";
-        continue;
-      }
-
-      cur += ch;
-    }
-    out.push(cur);
-    return out.map((v) => v.trim());
-  };
-
-  const headers = parseLine(lines[0]).map((h, idx) => (h ? h : `col_${idx + 1}`));
-
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const values = parseLine(lines[i]);
-    const obj = {};
-    for (let j = 0; j < headers.length; j++) {
-      obj[headers[j]] = values[j] ?? "";
-    }
-    rows.push(obj);
+  if (!ugpErr) {
+    const txt = (ugp?.global_prompt || "").trim();
+    if (txt) return txt;
   }
 
-  return { headers, rows };
-}
+  // 2) legacy: client_agent_configs + agents.slug = '_global_'
+  const { data: legacy, error: legacyErr } = await supabaseAdmin
+    .from("client_agent_configs")
+    .select("system_prompt, agents!inner(slug)")
+    .eq("user_id", userId)
+    .eq("agents.slug", "_global_")
+    .maybeSingle();
 
-function rowToSearchableString(row) {
-  try {
-    return normalizeText(Object.values(row || {}).join(" "));
-  } catch {
-    return "";
-  }
-}
-
-function extractQueryTokens(userMessage) {
-  const msg = normalizeText(userMessage);
-  const tokens = msg.split(" ").filter(Boolean);
-
-  const stop = new Set([
-    "le","la","les","un","une","des","du","de","d","et","ou",
-    "a","à","au","aux","pour","par","sur","dans","avec","sans",
-    "stp","svp","merci","bonjour","salut",
-    "peux","tu","me","donner","liste","lister","mails","mail","emails","email",
-    "societe","société","entreprise","contact","contacts"
-  ]);
-
-  return tokens.filter((t) => t.length >= 3 && !stop.has(t));
-}
-
-function scoreRow(rowStr, tokens) {
-  let score = 0;
-  for (const t of tokens) {
-    if (rowStr.includes(t)) score += 2;
-    if (t.includes(".") && rowStr.includes(t)) score += 2; // domaine
-  }
-  return score;
-}
-
-function topRelevantRows(rows, userMessage, maxRows = 20) {
-  const tokens = extractQueryTokens(userMessage);
-  if (tokens.length === 0) return [];
-
-  const scored = rows
-    .map((r) => {
-      const s = rowToSearchableString(r);
-      return { row: r, score: scoreRow(s, tokens) };
-    })
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score);
-
-  return scored.slice(0, maxRows).map((x) => x.row);
-}
-
-function safeTruncate(str, maxChars) {
-  const s = String(str || "");
-  if (s.length <= maxChars) return s;
-  return s.slice(0, maxChars) + "\n…(tronqué)";
-}
-
-async function downloadTextFromStorage(supabase, bucket, path) {
-  const { data, error } = await supabase.storage.from(bucket).download(path);
-  if (error || !data) {
-    const err = new Error(`Storage download failed for ${bucket}/${path}: ${error?.message || "unknown"}`);
-    err.code = "STORAGE_DOWNLOAD_FAILED";
-    err.detail = { bucket, path, error: error?.message || null };
-    throw err;
+  if (!legacyErr) {
+    const txt = (legacy?.system_prompt || "").trim();
+    if (txt) return txt;
   }
 
-  if (typeof data.text === "function") {
-    return await data.text();
+  // 3) défaut: global_prompts (key = GLOBAL_SYSTEM_PROMPT)
+  const { data: gp, error: gpErr } = await supabaseAdmin
+    .from("global_prompts")
+    .select("content")
+    .eq("key", "GLOBAL_SYSTEM_PROMPT")
+    .maybeSingle();
+
+  if (!gpErr) {
+    const txt = (gp?.content || "").trim();
+    if (txt) return txt;
   }
-
-  const ab = await data.arrayBuffer();
-  return Buffer.from(ab).toString("utf-8");
-}
-
-function buildSourceContextBlock({ fileName, headers, sampleRows, warning }) {
-  const lines = [];
-
-  lines.push(`SOURCE CSV: ${fileName}`);
-  if (headers?.length) {
-    lines.push(`Colonnes: ${headers.join(", ")}`);
-  }
-  if (warning) {
-    lines.push(`Note: ${warning}`);
-  }
-
-  if (!sampleRows || sampleRows.length === 0) {
-    lines.push("Aucune ligne pertinente trouvée pour la demande actuelle.");
-    lines.push("=> Demander le nom exact de la société ou le domaine email (ex: bcontact.fr) pour filtrer.");
-    return lines.join("\n");
-  }
-
-  lines.push("Lignes pertinentes (extrait limité):");
-  for (const r of sampleRows) {
-    const entries = Object.entries(r || {})
-      .slice(0, 12)
-      .map(([k, v]) => `${k}=${String(v || "").replace(/\s+/g, " ").trim()}`)
-      .join(" | ");
-    lines.push(`- ${entries}`);
-  }
-
-  return safeTruncate(lines.join("\n"), 8000);
-}
-
-async function buildSourcesContext({ supabase, context, userMessage }) {
-  const sources = context?.sources;
-  if (!Array.isArray(sources) || sources.length === 0) return "";
-
-  const blocks = [];
-
-  for (const src of sources) {
-    const name = src?.name || "";
-    const mime = src?.mime || "";
-    const path = src?.path || "";
-    const bucket = src?.bucket || "agent_sources";
-
-    const isCsv =
-      String(mime).toLowerCase().includes("text/csv") ||
-      String(name).toLowerCase().endsWith(".csv") ||
-      String(path).toLowerCase().endsWith(".csv");
-
-    if (!isCsv || !path) continue;
-
-    let text = "";
-    let warning = "";
-
-    try {
-      text = await downloadTextFromStorage(supabase, bucket, path);
-      if (text.length > 1_200_000) {
-        warning = `Fichier volumineux (${text.length} chars) : exploitation partielle.`;
-        text = text.slice(0, 250_000);
-      }
-    } catch (e) {
-      blocks.push(
-        buildSourceContextBlock({
-          fileName: name || path,
-          headers: [],
-          sampleRows: [],
-          warning: `Impossible de télécharger la source (${e?.message || "erreur"}).`,
-        })
-      );
-      continue;
-    }
-
-    const { headers, rows } = parseCsv(text);
-    const relevant = topRelevantRows(rows, userMessage, 20);
-
-    blocks.push(
-      buildSourceContextBlock({
-        fileName: name || path,
-        headers,
-        sampleRows: relevant,
-        warning,
-      })
-    );
-  }
-
-  if (blocks.length === 0) return "";
-
-  const guardrails = [
-    "REGLES IMPORTANTES (DONNEES INTERNES):",
-    "- Utiliser ces sources uniquement pour répondre à la demande.",
-    "- Ne JAMAIS lister tout le fichier ni fournir des extractions massives.",
-    "- Si la société / le domaine n'est pas précisé, poser une question de clarification.",
-    "- Limiter la réponse à un petit nombre de résultats (ex: 10) et proposer d'affiner.",
-  ].join("\n");
-
-  return `\n\n${guardrails}\n\n${blocks.join("\n\n---\n\n")}`;
-}
-
-async function loadGlobalPrompt({ supabase, userId }) {
-  // 1) Prompt général user (user_global_prompts)
-  try {
-    const { data, error } = await supabase
-      .from("user_global_prompts")
-      .select("global_prompt")
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (!error && data?.global_prompt && String(data.global_prompt).trim()) {
-      return String(data.global_prompt).trim();
-    }
-  } catch {}
-
-  // 2) Fallback global_prompts (même structure chez toi)
-  try {
-    const { data, error } = await supabase
-      .from("global_prompts")
-      .select("global_prompt")
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (!error && data?.global_prompt && String(data.global_prompt).trim()) {
-      return String(data.global_prompt).trim();
-    }
-  } catch {}
-
-  // 3) Dernier fallback: première ligne global_prompts (si tu veux un défaut global)
-  try {
-    const { data, error } = await supabase
-      .from("global_prompts")
-      .select("global_prompt")
-      .limit(1);
-
-    if (!error && Array.isArray(data) && data[0]?.global_prompt && String(data[0].global_prompt).trim()) {
-      return String(data[0].global_prompt).trim();
-    }
-  } catch {}
 
   return "";
 }
 
-async function callMistral({ systemPrompt, history, userMessage }) {
-  if (!MISTRAL_API_KEY) {
-    const err = new Error("MISTRAL_API_KEY manquant dans Vercel env.");
-    err.code = "NO_MISTRAL_KEY";
-    throw err;
+async function fetchAgentSystemPrompt({ userId, agentId, agentSlug }) {
+  // prompt personnalisé user/agent
+  const { data: cfg, error: cfgErr } = await supabaseAdmin
+    .from("client_agent_configs")
+    .select("system_prompt, context")
+    .eq("user_id", userId)
+    .eq("agent_id", agentId)
+    .maybeSingle();
+
+  if (!cfgErr) {
+    const txt = (cfg?.system_prompt || "").trim();
+    if (txt) return { systemPrompt: txt, context: cfg?.context || null };
   }
 
-  const messages = [
-    ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
-    ...history,
-    { role: "user", content: userMessage },
-  ];
+  // fallback lib/agentPrompts
+  const promptMap = toPromptMap(agentPromptsImport);
+  const fallback =
+    (promptMap && typeof promptMap === "object" && (promptMap[agentSlug] || promptMap[`${agentSlug}`])) ||
+    promptMap?.DEFAULT ||
+    promptMap?.default ||
+    "";
 
-  const payload = {
-    model: "mistral-small-latest",
-    messages,
-    temperature: 0.2,
-  };
+  return { systemPrompt: (fallback || "").trim(), context: null };
+}
 
-  const r = await fetch("https://api.mistral.ai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${MISTRAL_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+async function fetchConversationMessages(conversationId, limit = 30) {
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("role, content, created_at")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: true })
+    .limit(limit);
 
-  const text = await r.text();
-  let data;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
-  }
-
-  if (!r.ok) {
-    const err = new Error(`Mistral HTTP ${r.status}`);
-    err.code = "MISTRAL_HTTP";
-    err.status = r.status;
-    err.detail = data || text;
-    throw err;
-  }
-
-  const reply = data?.choices?.[0]?.message?.content;
-  if (!reply) {
-    const err = new Error("Reponse Mistral inattendue (choices[0].message.content manquant).");
-    err.code = "MISTRAL_BAD_RESPONSE";
-    err.detail = data;
-    throw err;
-  }
-
-  return reply;
+  if (error) return [];
+  const list = Array.isArray(data) ? data : [];
+  return list
+    .map((m) => ({
+      role: m.role,
+      content: typeof m.content === "string" ? m.content : "",
+    }))
+    .filter((m) => (m.role === "user" || m.role === "assistant") && m.content.trim().length > 0);
 }
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
-    return json(res, 405, { error: "Method Not Allowed" });
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-      return json(res, 500, {
-        error: "Supabase server env manquantes",
-        detail: {
-          SUPABASE_URL: !!SUPABASE_URL,
-          SUPABASE_SERVICE_ROLE_KEY: !!SUPABASE_SERVICE_ROLE_KEY,
-        },
-      });
+    const token = getBearerToken(req);
+    if (!token) return res.status(401).json({ error: "Missing Bearer token" });
+
+    const { data: authData, error: authErr } = await supabaseAdmin.auth.getUser(token);
+    if (authErr || !authData?.user) return res.status(401).json({ error: "Invalid token" });
+
+    const userId = authData.user.id;
+
+    const { conversation_id, agent_slug, message } = req.body || {};
+    if (!conversation_id || typeof conversation_id !== "string") {
+      return res.status(400).json({ error: "Missing conversation_id" });
     }
-
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-      auth: { persistSession: false },
-    });
-
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-    if (!token) return json(res, 401, { error: "Missing bearer token" });
-
-    const { data: authData, error: authErr } = await supabase.auth.getUser(token);
-    if (authErr || !authData?.user) {
-      return json(res, 401, { error: "Invalid token", detail: authErr?.message || null });
+    if (!agent_slug || typeof agent_slug !== "string") {
+      return res.status(400).json({ error: "Missing agent_slug" });
     }
+    const userMessage = (typeof message === "string" ? message : "").trim();
+    if (!userMessage) return res.status(400).json({ error: "Empty message" });
 
-    const user = authData.user;
-    const { agentSlug, conversationId, message } = req.body || {};
-
-    if (!agentSlug || typeof agentSlug !== "string") {
-      return json(res, 400, { error: "agentSlug manquant" });
-    }
-    if (!message || typeof message !== "string" || !message.trim()) {
-      return json(res, 400, { error: "message manquant" });
-    }
-
-    // A) Charger l'agent + verifier droit (user_agents)
-    const { data: agentRow, error: agentErr } = await supabase
-      .from("agents")
-      .select("id, slug, name")
-      .eq("slug", agentSlug)
+    // conversation ownership
+    const { data: conv, error: convErr } = await supabaseAdmin
+      .from("conversations")
+      .select("id,user_id,agent_slug")
+      .eq("id", conversation_id)
       .maybeSingle();
 
-    if (agentErr) throw new Error(`Supabase agents select error: ${agentErr.message}`);
-    if (!agentRow) return json(res, 404, { error: "Agent introuvable" });
+    if (convErr || !conv) return res.status(404).json({ error: "Conversation not found" });
+    if (conv.user_id !== userId) return res.status(403).json({ error: "Forbidden" });
 
-    const { data: uaRow, error: uaErr } = await supabase
+    // agent
+    const { data: agent, error: agentErr } = await supabaseAdmin
+      .from("agents")
+      .select("id,slug,name")
+      .eq("slug", agent_slug)
+      .maybeSingle();
+
+    if (agentErr || !agent) return res.status(404).json({ error: "Agent not found" });
+
+    // licence/assignment: user must have this agent
+    const { data: ua, error: uaErr } = await supabaseAdmin
       .from("user_agents")
       .select("id")
-      .eq("user_id", user.id)
-      .eq("agent_id", agentRow.id)
+      .eq("user_id", userId)
+      .eq("agent_id", agent.id)
       .maybeSingle();
 
-    if (uaErr) throw new Error(`Supabase user_agents select error: ${uaErr.message}`);
-    if (!uaRow) return json(res, 403, { error: "Acces refuse a cet agent" });
+    if (uaErr || !ua) return res.status(403).json({ error: "Agent not assigned to user" });
 
-    // B) Conversation
-    let convId = conversationId || null;
+    // prompts
+    const globalPrompt = await fetchUserGlobalPrompt({ userId });
+    const { systemPrompt: agentPrompt } = await fetchAgentSystemPrompt({
+      userId,
+      agentId: agent.id,
+      agentSlug: agent.slug,
+    });
 
-    if (convId) {
-      const { data: conv, error: convErr } = await supabase
-        .from("conversations")
-        .select("id, user_id, agent_slug")
-        .eq("id", convId)
-        .maybeSingle();
+    const systemSections = [];
+    if (globalPrompt) systemSections.push(globalPrompt);
+    if (agentPrompt) systemSections.push(agentPrompt);
 
-      if (convErr) throw new Error(`Supabase conversations select error: ${convErr.message}`);
-      if (!conv || conv.user_id !== user.id || conv.agent_slug !== agentSlug) {
-        return json(res, 403, { error: "Conversation non autorisee" });
-      }
-    } else {
-      const title = message.trim().slice(0, 60);
-      const { data: convIns, error: convInsErr } = await supabase
-        .from("conversations")
-        .insert({
-          user_id: user.id,
-          agent_slug: agentSlug,
-          title,
-          archived: false,
-        })
-        .select("id")
-        .single();
+    const finalSystemPrompt = systemSections.join("\n\n---\n\n").trim();
 
-      if (convInsErr) throw new Error(`Supabase conversations insert error: ${convInsErr.message}`);
-      convId = convIns.id;
+    // history
+    const history = await fetchConversationMessages(conversation_id, 30);
+
+    // ensure last user message is present (frontend inserts it, but on évite les trous)
+    const last = history[history.length - 1];
+    if (!last || last.role !== "user" || last.content.trim() !== userMessage) {
+      history.push({ role: "user", content: userMessage });
     }
 
-    // C) Charger config agent user (system_prompt + context)
-    let agentSystemPrompt = "";
-    let context = {};
+    const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
+    const model = process.env.MISTRAL_MODEL || "mistral-large-latest";
 
-    const { data: cfgRow, error: cfgErr } = await supabase
-      .from("client_agent_configs")
-      .select("system_prompt, context")
-      .eq("user_id", user.id)
-      .eq("agent_id", agentRow.id)
-      .maybeSingle();
-
-    if (cfgErr) throw new Error(`Supabase client_agent_configs select error: ${cfgErr.message}`);
-
-    if (cfgRow?.system_prompt) agentSystemPrompt = cfgRow.system_prompt;
-    if (cfgRow?.context && typeof cfgRow.context === "object") context = cfgRow.context;
-
-    // D) Historique (dernier 20 messages user/assistant)
-    const { data: histRows, error: histErr } = await supabase
-      .from("messages")
-      .select("role, content")
-      .eq("conversation_id", convId)
-      .in("role", ["user", "assistant"])
-      .order("created_at", { ascending: true })
-      .limit(20);
-
-    if (histErr) throw new Error(`Supabase messages history error: ${histErr.message}`);
-
-    const history = (histRows || []).map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
-
-    // E) Insert message user
-    const { error: insUserErr } = await supabase.from("messages").insert({
-      conversation_id: convId,
-      role: "user",
-      content: message,
+    const completion = await mistral.chat.complete({
+      model,
+      messages: [
+        ...(finalSystemPrompt ? [{ role: "system", content: finalSystemPrompt }] : []),
+        ...history,
+      ],
+      temperature: 0.2,
     });
 
-    if (insUserErr) throw new Error(`Supabase insert user message error: ${insUserErr.message}`);
+    const reply =
+      completion?.choices?.[0]?.message?.content ||
+      completion?.output_text ||
+      "";
 
-    // F) Prompt général + sources
-    const globalPrompt = await loadGlobalPrompt({ supabase, userId: user.id });
-
-    const sourcesBlock = await buildSourcesContext({
-      supabase,
-      context,
-      userMessage: message,
-    });
-
-    const finalSystemPrompt = [
-      globalPrompt ? `PROMPT GENERAL:\n${globalPrompt}` : "",
-      agentSystemPrompt || "",
-      sourcesBlock || "",
-    ]
-      .filter(Boolean)
-      .join("\n\n")
-      .trim();
-
-    // G) Appel Mistral
-    const reply = await callMistral({
-      systemPrompt: finalSystemPrompt,
-      history,
-      userMessage: message,
-    });
-
-    // H) Insert message assistant
-    const { error: insAsstErr } = await supabase.from("messages").insert({
-      conversation_id: convId,
-      role: "assistant",
-      content: reply,
-    });
-
-    if (insAsstErr) throw new Error(`Supabase insert assistant message error: ${insAsstErr.message}`);
-
-    return json(res, 200, { ok: true, conversationId: convId, reply });
-  } catch (err) {
-    console.error("/api/chat error:", err);
-
-    return json(res, 500, {
-      error: "Internal Server Error",
-      message: err?.message || String(err),
-      code: err?.code || null,
-      status: err?.status || null,
-      detail: err?.detail || null,
-    });
+    return res.status(200).json({ reply });
+  } catch (e) {
+    console.error("API /chat error:", e);
+    return res.status(500).json({ error: "Internal error" });
   }
 }
