@@ -14,35 +14,7 @@ function formatTitleFallback(agentName) {
 }
 
 function defaultWelcome() {
-  return "Bonjour, comment puis-je vous aider?";
-}
-
-function MicIcon({ size = 18 }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        fill="currentColor"
-        d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0a1 1 0 1 0-2 0a7 7 0 0 0 6 6.93V20H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-2.07A7 7 0 0 0 19 11a1 1 0 1 0-2 0Z"
-      />
-    </svg>
-  );
-}
-
-function StopIcon({ size = 18 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        fill="currentColor"
-        d="M7 7a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V7Z"
-      />
-    </svg>
-  );
+  return "Salut ! 😊 Comment puis-je t’aider aujourd’hui ?";
 }
 
 export default function ChatAgentPage() {
@@ -51,7 +23,6 @@ export default function ChatAgentPage() {
 
   const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
-
   const [agent, setAgent] = useState(null);
 
   const [conversations, setConversations] = useState([]);
@@ -65,12 +36,12 @@ export default function ChatAgentPage() {
   const [creatingConv, setCreatingConv] = useState(false);
   const [sending, setSending] = useState(false);
 
-  // Voice dictation
-  const [speechSupported, setSpeechSupported] = useState(false);
-  const [recording, setRecording] = useState(false);
-  const recognitionRef = useRef(null);
-
   const messagesEndRef = useRef(null);
+
+  // Voice (Web Speech API)
+  const recognitionRef = useRef(null);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
 
   const accessToken = useMemo(() => session?.access_token || null, [session]);
 
@@ -94,82 +65,44 @@ export default function ChatAgentPage() {
     };
   }, []);
 
-  // Init speech recognition (browser)
+  // Init speech recognition
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
-      setSpeechSupported(false);
+      setVoiceSupported(false);
       return;
     }
 
-    setSpeechSupported(true);
+    setVoiceSupported(true);
 
     const rec = new SR();
     rec.lang = "fr-FR";
     rec.interimResults = true;
-    rec.continuous = true;
+    rec.continuous = false;
 
     rec.onresult = (event) => {
-      let interim = "";
-      let finalText = "";
-
+      let transcript = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = event.results[i][0]?.transcript || "";
-        if (event.results[i].isFinal) finalText += transcript;
-        else interim += transcript;
+        transcript += event.results[i][0]?.transcript || "";
       }
-
-      // On ajoute au champ sans écraser ce que tu as déjà tapé
-      setInput((prev) => {
-        const base = prev.trim().length ? prev.trim() + " " : "";
-        const merged = (base + finalText + interim).replace(/\s+/g, " ").trimStart();
-        return merged;
-      });
-    };
-
-    rec.onerror = () => {
-      setRecording(false);
+      transcript = transcript.trim();
+      if (transcript) {
+        setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+      }
     };
 
     rec.onend = () => {
-      setRecording(false);
+      setIsRecording(false);
+    };
+
+    rec.onerror = () => {
+      setIsRecording(false);
     };
 
     recognitionRef.current = rec;
-
-    return () => {
-      try {
-        rec.stop();
-      } catch {}
-      recognitionRef.current = null;
-    };
   }, []);
-
-  function toggleDictation() {
-    if (!speechSupported) {
-      alert("Dictée vocale non supportée sur ce navigateur.");
-      return;
-    }
-    const rec = recognitionRef.current;
-    if (!rec) return;
-
-    if (!recording) {
-      try {
-        rec.start();
-        setRecording(true);
-      } catch {
-        // start() peut throw si déjà démarré
-        setRecording(true);
-      }
-    } else {
-      try {
-        rec.stop();
-      } catch {}
-      setRecording(false);
-    }
-  }
 
   // Load agent meta
   useEffect(() => {
@@ -201,7 +134,6 @@ export default function ChatAgentPage() {
         .order("created_at", { ascending: false });
 
       setLoadingConvs(false);
-
       if (error) return;
 
       const list = data || [];
@@ -215,28 +147,25 @@ export default function ChatAgentPage() {
   }, [user?.id, agentSlug]);
 
   // Load messages for selected conversation
-  async function reloadMessages(conversationId) {
-    if (!conversationId) {
+  useEffect(() => {
+    if (!selectedConversationId) {
       setMessages([]);
       return;
     }
 
-    setLoadingMsgs(true);
-    const { data, error } = await supabase
-      .from("messages")
-      .select("id,role,content,created_at")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true });
+    (async () => {
+      setLoadingMsgs(true);
+      const { data, error } = await supabase
+        .from("messages")
+        .select("id,role,content,created_at")
+        .eq("conversation_id", selectedConversationId)
+        .order("created_at", { ascending: true });
 
-    setLoadingMsgs(false);
-    if (error) return;
+      setLoadingMsgs(false);
+      if (error) return;
 
-    setMessages(data || []);
-  }
-
-  useEffect(() => {
-    reloadMessages(selectedConversationId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      setMessages(data || []);
+    })();
   }, [selectedConversationId]);
 
   // Auto scroll
@@ -250,7 +179,6 @@ export default function ChatAgentPage() {
 
     try {
       setCreatingConv(true);
-
       const title = formatTitleFallback(agent?.name);
 
       const { data: conv, error: convErr } = await supabase
@@ -266,18 +194,17 @@ export default function ChatAgentPage() {
 
       if (convErr) throw convErr;
 
-      // Welcome msg (client-side insert OK)
-      const { error: msgErr } = await supabase.from("messages").insert({
+      // welcome assistant message
+      const welcomeText = defaultWelcome();
+
+      await supabase.from("messages").insert({
         conversation_id: conv.id,
         role: "assistant",
-        content: defaultWelcome(),
+        content: welcomeText,
       });
-
-      if (msgErr) console.warn("Welcome message insert failed:", msgErr.message);
 
       setConversations((prev) => [conv, ...prev]);
       setSelectedConversationId(conv.id);
-      await reloadMessages(conv.id);
     } catch (e) {
       console.error(e);
       alert("Impossible de créer une nouvelle conversation.");
@@ -298,9 +225,7 @@ export default function ChatAgentPage() {
     try {
       const resp = await fetch(`/api/conversations/${conversationId}`, {
         method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
 
       if (!resp.ok && resp.status !== 204) {
@@ -329,8 +254,21 @@ export default function ChatAgentPage() {
       setSending(true);
       setInput("");
 
-      // IMPORTANT: on ne double-insert pas côté client.
-      // L’API /api/chat insère user+assistant en DB.
+      // Insert user message
+      const { data: userMsg, error: userMsgErr } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: selectedConversationId,
+          role: "user",
+          content,
+        })
+        .select("id,role,content,created_at")
+        .single();
+
+      if (userMsgErr) throw userMsgErr;
+      setMessages((prev) => [...prev, userMsg]);
+
+      // Call API
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: {
@@ -349,8 +287,24 @@ export default function ChatAgentPage() {
         throw new Error(j?.error || "Chat API error");
       }
 
-      // reload messages from DB (source de vérité)
-      await reloadMessages(selectedConversationId);
+      const data = await resp.json();
+      const assistantText = (data?.reply || data?.content || "").trim();
+
+      if (assistantText) {
+        const { data: asstMsg, error: asstErr } = await supabase
+          .from("messages")
+          .insert({
+            conversation_id: selectedConversationId,
+            role: "assistant",
+            content: assistantText,
+          })
+          .select("id,role,content,created_at")
+          .single();
+
+        if (!asstErr && asstMsg) {
+          setMessages((prev) => [...prev, asstMsg]);
+        }
+      }
     } catch (e) {
       console.error(e);
       alert("Erreur lors de l’envoi du message.");
@@ -361,6 +315,22 @@ export default function ChatAgentPage() {
 
   function handleSelectConversation(id) {
     setSelectedConversationId(id);
+  }
+
+  function toggleMic() {
+    if (!voiceSupported || !recognitionRef.current) return;
+
+    try {
+      if (isRecording) {
+        recognitionRef.current.stop();
+        setIsRecording(false);
+      } else {
+        setIsRecording(true);
+        recognitionRef.current.start();
+      }
+    } catch {
+      setIsRecording(false);
+    }
   }
 
   const selectedConversation = useMemo(() => {
@@ -374,7 +344,7 @@ export default function ChatAgentPage() {
     <div className="page">
       <div className="topbar">
         <button className="btn back" onClick={() => router.push("/agents")}>
-          ← Retour
+          ← Retour aux agents
         </button>
 
         <div className="brand">
@@ -505,33 +475,28 @@ export default function ChatAgentPage() {
               />
 
               <button
-                className={`btn mic ${recording ? "recording" : ""}`}
+                className={`btn mic ${isRecording ? "recording" : ""}`}
                 type="button"
-                title={recording ? "Arrêter la dictée" : "Dictée vocale"}
-                onClick={toggleDictation}
-                disabled={!selectedConversationId || sending}
+                title={voiceSupported ? (isRecording ? "Arrêter la dictée" : "Dictée vocale") : "Dictée vocale non supportée"}
+                onClick={toggleMic}
+                disabled={!voiceSupported || !selectedConversationId || sending}
               >
-                {recording ? <StopIcon /> : <MicIcon />}
+                {/* true mic icon (SVG) */}
+                <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    fill="currentColor"
+                    d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"
+                  />
+                </svg>
               </button>
 
-              <button
-                className="btn send"
-                onClick={handleSend}
-                disabled={!selectedConversationId || sending}
-              >
+              <button className="btn send" onClick={handleSend} disabled={!selectedConversationId || sending}>
                 {sending ? "Envoi..." : "Envoyer"}
               </button>
             </div>
 
             <div className="chatFooter">
-              <div className="mutedSmall">
-                {selectedConversation ? `Conversation: ${selectedConversation.id}` : ""}
-              </div>
-              {!speechSupported && (
-                <div className="mutedSmall">
-                  Dictée vocale: non supportée sur ce navigateur.
-                </div>
-              )}
+              <div className="mutedSmall">{selectedConversation ? `Conversation: ${selectedConversation.id}` : ""}</div>
             </div>
           </div>
         </main>
@@ -540,8 +505,8 @@ export default function ChatAgentPage() {
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background: var(--evi-bg);
-          color: var(--evi-text);
+          background: var(--e-bg, #050608);
+          color: var(--e-text, #e9eef6);
         }
 
         .topbar {
@@ -550,28 +515,27 @@ export default function ChatAgentPage() {
           align-items: center;
           justify-content: space-between;
           padding: 0 16px;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-          background: var(--evi-topbar-glow);
+          border-bottom: 1px solid var(--e-border, rgba(255, 255, 255, 0.06));
+          background: radial-gradient(1200px 220px at 50% -20%, rgba(255, 122, 0, 0.22), transparent);
         }
 
         .btn {
-          border: 1px solid var(--evi-border-strong);
+          border: 1px solid rgba(255, 255, 255, 0.14);
           background: rgba(255, 255, 255, 0.04);
-          color: var(--evi-text);
+          color: var(--e-text, #e9eef6);
           padding: 10px 12px;
-          border-radius: var(--evi-radius-sm);
+          border-radius: 14px;
           cursor: pointer;
           font-weight: 700;
         }
 
         .btn:disabled {
-          opacity: 0.6;
+          opacity: 0.55;
           cursor: not-allowed;
         }
 
         .btn.logout {
-          border-color: var(--evi-danger-border);
-          background: var(--evi-danger-weak);
+          border-color: rgba(255, 80, 80, 0.35);
         }
 
         .brand {
@@ -610,9 +574,9 @@ export default function ChatAgentPage() {
         }
 
         .sidebar {
-          border: 1px solid var(--evi-border);
-          border-radius: var(--evi-radius-lg);
-          background: var(--evi-panel);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 18px;
+          background: rgba(255, 255, 255, 0.02);
           overflow: hidden;
           min-height: calc(100vh - 96px);
         }
@@ -635,7 +599,7 @@ export default function ChatAgentPage() {
         }
 
         .muted {
-          color: var(--evi-muted);
+          color: rgba(233, 238, 246, 0.65);
           font-size: 14px;
           padding: 8px;
         }
@@ -653,10 +617,10 @@ export default function ChatAgentPage() {
 
         .convItem {
           position: relative;
-          border: 1px solid var(--evi-border);
-          border-radius: var(--evi-radius-md);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 16px;
           padding: 12px 44px 12px 12px;
-          background: var(--evi-panel-2);
+          background: rgba(255, 255, 255, 0.03);
           cursor: pointer;
           transition: border-color 0.15s ease, background 0.15s ease;
         }
@@ -666,10 +630,11 @@ export default function ChatAgentPage() {
           background: rgba(255, 255, 255, 0.04);
         }
 
-        /* ORANGE + VIF sur la conversation active */
+        /* orange plus vif */
         .convItem.active {
-          border-color: var(--evi-accent-border);
-          background: var(--evi-accent-weak-2);
+          border-color: rgba(255, 122, 0, 0.6);
+          background: rgba(255, 122, 0, 0.14);
+          box-shadow: 0 0 0 1px rgba(255, 122, 0, 0.18) inset;
         }
 
         .convTitle {
@@ -688,22 +653,18 @@ export default function ChatAgentPage() {
           width: 30px;
           height: 30px;
           border-radius: 12px;
-          border: 1px solid var(--evi-danger-border);
-          background: var(--evi-danger-weak);
+          border: 1px solid rgba(255, 60, 60, 0.35);
+          background: rgba(255, 60, 60, 0.12);
           color: rgba(255, 210, 210, 0.95);
           font-size: 20px;
           line-height: 28px;
           cursor: pointer;
         }
 
-        .convDelete:hover {
-          background: rgba(255, 59, 59, 0.18);
-        }
-
         .main {
-          border: 1px solid var(--evi-border);
-          border-radius: var(--evi-radius-lg);
-          background: var(--evi-panel);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 18px;
+          background: rgba(255, 255, 255, 0.02);
           min-height: calc(100vh - 96px);
           display: flex;
           flex-direction: column;
@@ -727,21 +688,21 @@ export default function ChatAgentPage() {
         .agentAvatar {
           width: 44px;
           height: 44px;
-          border-radius: var(--evi-radius-md);
+          border-radius: 16px;
           overflow: hidden;
-          border: 1px solid rgba(255, 255, 255, 0.10);
+          border: 1px solid rgba(255, 255, 255, 0.1);
           background: rgba(255, 255, 255, 0.04);
           display: flex;
           align-items: center;
           justify-content: center;
         }
 
-        /* RECADRAGE: on “remonte” le point d’intérêt -> on voit mieux la tête */
+        /* IMPORTANT: recadrage tête */
         .agentAvatar img {
           width: 100%;
           height: 100%;
           object-fit: cover;
-          object-position: center 10%;
+          object-position: center 18%;
         }
 
         .avatarFallback {
@@ -755,7 +716,7 @@ export default function ChatAgentPage() {
 
         .agentRole {
           font-size: 12px;
-          color: var(--evi-muted);
+          color: rgba(233, 238, 246, 0.65);
           margin-top: 2px;
         }
 
@@ -786,8 +747,8 @@ export default function ChatAgentPage() {
 
         .msgBubble {
           max-width: 820px;
-          border: 1px solid var(--evi-border);
-          background: var(--evi-panel-2);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(255, 255, 255, 0.03);
           border-radius: 18px;
           padding: 12px 14px;
           font-size: 14px;
@@ -795,10 +756,10 @@ export default function ChatAgentPage() {
           white-space: pre-wrap;
         }
 
-        /* ORANGE + VIF sur les bulles user */
+        /* orange plus vif sur la bulle user */
         .msgRow.user .msgBubble {
-          border-color: var(--evi-accent-border);
-          background: var(--evi-accent-weak);
+          border-color: rgba(255, 122, 0, 0.55);
+          background: rgba(255, 122, 0, 0.16);
         }
 
         .chatInput {
@@ -812,24 +773,17 @@ export default function ChatAgentPage() {
         .input {
           flex: 1;
           height: 48px;
-          border-radius: var(--evi-radius-md);
-          border: 1px solid rgba(255, 255, 255, 0.10);
-          background: var(--evi-input-bg);
-          color: var(--evi-text);
+          border-radius: 16px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          background: rgba(0, 0, 0, 0.25);
+          color: #e9eef6;
           padding: 0 14px;
           outline: none;
         }
 
-        /* ORANGE + VIF sur Envoyer */
         .btn.send {
-          border-color: var(--evi-accent-border);
-          background: var(--evi-accent);
-          color: #0b0b0b;
-          font-weight: 900;
-        }
-
-        .btn.send:hover {
-          filter: brightness(1.04);
+          border-color: rgba(255, 122, 0, 0.7);
+          background: rgba(255, 122, 0, 0.22);
         }
 
         .btn.mic {
@@ -838,23 +792,17 @@ export default function ChatAgentPage() {
           display: flex;
           align-items: center;
           justify-content: center;
-          border-radius: var(--evi-radius-md);
-          border-color: rgba(255, 255, 255, 0.14);
-          background: rgba(255, 255, 255, 0.04);
+          border-color: rgba(255, 122, 0, 0.35);
         }
 
         .btn.mic.recording {
-          border-color: var(--evi-accent-border);
-          background: var(--evi-accent-weak);
-          color: var(--evi-accent);
+          border-color: rgba(255, 122, 0, 0.9);
+          background: rgba(255, 122, 0, 0.28);
+          box-shadow: 0 0 0 1px rgba(255, 122, 0, 0.25) inset;
         }
 
         .chatFooter {
           padding: 10px 14px 14px;
-          display: flex;
-          justify-content: space-between;
-          gap: 12px;
-          flex-wrap: wrap;
         }
 
         @media (max-width: 980px) {
