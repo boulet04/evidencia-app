@@ -2,26 +2,33 @@
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_ROLE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 
-function safeStr(v) {
-  return (v ?? "").toString();
-}
+// Tag pour verifier que tu tapes bien le bon backend
+const BUILD_TAG = "CHATJS_STABLE_GLOBAL_DEFAULT_429FIX_2026_01_20";
 
 function json(res, status, body) {
   res.status(status).setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
 }
 
-function normalizeText(s) {
-return String(s || "")
-  .toLowerCase()
-  .replace(/[\u2019']/g, "'")
-  .replace(/[^a-z0-9àâäéèêëïîôöùûüç@._ \-]+/gi, " ")
-  .replace(/\s+/g, " ")
-  .trim();
+function safeStr(v) {
+  return (v ?? "").toString();
+}
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// ✅ Regex safe: le '-' est en fin de class -> pas de "range out of order"
+function normalizeText(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[\u2019']/g, "'")
+    .replace(/[^a-z0-9àâäéèêëïîôöùûüç@._ \-]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function pickDelimiter(sampleLine) {
@@ -147,10 +154,7 @@ async function downloadTextFromStorage(supabase, bucket, path) {
     throw err;
   }
 
-  if (typeof data.text === "function") {
-    return await data.text();
-  }
-
+  if (typeof data.text === "function") return await data.text();
   const ab = await data.arrayBuffer();
   return Buffer.from(ab).toString("utf-8");
 }
@@ -246,6 +250,7 @@ async function buildSourcesContext({ supabase, context, userMessage }) {
   return `\n\n${guardrails}\n\n${blocks.join("\n\n---\n\n")}`;
 }
 
+// ✅ Prompt global (app_settings.key = base_system_prompt)
 async function loadBaseSystemPrompt(supabase) {
   try {
     const { data, error } = await supabase
@@ -253,7 +258,6 @@ async function loadBaseSystemPrompt(supabase) {
       .select("value")
       .eq("key", "base_system_prompt")
       .maybeSingle();
-
     if (error) return "";
     return safeStr(data?.value).trim();
   } catch {
@@ -261,6 +265,7 @@ async function loadBaseSystemPrompt(supabase) {
   }
 }
 
+// ✅ Appel Mistral avec retry 429 (et quelques erreurs transitoires)
 async function callMistral({ systemPrompt, history, userMessage }) {
   if (!MISTRAL_API_KEY) {
     const err = new Error("MISTRAL_API_KEY manquant dans Vercel env.");
@@ -280,40 +285,61 @@ async function callMistral({ systemPrompt, history, userMessage }) {
     temperature: 0.2,
   };
 
-  const r = await fetch("https://api.mistral.ai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${MISTRAL_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  const maxAttempts = 3;
+  let lastErr = null;
 
-  const text = await r.text();
-  let data;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
-  }
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const r = await fetch("https://api.mistral.ai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${MISTRAL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
 
-  if (!r.ok) {
-    const err = new Error(`Mistral HTTP ${r.status}`);
+    const text = await r.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+
+    if (r.ok) {
+      const reply = data?.choices?.[0]?.message?.content;
+      if (!reply) {
+        const err = new Error("Reponse Mistral inattendue (choices[0].message.content manquant).");
+        err.code = "MISTRAL_BAD_RESPONSE";
+        err.detail = data;
+        throw err;
+      }
+      return reply;
+    }
+
+    const status = r.status;
+    const retryable = status === 429 || status === 502 || status === 503 || status === 504;
+
+    const err = new Error(`Mistral HTTP ${status}`);
     err.code = "MISTRAL_HTTP";
-    err.status = r.status;
+    err.status = status;
     err.detail = data || text;
-    throw err;
+    lastErr = err;
+
+    if (!retryable || attempt === maxAttempts) break;
+
+    // Respecte Retry-After si present, sinon backoff simple (1s, 2s)
+    const ra = r.headers.get("retry-after");
+    let waitMs = 0;
+    if (ra && /^\d+$/.test(ra)) {
+      waitMs = Math.min(parseInt(ra, 10) * 1000, 3000);
+    } else {
+      waitMs = attempt === 1 ? 1000 : 2000;
+    }
+    await sleep(waitMs);
   }
 
-  const reply = data?.choices?.[0]?.message?.content;
-  if (!reply) {
-    const err = new Error("Reponse Mistral inattendue (choices[0].message.content manquant).");
-    err.code = "MISTRAL_BAD_RESPONSE";
-    err.detail = data;
-    throw err;
-  }
-
-  return reply;
+  throw lastErr || new Error("Mistral error");
 }
 
 export default async function handler(req, res) {
@@ -356,7 +382,7 @@ export default async function handler(req, res) {
       return json(res, 400, { error: "message manquant" });
     }
 
-    // A) Charger l'agent + verifier droit (user_agents)
+    // A) Agent + droit d'acces
     const { data: agentRow, error: agentErr } = await supabase
       .from("agents")
       .select("id, slug, name, default_system_prompt")
@@ -407,7 +433,7 @@ export default async function handler(req, res) {
       convId = convIns.id;
     }
 
-    // C) Charger config user (override) + context
+    // C) Config user (override) + context
     let userSystemPrompt = "";
     let context = {};
 
@@ -419,16 +445,14 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     if (cfgErr) throw new Error(`Supabase client_agent_configs select error: ${cfgErr.message}`);
-
     if (cfgRow?.system_prompt) userSystemPrompt = cfgRow.system_prompt;
     if (cfgRow?.context && typeof cfgRow.context === "object") context = cfgRow.context;
 
+    // ✅ Global + default agent + user override
+    const baseSystemPrompt = await loadBaseSystemPrompt(supabase);
     const defaultAgentPrompt = safeStr(agentRow?.default_system_prompt).trim();
 
-    // Prompt global
-    const baseSystemPrompt = await loadBaseSystemPrompt(supabase);
-
-    // D) Historique (dernier 20)
+    // D) Historique (limite 20)
     const { data: histRows, error: histErr } = await supabase
       .from("messages")
       .select("role, content")
@@ -450,10 +474,9 @@ export default async function handler(req, res) {
       role: "user",
       content: message,
     });
-
     if (insUserErr) throw new Error(`Supabase insert user message error: ${insUserErr.message}`);
 
-    // F) Sources
+    // F) Sources CSV
     const sourcesBlock = await buildSourcesContext({
       supabase,
       context,
@@ -466,23 +489,34 @@ export default async function handler(req, res) {
       .join("\n\n")
       .trim();
 
-    // G) Appel Mistral
-    const reply = await callMistral({
-      systemPrompt: finalSystemPrompt,
-      history,
-      userMessage: message,
-    });
+    // G) Mistral
+    let reply = "";
+    try {
+      reply = await callMistral({
+        systemPrompt: finalSystemPrompt,
+        history,
+        userMessage: message,
+      });
+    } catch (err) {
+      // ✅ Si 429 persiste -> on renvoie un message "fonctionnel" au lieu de casser l'UI
+      if (err?.code === "MISTRAL_HTTP" && err?.status === 429) {
+        reply =
+          "Le service IA est temporairement saturé (limite de requêtes). " +
+          "Réessaie dans 30 secondes. Si ça arrive souvent, on devra réduire les appels en rafale (debounce UI) ou augmenter le quota Mistral.";
+      } else {
+        throw err;
+      }
+    }
 
-    // H) Insert assistant
+    // H) Insert assistant (meme si c'est un message de saturation)
     const { error: insAsstErr } = await supabase.from("messages").insert({
       conversation_id: convId,
       role: "assistant",
       content: reply,
     });
-
     if (insAsstErr) throw new Error(`Supabase insert assistant message error: ${insAsstErr.message}`);
 
-    return json(res, 200, { ok: true, conversationId: convId, reply });
+    return json(res, 200, { ok: true, conversationId: convId, reply, buildTag: BUILD_TAG });
   } catch (err) {
     console.error("/api/chat error:", err);
     return json(res, 500, {
