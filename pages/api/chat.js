@@ -14,6 +14,10 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 
+function safeStr(v) {
+  return (v ?? "").toString();
+}
+
 function json(res, status, body) {
   res.status(status).setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
@@ -325,6 +329,23 @@ async function callMistral({ systemPrompt, history, userMessage }) {
   return reply;
 }
 
+async function loadBaseSystemPrompt(supabase) {
+  // Prompt global appliqué à TOUS les agents.
+  // Géré via /admin/settings (table app_settings, key=base_system_prompt)
+  try {
+    const { data, error } = await supabase
+      .from("app_settings")
+      .select("value")
+      .eq("key", "base_system_prompt")
+      .maybeSingle();
+
+    if (error) return "";
+    return safeStr(data?.value).trim();
+  } catch {
+    return "";
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -432,6 +453,9 @@ export default async function handler(req, res) {
     if (cfgRow?.system_prompt) systemPrompt = cfgRow.system_prompt;
     if (cfgRow?.context && typeof cfgRow.context === "object") context = cfgRow.context;
 
+    // Prompt global (applique a tous les agents)
+    const baseSystemPrompt = await loadBaseSystemPrompt(supabase);
+
     // D) Historique (dernier 20 messages user/assistant)
     const { data: histRows, error: histErr } = await supabase
       .from("messages")
@@ -464,7 +488,10 @@ export default async function handler(req, res) {
       userMessage: message,
     });
 
-    const finalSystemPrompt = `${systemPrompt || ""}${sourcesBlock || ""}`.trim();
+    const finalSystemPrompt = [baseSystemPrompt, systemPrompt, sourcesBlock]
+      .filter((x) => safeStr(x).trim().length > 0)
+      .join("\n\n")
+      .trim();
 
     // G) Appel Mistral
     const reply = await callMistral({
