@@ -15,12 +15,13 @@ function json(res, status, body) {
 }
 
 function normalizeText(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/[\u2019']/g, "'")
-    .replace(/[^a-z0-9àâäéèêëïîôöùûüç@._\\- ]+/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+return String(s || "")
+  .toLowerCase()
+  .replace(/[\u2019']/g, "'")
+  .replace(/[^a-z0-9àâäéèêëïîôöùûüç@._ \-]+/gi, " ")
+  .replace(/\s+/g, " ")
+  .trim();
+
 }
 
 function pickDelimiter(sampleLine) {
