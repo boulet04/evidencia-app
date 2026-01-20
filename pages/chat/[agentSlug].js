@@ -1,3 +1,5 @@
+// pages/chat/[agentSlug].js
+import Head from "next/head";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import { createClient } from "@supabase/supabase-js";
@@ -12,9 +14,49 @@ function formatTitleFallback(agentName) {
   return `Discussion avec ${agentName}`;
 }
 
-function defaultWelcome(agentName) {
-  // Tu peux ajuster le wording ici si tu veux une variante par agent
-  return "Bonjour, comment puis-je vous aider?";
+function defaultWelcome() {
+  return "Bonjour, comment puis-je vous aider ?";
+}
+
+function MicIcon({ size = 20 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M19 11a7 7 0 0 1-14 0"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12 18v3"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 21h8"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 export default function ChatAgentPage() {
@@ -36,6 +78,11 @@ export default function ChatAgentPage() {
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [creatingConv, setCreatingConv] = useState(false);
   const [sending, setSending] = useState(false);
+
+  // Voice dictation
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef(null);
+  const finalTranscriptRef = useRef("");
 
   const messagesEndRef = useRef(null);
 
@@ -59,6 +106,46 @@ export default function ChatAgentPage() {
       mounted = false;
       sub?.subscription?.unsubscribe?.();
     };
+  }, []);
+
+  // Init SpeechRecognition (Chrome/Edge)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      recognitionRef.current = null;
+      return;
+    }
+
+    const rec = new SR();
+    rec.lang = "fr-FR";
+    rec.continuous = true;
+    rec.interimResults = true;
+
+    rec.onresult = (event) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const t = event.results[i][0]?.transcript || "";
+        if (event.results[i].isFinal) {
+          finalTranscriptRef.current += t;
+        } else {
+          interim += t;
+        }
+      }
+      const combined = (finalTranscriptRef.current + " " + interim).trim();
+      setInput(combined);
+    };
+
+    rec.onerror = () => {
+      setIsListening(false);
+    };
+
+    rec.onend = () => {
+      setIsListening(false);
+    };
+
+    recognitionRef.current = rec;
   }, []);
 
   // Load agent meta
@@ -91,13 +178,11 @@ export default function ChatAgentPage() {
         .order("created_at", { ascending: false });
 
       setLoadingConvs(false);
-
       if (error) return;
 
       const list = data || [];
       setConversations(list);
 
-      // Select the most recent if none selected
       if (!selectedConversationId && list.length > 0) {
         setSelectedConversationId(list[0].id);
       }
@@ -154,8 +239,7 @@ export default function ChatAgentPage() {
 
       if (convErr) throw convErr;
 
-      // Insert welcome assistant message immediately
-      const welcomeText = defaultWelcome(agent?.name);
+      const welcomeText = defaultWelcome();
 
       const { error: msgErr } = await supabase.from("messages").insert({
         conversation_id: conv.id,
@@ -164,11 +248,9 @@ export default function ChatAgentPage() {
       });
 
       if (msgErr) {
-        // Non-blocking: we still show UI fallback welcome if needed
         console.warn("Welcome message insert failed:", msgErr.message);
       }
 
-      // Update state
       setConversations((prev) => [conv, ...prev]);
       setSelectedConversationId(conv.id);
     } catch (e) {
@@ -191,9 +273,7 @@ export default function ChatAgentPage() {
     try {
       const resp = await fetch(`/api/conversations/${conversationId}`, {
         method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
 
       if (!resp.ok && resp.status !== 204) {
@@ -204,7 +284,6 @@ export default function ChatAgentPage() {
       setConversations((prev) => prev.filter((c) => c.id !== conversationId));
 
       if (selectedConversationId === conversationId) {
-        // pick next or empty
         const remaining = conversations.filter((c) => c.id !== conversationId);
         setSelectedConversationId(remaining[0]?.id || null);
       }
@@ -223,7 +302,7 @@ export default function ChatAgentPage() {
       setSending(true);
       setInput("");
 
-      // Insert user message
+      // Insert user message (client-side)
       const { data: userMsg, error: userMsgErr } = await supabase
         .from("messages")
         .insert({
@@ -235,11 +314,9 @@ export default function ChatAgentPage() {
         .single();
 
       if (userMsgErr) throw userMsgErr;
-
       setMessages((prev) => [...prev, userMsg]);
 
-      // Call your existing chat endpoint (adapt path if yours differs)
-      // Expected: { reply: "..." } (or adapt below)
+      // Call API (server will include prompt général + prompt agent)
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: {
@@ -247,7 +324,10 @@ export default function ChatAgentPage() {
           ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         },
         body: JSON.stringify({
+          // send both naming styles to be safe
+          conversationId: selectedConversationId,
           conversation_id: selectedConversationId,
+          agentSlug: agentSlug,
           agent_slug: agentSlug,
           message: content,
         }),
@@ -262,6 +342,7 @@ export default function ChatAgentPage() {
       const assistantText = data?.reply || data?.content || "";
 
       if (assistantText) {
+        // Insert assistant message (client-side)
         const { data: asstMsg, error: asstErr } = await supabase
           .from("messages")
           .insert({
@@ -288,6 +369,30 @@ export default function ChatAgentPage() {
     setSelectedConversationId(id);
   }
 
+  function toggleDictation() {
+    const rec = recognitionRef.current;
+    if (!rec) {
+      alert("Dictée vocale indisponible sur ce navigateur (SpeechRecognition). Utilise Chrome/Edge.");
+      return;
+    }
+
+    if (isListening) {
+      try {
+        rec.stop();
+      } catch {}
+      setIsListening(false);
+      return;
+    }
+
+    finalTranscriptRef.current = input ? input + " " : "";
+    try {
+      rec.start();
+      setIsListening(true);
+    } catch {
+      setIsListening(false);
+    }
+  }
+
   const selectedConversation = useMemo(() => {
     return conversations.find((c) => c.id === selectedConversationId) || null;
   }, [conversations, selectedConversationId]);
@@ -297,9 +402,13 @@ export default function ChatAgentPage() {
 
   return (
     <div className="page">
+      <Head>
+        <link rel="stylesheet" href="/brand.css" />
+      </Head>
+
       <div className="topbar">
         <button className="btn back" onClick={() => router.push("/agents")}>
-          ← Retour
+          ← Retour aux agents
         </button>
 
         <div className="brand">
@@ -351,7 +460,6 @@ export default function ChatAgentPage() {
                         {c.title || "Conversation"}
                       </div>
 
-                      {/* Red X delete button */}
                       <button
                         className="convDelete"
                         title="Supprimer la conversation"
@@ -398,12 +506,9 @@ export default function ChatAgentPage() {
                 <div className="muted">Chargement des messages...</div>
               ) : (
                 <>
-                  {/* Welcome fallback if no messages */}
                   {showWelcomeFallback && (
                     <div className="msgRow assistant">
-                      <div className="msgBubble">
-                        {defaultWelcome(agent?.name)}
-                      </div>
+                      <div className="msgBubble">{defaultWelcome()}</div>
                     </div>
                   )}
 
@@ -433,14 +538,16 @@ export default function ChatAgentPage() {
                 disabled={!selectedConversationId || sending}
               />
 
-              {/* Si tu as déjà ton bouton micro, garde-le : ici placeholder */}
+              {/* Bouton micro (SVG) entre input et envoyer */}
               <button
-                className="btn mic"
+                className={`btn mic ${isListening ? "listening" : ""}`}
                 type="button"
-                title="Dictée vocale (à connecter)"
-                onClick={() => alert("Dictée vocale: à connecter à ton module voix.")}
+                title={isListening ? "Arrêter la dictée" : "Dicter un message"}
+                aria-pressed={isListening}
+                onClick={toggleDictation}
+                disabled={!selectedConversationId || sending}
               >
-                🎙
+                <MicIcon size={20} />
               </button>
 
               <button
@@ -461,12 +568,11 @@ export default function ChatAgentPage() {
         </main>
       </div>
 
-      {/* Minimal styles (tu peux les basculer dans ton CSS global si tu préfères) */}
       <style jsx>{`
         .page {
           min-height: 100vh;
-          background: #050608;
-          color: #e9eef6;
+          background: var(--evi-bg-0);
+          color: var(--evi-text);
         }
 
         .topbar {
@@ -476,17 +582,21 @@ export default function ChatAgentPage() {
           justify-content: space-between;
           padding: 0 16px;
           border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-          background: radial-gradient(1200px 200px at 50% -20%, rgba(255, 130, 30, 0.18), transparent);
+          background: radial-gradient(
+            1200px 200px at 50% -20%,
+            rgba(255, 122, 0, 0.18),
+            transparent
+          );
         }
 
         .btn {
           border: 1px solid rgba(255, 255, 255, 0.14);
           background: rgba(255, 255, 255, 0.04);
-          color: #e9eef6;
+          color: var(--evi-text);
           padding: 10px 12px;
           border-radius: 14px;
           cursor: pointer;
-          font-weight: 600;
+          font-weight: 700;
         }
 
         .btn:disabled {
@@ -508,7 +618,7 @@ export default function ChatAgentPage() {
 
         .brandTitle {
           font-size: 20px;
-          font-weight: 800;
+          font-weight: 900;
           letter-spacing: 0.6px;
         }
 
@@ -534,9 +644,9 @@ export default function ChatAgentPage() {
         }
 
         .sidebar {
-          border: 1px solid rgba(255, 255, 255, 0.08);
+          border: 1px solid var(--evi-border);
           border-radius: 18px;
-          background: rgba(255, 255, 255, 0.02);
+          background: var(--evi-bg-1);
           overflow: hidden;
           min-height: calc(100vh - 96px);
         }
@@ -551,7 +661,7 @@ export default function ChatAgentPage() {
 
         .sidebarTitle {
           font-size: 16px;
-          font-weight: 800;
+          font-weight: 900;
         }
 
         .sidebarBody {
@@ -559,13 +669,13 @@ export default function ChatAgentPage() {
         }
 
         .muted {
-          color: rgba(233, 238, 246, 0.65);
+          color: var(--evi-text-muted);
           font-size: 14px;
           padding: 8px;
         }
 
         .mutedSmall {
-          color: rgba(233, 238, 246, 0.55);
+          color: var(--evi-text-muted-2);
           font-size: 12px;
         }
 
@@ -590,13 +700,14 @@ export default function ChatAgentPage() {
           background: rgba(255, 255, 255, 0.04);
         }
 
+        /* ORANGE PLUS VIF */
         .convItem.active {
-          border-color: rgba(255, 130, 30, 0.35);
-          background: rgba(255, 130, 30, 0.07);
+          border-color: var(--evi-accent-2);
+          background: rgba(255, 122, 0, 0.10);
         }
 
         .convTitle {
-          font-weight: 700;
+          font-weight: 800;
           font-size: 14px;
           white-space: nowrap;
           overflow: hidden;
@@ -625,9 +736,9 @@ export default function ChatAgentPage() {
         }
 
         .main {
-          border: 1px solid rgba(255, 255, 255, 0.08);
+          border: 1px solid var(--evi-border);
           border-radius: 18px;
-          background: rgba(255, 255, 255, 0.02);
+          background: var(--evi-bg-1);
           min-height: calc(100vh - 96px);
           display: flex;
           flex-direction: column;
@@ -660,10 +771,12 @@ export default function ChatAgentPage() {
           justify-content: center;
         }
 
+        /* RECADRAGE (tête visible) */
         .agentAvatar img {
           width: 100%;
           height: 100%;
           object-fit: cover;
+          object-position: center 20%;
         }
 
         .avatarFallback {
@@ -677,7 +790,7 @@ export default function ChatAgentPage() {
 
         .agentRole {
           font-size: 12px;
-          color: rgba(233, 238, 246, 0.65);
+          color: var(--evi-text-muted);
           margin-top: 2px;
         }
 
@@ -717,9 +830,10 @@ export default function ChatAgentPage() {
           white-space: pre-wrap;
         }
 
+        /* ORANGE PLUS VIF pour bulles user */
         .msgRow.user .msgBubble {
-          border-color: rgba(255, 130, 30, 0.25);
-          background: rgba(255, 130, 30, 0.08);
+          border-color: var(--evi-accent-2);
+          background: var(--evi-accent-bubble);
         }
 
         .chatInput {
@@ -736,14 +850,24 @@ export default function ChatAgentPage() {
           border-radius: 16px;
           border: 1px solid rgba(255, 255, 255, 0.10);
           background: rgba(0, 0, 0, 0.25);
-          color: #e9eef6;
+          color: var(--evi-text);
           padding: 0 14px;
           outline: none;
         }
 
+        .input:focus {
+          box-shadow: var(--evi-focus);
+          border-color: rgba(255, 122, 0, 0.30);
+        }
+
+        /* ORANGE PLUS VIF bouton envoyer */
         .btn.send {
-          border-color: rgba(255, 130, 30, 0.35);
-          background: rgba(255, 130, 30, 0.12);
+          border-color: var(--evi-accent-2);
+          background: var(--evi-accent-bg);
+        }
+
+        .btn.send:hover:not(:disabled) {
+          background: rgba(255, 122, 0, 0.18);
         }
 
         .btn.mic {
@@ -752,6 +876,12 @@ export default function ChatAgentPage() {
           display: flex;
           align-items: center;
           justify-content: center;
+          padding: 0;
+        }
+
+        .btn.mic.listening {
+          border-color: var(--evi-accent-2);
+          background: rgba(255, 122, 0, 0.18);
         }
 
         .chatFooter {
