@@ -38,6 +38,76 @@ export default function ChatAgentPage() {
   const [sending, setSending] = useState(false);
 
   const messagesEndRef = useRef(null);
+    // --- Micro (dictée vocale) ---
+  const inputRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+
+    setSpeechSupported(true);
+
+    const rec = new SR();
+    rec.lang = "fr-FR";
+    rec.continuous = false;
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+
+    rec.onresult = (e) => {
+      try {
+        const t = e?.results?.[0]?.[0]?.transcript || "";
+        const chunk = String(t || "").trim();
+        if (!chunk) return;
+
+        setInput((prev) => (prev ? `${prev} ${chunk}` : chunk));
+
+        // remet le focus dans le champ
+        setTimeout(() => inputRef.current?.focus?.(), 0);
+      } catch (_) {}
+    };
+
+    rec.onend = () => setIsRecording(false);
+    rec.onerror = () => setIsRecording(false);
+
+    recognitionRef.current = rec;
+
+    return () => {
+      try {
+        rec.abort();
+      } catch (_) {}
+      recognitionRef.current = null;
+    };
+  }, []);
+
+  function toggleDictation() {
+    if (!speechSupported) {
+      alert("Dictée vocale non supportée sur ce navigateur.");
+      return;
+    }
+    if (!recognitionRef.current) return;
+
+    if (isRecording) {
+      try {
+        recognitionRef.current.stop();
+      } catch (_) {}
+      setIsRecording(false);
+      return;
+    }
+
+    try {
+      recognitionRef.current.start();
+      setIsRecording(true);
+    } catch (_) {
+      // certains navigateurs lèvent si start() est appelé 2x trop vite
+      setIsRecording(false);
+    }
+  }
+
 
   const accessToken = useMemo(() => session?.access_token || null, [session]);
 
