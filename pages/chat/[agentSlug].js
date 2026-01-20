@@ -13,176 +13,188 @@ function formatTitleFallback(agentName) {
 }
 
 function defaultWelcome(agentName) {
-  if (!agentName) return "Bonjour, comment puis-je vous aider aujourd'hui ?";
-  return `Bonjour, je suis ${agentName}. Comment puis-je vous aider aujourd'hui ?`;
+  // Tu peux ajuster le wording ici si tu veux une variante par agent
+  return "Bonjour, comment puis-je vous aider?";
 }
 
-export default function ChatAgentSlug() {
+export default function ChatAgentPage() {
   const router = useRouter();
   const { agentSlug } = router.query;
 
+  const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
 
   const [agent, setAgent] = useState(null);
-  const [loadingAgent, setLoadingAgent] = useState(true);
 
   const [conversations, setConversations] = useState([]);
-  const [loadingConvs, setLoadingConvs] = useState(true);
-  const [creatingConv, setCreatingConv] = useState(false);
-
-  const [selectedConversationId, setSelectedConversationId] = useState("");
-  const selectedConversation = useMemo(
-    () => conversations.find((c) => c.id === selectedConversationId),
-    [conversations, selectedConversationId]
-  );
+  const [selectedConversationId, setSelectedConversationId] = useState(null);
 
   const [messages, setMessages] = useState([]);
-  const [loadingMsgs, setLoadingMsgs] = useState(false);
-
   const [input, setInput] = useState("");
+
+  const [loadingConvs, setLoadingConvs] = useState(false);
+  const [loadingMsgs, setLoadingMsgs] = useState(false);
+  const [creatingConv, setCreatingConv] = useState(false);
   const [sending, setSending] = useState(false);
 
   const messagesEndRef = useRef(null);
 
-  // Auth
+  const [err, setErr] = useState("");
+
+  const baseSystemPrompt = useMemo(() => {
+    // Le prompt global est géré côté API (/api/chat.js)
+    return "";
+  }, []);
+
+  // Session
   useEffect(() => {
-    let mounted = true;
-
-    async function loadUser() {
+    (async () => {
       const { data } = await supabase.auth.getSession();
-      const u = data?.session?.user || null;
-      if (!mounted) return;
-      setUser(u);
-      if (!u) router.push("/login");
-    }
+      const s = data?.session || null;
+      setSession(s);
+      setUser(s?.user || null);
+      if (!s?.user) {
+        router.push("/login");
+      }
+    })();
 
-    loadUser();
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!mounted) return;
-      setUser(session?.user || null);
-      if (!session?.user) router.push("/login");
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => {
+      setSession(s);
+      setUser(s?.user || null);
+      if (!s?.user) router.push("/login");
     });
 
     return () => {
-      mounted = false;
       sub?.subscription?.unsubscribe?.();
     };
   }, [router]);
 
   // Load agent by slug
   useEffect(() => {
-    async function loadAgent() {
-      if (!agentSlug || typeof agentSlug !== "string") return;
-      setLoadingAgent(true);
-      try {
-        const { data, error } = await supabase
-          .from("agents")
-          .select("*")
-          .eq("slug", agentSlug)
-          .maybeSingle();
+    if (!agentSlug || typeof agentSlug !== "string") return;
 
-        if (error) throw error;
-        setAgent(data || null);
-      } catch (e) {
-        console.error(e);
+    (async () => {
+      setErr("");
+      const { data, error } = await supabase
+        .from("agents")
+        .select("id,slug,name,role,avatar_url,description")
+        .eq("slug", agentSlug)
+        .maybeSingle();
+
+      if (error) {
+        setErr(error.message || "Erreur chargement agent");
         setAgent(null);
-      } finally {
-        setLoadingAgent(false);
+        return;
       }
-    }
-    loadAgent();
+      setAgent(data || null);
+    })();
   }, [agentSlug]);
 
-  // Load conversations for user + agent_slug
+  // Load conversations for this user + agentSlug
   useEffect(() => {
-    async function loadConversations() {
-      if (!user?.id) return;
-      if (!agentSlug || typeof agentSlug !== "string") return;
+    if (!user?.id) return;
+    if (!agentSlug || typeof agentSlug !== "string") return;
 
+    (async () => {
       setLoadingConvs(true);
-      try {
-        const { data, error } = await supabase
-          .from("conversations")
-          .select("*")
-          .eq("user_id", user.id)
-          .eq("agent_slug", agentSlug)
-          .order("created_at", { ascending: false });
+      setErr("");
 
-        if (error) throw error;
-        setConversations(data || []);
+      const { data, error } = await supabase
+        .from("conversations")
+        .select("id,title,created_at,archived")
+        .eq("user_id", user.id)
+        .eq("agent_slug", agentSlug)
+        .order("created_at", { ascending: false });
 
-        // auto-select first conversation
-        if ((data || []).length > 0 && !selectedConversationId) {
-          setSelectedConversationId(data[0].id);
-        }
-      } catch (e) {
-        console.error(e);
+      setLoadingConvs(false);
+
+      if (error) {
+        setErr(error.message || "Erreur chargement conversations");
         setConversations([]);
-      } finally {
-        setLoadingConvs(false);
+        setSelectedConversationId(null);
+        return;
       }
-    }
 
-    loadConversations();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      const rows = data || [];
+      setConversations(rows);
+
+      // Auto-select latest non-archived or first
+      const first = rows.find((r) => !r.archived) || rows[0] || null;
+      setSelectedConversationId(first?.id || null);
+    })();
   }, [user?.id, agentSlug]);
 
   // Load messages for selected conversation
   useEffect(() => {
-    async function loadMessages() {
-      if (!selectedConversationId) {
+    if (!selectedConversationId) {
+      setMessages([]);
+      return;
+    }
+
+    (async () => {
+      setLoadingMsgs(true);
+      const { data, error } = await supabase
+        .from("messages")
+        .select("id,role,content,created_at")
+        .eq("conversation_id", selectedConversationId)
+        .order("created_at", { ascending: true });
+
+      setLoadingMsgs(false);
+
+      if (error) {
+        setErr(error.message || "Erreur chargement messages");
         setMessages([]);
         return;
       }
-      setLoadingMsgs(true);
-      try {
-        const { data, error } = await supabase
-          .from("messages")
-          .select("*")
-          .eq("conversation_id", selectedConversationId)
-          .order("created_at", { ascending: true });
-
-        if (error) throw error;
-        setMessages(data || []);
-      } catch (e) {
-        console.error(e);
-        setMessages([]);
-      } finally {
-        setLoadingMsgs(false);
-      }
-    }
-    loadMessages();
+      setMessages(data || []);
+    })();
   }, [selectedConversationId]);
 
-  // Auto scroll
+  // Scroll to bottom
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loadingMsgs]);
+    if (!messagesEndRef.current) return;
+    messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+  }, [messages?.length, loadingMsgs]);
 
-  async function handleNewConversation() {
+  function logout() {
+    supabase.auth.signOut();
+    router.push("/login");
+  }
+
+  async function createConversation() {
     if (!user?.id) return;
     if (!agentSlug || typeof agentSlug !== "string") return;
 
-    try {
-      setCreatingConv(true);
+    setCreatingConv(true);
+    setErr("");
 
-      const title = formatTitleFallback(agent?.name);
-      const { data, error } = await supabase
-        .from("conversations")
-        .insert([
-          {
-            user_id: user.id,
-            agent_slug: agentSlug,
-            title,
-          },
-        ])
-        .select("*")
-        .single();
+    const title = formatTitleFallback(agent?.name);
 
-      if (error) throw error;
+    const { data, error } = await supabase
+      .from("conversations")
+      .insert([
+        {
+          user_id: user.id,
+          agent_slug: agentSlug,
+          title,
+          archived: false,
+        },
+      ])
+      .select("id,title,created_at,archived")
+      .maybeSingle();
 
-      // Ensure welcome message exists
-      const welcome = agent?.welcome_message || defaultWelcome(agent?.name);
+    setCreatingConv(false);
+
+    if (error) {
+      setErr(error.message || "Erreur création conversation");
+      return;
+    }
+
+    // add welcome message locally (optional)
+    const welcome = defaultWelcome(agent?.name);
+
+    if (data?.id) {
+      // persist welcome as assistant message
       await supabase.from("messages").insert([
         {
           conversation_id: data.id,
@@ -190,129 +202,143 @@ export default function ChatAgentSlug() {
           content: welcome,
         },
       ]);
-
-      // refresh
-      setConversations((prev) => [data, ...prev]);
-      setSelectedConversationId(data.id);
-    } catch (e) {
-      console.error(e);
-      alert("Erreur lors de la création de la conversation.");
-    } finally {
-      setCreatingConv(false);
     }
+
+    // Refresh conversations list
+    const { data: convs } = await supabase
+      .from("conversations")
+      .select("id,title,created_at,archived")
+      .eq("user_id", user.id)
+      .eq("agent_slug", agentSlug)
+      .order("created_at", { ascending: false });
+
+    const rows = convs || [];
+    setConversations(rows);
+    setSelectedConversationId(data?.id || rows[0]?.id || null);
   }
 
-  async function handleDeleteConversation(convId) {
-    if (!convId) return;
-    if (!confirm("Supprimer cette conversation ?")) return;
-
-    try {
-      // delete messages first
-      await supabase.from("messages").delete().eq("conversation_id", convId);
-      // then conversation
-      const { error } = await supabase.from("conversations").delete().eq("id", convId);
-      if (error) throw error;
-
-      setConversations((prev) => prev.filter((c) => c.id !== convId));
-      if (selectedConversationId === convId) {
-        setSelectedConversationId("");
-        setMessages([]);
-      }
-    } catch (e) {
-      console.error(e);
-      alert("Erreur lors de la suppression.");
-    }
+  async function selectConversation(id) {
+    setSelectedConversationId(id);
   }
 
-  async function handleSend() {
-    const text = (input || "").trim();
+  async function sendMessage() {
+    if (!user?.id) return;
+    if (!selectedConversationId) {
+      // no conversation selected => create one
+      await createConversation();
+      return;
+    }
+
+    const text = String(input || "").trim();
     if (!text) return;
-    if (!selectedConversationId) return;
 
     setSending(true);
+    setErr("");
+
+    // Insert user message in db
+    const { error: msgErr } = await supabase.from("messages").insert([
+      {
+        conversation_id: selectedConversationId,
+        role: "user",
+        content: text,
+      },
+    ]);
+
+    if (msgErr) {
+      setSending(false);
+      setErr(msgErr.message || "Erreur envoi message");
+      return;
+    }
+
+    // Optimistic UI: append
+    setMessages((prev) => [
+      ...(prev || []),
+      {
+        id: `tmp-${Date.now()}`,
+        role: "user",
+        content: text,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    setInput("");
+
+    // Call API (uses global prompt + personal prompt in DB)
     try {
-      // Insert user message
-      const { data: msgData, error: msgErr } = await supabase
-        .from("messages")
-        .insert([
-          {
-            conversation_id: selectedConversationId,
-            role: "user",
-            content: text,
-          },
-        ])
-        .select("*")
-        .single();
-
-      if (msgErr) throw msgErr;
-      setMessages((prev) => [...prev, msgData]);
-      setInput("");
-
-      // Call API
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          conversationId: selectedConversationId,
           agentSlug,
+          conversationId: selectedConversationId,
           message: text,
         }),
       });
 
       const json = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        const msg = json?.error || "Erreur interne API";
-        throw new Error(msg);
+        throw new Error(json?.error || `Erreur API (${res.status})`);
       }
 
       const reply = json?.reply || "";
-      if (!reply) return;
-
-      // Insert assistant reply
-      const { data: asData, error: asErr } = await supabase
-        .from("messages")
-        .insert([
+      if (reply) {
+        // Insert assistant message
+        const { error: insErr } = await supabase.from("messages").insert([
           {
             conversation_id: selectedConversationId,
             role: "assistant",
             content: reply,
           },
-        ])
-        .select("*")
-        .single();
+        ]);
 
-      if (asErr) throw asErr;
-      setMessages((prev) => [...prev, asData]);
+        if (insErr) {
+          setErr(insErr.message || "Erreur sauvegarde réponse");
+        }
+
+        setMessages((prev) => [
+          ...(prev || []),
+          {
+            id: `tmp-a-${Date.now()}`,
+            role: "assistant",
+            content: reply,
+            created_at: new Date().toISOString(),
+          },
+        ]);
+      }
     } catch (e) {
-      console.error(e);
-      alert(e?.message || "Erreur interne API");
+      setErr(e?.message || "Erreur interne API");
     } finally {
       setSending(false);
     }
   }
 
-  const title = agent?.name ? `${agent.name} — Chat` : "Chat";
+  function onKeyDown(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (!sending) sendMessage();
+    }
+  }
 
   return (
     <div className="page">
       <div className="topbar">
-        <button className="btn back" onClick={() => router.push("/agents")}>
-          ← Retour
-        </button>
-
         <div className="brand">
-          <div className="brandTitle">Evidenc’IA</div>
-        </div>
-
-        <div className="topbarRight">
-          <div className="pill">{user?.email || "—"}</div>
           <button
-            className="btn logout"
-            onClick={async () => {
-              await supabase.auth.signOut();
-              router.push("/login");
-            }}
+            className="btn back"
+            type="button"
+            onClick={() => router.push("/agents")}
           >
+            ← Retour aux agents
+          </button>
+          <div className="agentMeta">
+            <div className="agentName">{agent?.name || agentSlug}</div>
+            <div className="agentRole mutedSmall">{agent?.role || ""}</div>
+          </div>
+        </div>
+        <div className="actions">
+          <div className="userEmail mutedSmall">{user?.email || ""}</div>
+          <button className="btn logout" type="button" onClick={logout}>
             Déconnexion
           </button>
         </div>
@@ -320,124 +346,140 @@ export default function ChatAgentSlug() {
 
       <div className="layout">
         <aside className="sidebar">
-          <div className="sidebarHeader">
+          <div className="sidebarTop">
             <div className="sidebarTitle">Historique</div>
-            <button className="btn small" onClick={handleNewConversation} disabled={creatingConv}>
-              {creatingConv ? "..." : "+ Nouvelle"}
+            <button
+              className="btn new"
+              type="button"
+              onClick={createConversation}
+              disabled={creatingConv}
+            >
+              + Nouvelle
             </button>
           </div>
 
-          <div className="sidebarBody">
-            {loadingConvs ? (
-              <div className="muted">Chargement…</div>
-            ) : conversations.length === 0 ? (
-              <div className="muted">Aucune conversation.</div>
-            ) : (
-              conversations.map((c) => {
+          {loadingConvs ? (
+            <div className="muted">Chargement…</div>
+          ) : (
+            <div className="convList">
+              {conversations.map((c) => {
                 const active = c.id === selectedConversationId;
                 return (
-                  <div
+                  <button
                     key={c.id}
                     className={`convItem ${active ? "active" : ""}`}
-                    onClick={() => setSelectedConversationId(c.id)}
+                    type="button"
+                    onClick={() => selectConversation(c.id)}
                   >
-                    <div className="convTitle">{c.title || "Conversation"}</div>
-                    <div className="convMeta">
-                      {(c.created_at || "").slice(0, 10)} {(c.created_at || "").slice(11, 19)}
+                    <div className="convTitle">
+                      {c.title || "Conversation"}
                     </div>
-                    <button
-                      className="convDelete"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteConversation(c.id);
-                      }}
-                      title="Supprimer"
-                    >
-                      ×
-                    </button>
-                  </div>
+                    <div className="convDate mutedSmall">
+                      {new Date(c.created_at).toLocaleString()}
+                    </div>
+                  </button>
                 );
-              })
-            )}
-          </div>
+              })}
+              {conversations.length === 0 && (
+                <div className="muted">Aucune conversation</div>
+              )}
+            </div>
+          )}
         </aside>
 
         <main className="main">
-          <div className="chatHeader">
-            <div className="chatTitle">{loadingAgent ? "…" : title}</div>
-            <div className="chatSub">{agent?.tagline || "—"}</div>
-          </div>
+          <div className="chat">
+            <div className="chatBody">
+              {loadingMsgs ? (
+                <div className="muted">Chargement…</div>
+              ) : (
+                <>
+                  {messages.map((m, idx) => (
+                    <div
+                      key={m.id || idx}
+                      className={`msgRow ${m.role === "user" ? "me" : "ai"}`}
+                    >
+                      {m.role !== "user" && (
+                        <div className="avatar">
+                          {agent?.avatar_url ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={agent.avatar_url} alt="avatar" />
+                          ) : (
+                            <div className="avatarFallback">
+                              {(agent?.name || "A")[0]}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
-          <div className="chatBody">
-            {loadingMsgs ? (
-              <div className="muted">Chargement des messages…</div>
-            ) : messages.length === 0 ? (
-              <div className="muted">Aucun message.</div>
-            ) : (
-              messages.map((m) => (
-                <div key={m.id} className={`msgRow ${m.role === "user" ? "user" : "assistant"}`}>
-                  <div className="msgBubble">{m.content}</div>
-                </div>
-              ))
-            )}
+                      <div className="bubble">
+                        <div className="bubbleText">{m.content}</div>
+                      </div>
+                    </div>
+                  ))}
+                  <div ref={messagesEndRef} />
+                </>
+              )}
+            </div>
 
-            <div ref={messagesEndRef} />
-          </div>
+            {err && <div className="error">{err}</div>}
 
-          <div className="chatInputWrap">
-            <div className="chatInput">
-              <input
+            <div className="chatFooter">
+              <textarea
                 className="input"
                 placeholder="Écrire…"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-                disabled={!selectedConversationId || sending}
+                onKeyDown={onKeyDown}
+                rows={1}
               />
 
-              {/* Bouton micro (dictée vocale) */}
+              {/* Micro: icône SVG propre (design) - le click reste un placeholder */}
               <button
                 className="btn mic"
                 type="button"
-                aria-label="Micro"
-                title="Dictée vocale (à connecter)"
-                onClick={() => alert("Dictée vocale: à connecter à ton module voix.")}
+                aria-label="Dictée vocale"
+                title="Dictée vocale"
+                onClick={() =>
+                  alert(
+                    "Dictée vocale: à connecter à ton modèle (SpeechRecognition)"
+                  )
+                }
               >
-                <svg className="micIcon" viewBox="0 0 24 24" aria-hidden="true">
+                <svg
+                  className="micIcon"
+                  viewBox="0 0 24 24"
+                  width="20"
+                  height="20"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                  aria-hidden="true"
+                >
                   <path
-                    d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"
-                    fill="none"
+                    d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z"
                     stroke="currentColor"
-                    strokeWidth="2"
+                    strokeWidth="1.8"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
                   <path
                     d="M19 11a7 7 0 0 1-14 0"
-                    fill="none"
                     stroke="currentColor"
-                    strokeWidth="2"
+                    strokeWidth="1.8"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
                   <path
                     d="M12 18v3"
-                    fill="none"
                     stroke="currentColor"
-                    strokeWidth="2"
+                    strokeWidth="1.8"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
                   <path
                     d="M8 21h8"
-                    fill="none"
                     stroke="currentColor"
-                    strokeWidth="2"
+                    strokeWidth="1.8"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
@@ -446,23 +488,17 @@ export default function ChatAgentSlug() {
 
               <button
                 className="btn send"
-                onClick={handleSend}
-                disabled={!selectedConversationId || sending}
+                type="button"
+                onClick={sendMessage}
+                disabled={sending}
               >
-                {sending ? "Envoi..." : "Envoyer"}
+                Envoyer
               </button>
-            </div>
-
-            <div className="chatFooter">
-              <div className="mutedSmall">
-                {selectedConversation ? `Conversation: ${selectedConversation.id}` : ""}
-              </div>
             </div>
           </div>
         </main>
       </div>
 
-      {/* Minimal styles (tu peux les basculer dans ton CSS global si tu préfères) */}
       <style jsx>{`
         .page {
           min-height: 100vh;
@@ -484,23 +520,177 @@ export default function ChatAgentSlug() {
           );
         }
 
-        .brandTitle {
-          font-weight: 800;
-          letter-spacing: 0.2px;
+        .brand {
+          display: flex;
+          align-items: center;
+          gap: 12px;
         }
 
-        .topbarRight {
+        .agentMeta {
+          display: flex;
+          flex-direction: column;
+          line-height: 1.1;
+        }
+
+        .agentName {
+          font-weight: 800;
+        }
+
+        .actions {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .layout {
+          display: grid;
+          grid-template-columns: 320px 1fr;
+          min-height: calc(100vh - 64px);
+        }
+
+        .sidebar {
+          border-right: 1px solid rgba(255, 255, 255, 0.06);
+          padding: 14px;
+          background: rgba(255, 255, 255, 0.02);
+        }
+
+        .sidebarTop {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          margin-bottom: 12px;
+        }
+
+        .sidebarTitle {
+          font-weight: 800;
+        }
+
+        .convList {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .convItem {
+          text-align: left;
+          border-radius: 14px;
+          padding: 10px 12px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(255, 255, 255, 0.02);
+          color: inherit;
+          cursor: pointer;
+        }
+
+        .convItem.active {
+          border-color: rgba(255, 130, 30, 0.45);
+          background: rgba(255, 130, 30, 0.08);
+        }
+
+        .convTitle {
+          font-weight: 700;
+        }
+
+        .main {
+          padding: 14px;
+        }
+
+        .chat {
+          height: calc(100vh - 64px - 28px);
+          display: flex;
+          flex-direction: column;
+          border-radius: 18px;
+          border: 1px solid rgba(255, 255, 255, 0.06);
+          background: rgba(255, 255, 255, 0.02);
+          overflow: hidden;
+        }
+
+        .chatBody {
+          flex: 1;
+          overflow: auto;
+          padding: 16px;
+        }
+
+        .msgRow {
           display: flex;
           gap: 10px;
-          align-items: center;
+          margin-bottom: 12px;
+          align-items: flex-start;
         }
 
-        .pill {
-          border: 1px solid rgba(255, 255, 255, 0.12);
-          padding: 8px 10px;
-          border-radius: 999px;
-          font-size: 12px;
-          opacity: 0.9;
+        .msgRow.me {
+          justify-content: flex-end;
+        }
+
+        .avatar {
+          width: 40px;
+          height: 40px;
+          border-radius: 14px;
+          overflow: hidden;
+          flex: 0 0 auto;
+          border: 1px solid rgba(255, 255, 255, 0.10);
+          background: rgba(255, 255, 255, 0.04);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .avatar img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+
+        .avatarFallback {
+          font-weight: 900;
+          color: rgba(255, 130, 30, 0.95);
+        }
+
+        .bubble {
+          max-width: 760px;
+          border-radius: 16px;
+          border: 1px solid rgba(255, 255, 255, 0.10);
+          background: rgba(0, 0, 0, 0.25);
+          padding: 12px 14px;
+          line-height: 1.45;
+        }
+
+        .msgRow.me .bubble {
+          border-color: rgba(255, 130, 30, 0.35);
+          background: rgba(255, 130, 30, 0.12);
+        }
+
+        .bubbleText {
+          white-space: pre-wrap;
+        }
+
+        .error {
+          background: rgba(180, 20, 20, 0.35);
+          border-top: 1px solid rgba(180, 20, 20, 0.55);
+          color: #ffdede;
+          padding: 10px 14px;
+          font-weight: 700;
+        }
+
+        .chatFooter {
+          display: grid;
+          grid-template-columns: 1fr auto auto;
+          gap: 10px;
+          align-items: center;
+          padding: 10px 14px 14px;
+          border-top: 1px solid rgba(255, 255, 255, 0.06);
+          background: rgba(0, 0, 0, 0.25);
+        }
+
+        .input {
+          height: 48px;
+          resize: none;
+          border-radius: 16px;
+          border: 1px solid rgba(255, 255, 255, 0.10);
+          background: rgba(0, 0, 0, 0.25);
+          color: #e9eef6;
+          padding: 12px 14px;
+          outline: none;
         }
 
         .btn {
@@ -513,223 +703,68 @@ export default function ChatAgentSlug() {
           font-weight: 600;
         }
 
-        .btn.mic {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 10px 10px;
-        }
-
-        .micIcon {
-          width: 18px;
-          height: 18px;
-          display: block;
-        }
-
         .btn:disabled {
           opacity: 0.6;
           cursor: not-allowed;
         }
 
         .btn.logout {
-          border-radius: 999px;
+          border-color: rgba(255, 80, 80, 0.35);
         }
 
         .btn.back {
-          border-radius: 999px;
+          border-color: rgba(255, 130, 30, 0.22);
+          background: rgba(255, 130, 30, 0.08);
         }
 
-        .btn.small {
-          padding: 8px 10px;
-          border-radius: 999px;
-          font-size: 12px;
-          opacity: 0.9;
-        }
-
-        .layout {
-          display: grid;
-          grid-template-columns: 340px 1fr;
-          gap: 16px;
-          padding: 16px;
-        }
-
-        .sidebar {
-          background: rgba(255, 255, 255, 0.02);
-          border: 1px solid rgba(255, 255, 255, 0.06);
-          border-radius: 18px;
-          min-height: calc(100vh - 64px - 32px);
-          overflow: hidden;
-          display: flex;
-          flex-direction: column;
-        }
-
-        .sidebarHeader {
-          padding: 14px 14px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-        }
-
-        .sidebarTitle {
-          font-weight: 800;
-          letter-spacing: 0.2px;
-        }
-
-        .sidebarBody {
-          padding: 10px;
-          overflow: auto;
-        }
-
-        .convItem {
-          position: relative;
-          border: 1px solid rgba(255, 255, 255, 0.06);
-          background: rgba(255, 255, 255, 0.02);
-          border-radius: 16px;
-          padding: 10px 12px;
-          margin-bottom: 10px;
-          cursor: pointer;
-        }
-
-        .convItem.active {
-          border-color: rgba(255, 140, 40, 0.5);
-          background: rgba(255, 140, 40, 0.08);
-        }
-
-        .convTitle {
-          font-weight: 700;
-          font-size: 13px;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          padding-right: 34px;
-        }
-
-        .convMeta {
-          font-size: 11px;
-          opacity: 0.6;
-          margin-top: 2px;
-        }
-
-        .convDelete {
-          position: absolute;
-          right: 10px;
-          top: 50%;
-          transform: translateY(-50%);
-          width: 30px;
-          height: 30px;
-          border-radius: 12px;
-          border: 1px solid rgba(255, 60, 60, 0.35);
-          background: rgba(255, 60, 60, 0.12);
-          color: rgba(255, 210, 210, 0.95);
-          font-size: 20px;
-          line-height: 0;
-          cursor: pointer;
-        }
-
-        .main {
-          background: rgba(255, 255, 255, 0.02);
-          border: 1px solid rgba(255, 255, 255, 0.06);
-          border-radius: 18px;
-          min-height: calc(100vh - 64px - 32px);
-          overflow: hidden;
-          display: flex;
-          flex-direction: column;
-        }
-
-        .chatHeader {
-          padding: 14px 16px;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-        }
-
-        .chatTitle {
-          font-weight: 900;
-          letter-spacing: 0.2px;
-        }
-
-        .chatSub {
-          font-size: 12px;
-          opacity: 0.65;
-          margin-top: 4px;
-        }
-
-        .chatBody {
-          padding: 14px 16px;
-          overflow: auto;
-          flex: 1;
-        }
-
-        .msgRow {
-          display: flex;
-          margin: 10px 0;
-        }
-
-        .msgRow.user {
-          justify-content: flex-end;
-        }
-
-        .msgRow.assistant {
-          justify-content: flex-start;
-        }
-
-        .msgBubble {
-          max-width: min(720px, 86%);
-          border: 1px solid rgba(255, 255, 255, 0.08);
-          background: rgba(255, 255, 255, 0.03);
-          padding: 14px 16px;
-          border-radius: 18px;
-          line-height: 1.45;
-          white-space: pre-wrap;
-        }
-
-        .msgRow.user .msgBubble {
-          border-color: rgba(255, 140, 40, 0.22);
-          background: rgba(255, 140, 40, 0.12);
-        }
-
-        .chatInputWrap {
-          padding: 14px 16px;
-          border-top: 1px solid rgba(255, 255, 255, 0.06);
-        }
-
-        .chatInput {
-          display: grid;
-          grid-template-columns: 1fr auto auto;
-          gap: 10px;
-          align-items: center;
-        }
-
-        .input {
-          width: 100%;
-          border: 1px solid rgba(255, 255, 255, 0.12);
-          background: rgba(255, 255, 255, 0.02);
-          color: #e9eef6;
-          border-radius: 16px;
-          padding: 14px 14px;
-          outline: none;
-          font-size: 14px;
+        .btn.new {
+          border-color: rgba(255, 130, 30, 0.22);
+          background: rgba(255, 130, 30, 0.08);
         }
 
         .btn.send {
-          border-color: rgba(255, 140, 40, 0.55);
-          background: rgba(255, 140, 40, 0.22);
+          border-color: rgba(255, 130, 30, 0.35);
+          background: rgba(255, 130, 30, 0.12);
         }
 
-        .chatFooter {
-          margin-top: 10px;
-          display: flex;
-          justify-content: space-between;
+        .btn.mic {
+          width: 48px;
+          height: 48px;
+          padding: 0;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid rgba(255, 255, 255, 0.16);
+          background: rgba(255, 255, 255, 0.04);
+        }
+
+        .btn.mic:hover {
+          border-color: rgba(255, 130, 30, 0.45);
+          background: rgba(255, 130, 30, 0.10);
+        }
+
+        .btn.mic:active {
+          transform: translateY(1px);
+        }
+
+        .micIcon {
+          width: 20px;
+          height: 20px;
+          opacity: 0.92;
         }
 
         .muted {
-          opacity: 0.7;
-        }
-        .mutedSmall {
-          opacity: 0.55;
-          font-size: 11px;
+          color: rgba(233, 238, 246, 0.65);
+          font-size: 14px;
+          padding: 8px;
         }
 
-        @media (max-width: 900px) {
+        .mutedSmall {
+          color: rgba(233, 238, 246, 0.55);
+          font-size: 12px;
+        }
+
+        @media (max-width: 920px) {
           .layout {
             grid-template-columns: 1fr;
           }
