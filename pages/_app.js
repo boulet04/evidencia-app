@@ -1,21 +1,13 @@
+// pages/_app.js
+import Head from "next/head";
+
 export default function App({ Component, pageProps }) {
   return (
     <>
-      <style jsx global>{`
-        html,
-        body {
-          margin: 0 !important;
-          padding: 0 !important;
-          background: #05060a !important;
-          overflow-x: hidden;
-        }
-
-        /* évite les micro-bords dus à certains éléments */
-        * {
-          box-sizing: border-box;
-        }
-      `}</style>
-
+      <Head>
+        <link rel="stylesheet" href="/brand.css" />
+        <meta name="theme-color" content="#050608" />
+      </Head>
       <Component {...pageProps} />
     </>
   );
