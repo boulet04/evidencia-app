@@ -13,7 +13,6 @@ export default function ChatPage() {
 
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState("");
 
   const [me, setMe] = useState(null);
   const [agent, setAgent] = useState({ name: "Agent", description: "", avatar_url: "" });
@@ -26,34 +25,26 @@ export default function ChatPage() {
 
   const endRef = useRef(null);
 
-  async function getAccessToken() {
-    const { data } = await supabase.auth.getSession();
-    return data?.session?.access_token || "";
-  }
-
   async function loadMe() {
     const { data } = await supabase.auth.getUser();
     return data?.user || null;
   }
 
   async function loadAgent() {
-    try {
-      const { data } = await supabase
-        .from("agents")
-        .select("name,description,avatar_url")
-        .eq("slug", agentSlug)
-        .maybeSingle();
-      if (data) setAgent(data);
-    } catch {}
+    const { data } = await supabase
+      .from("agents")
+      .select("name,description,avatar_url")
+      .eq("slug", agentSlug)
+      .maybeSingle();
+    if (data) setAgent(data);
   }
 
   async function loadConversations(userId) {
     const { data } = await supabase
       .from("conversations")
-      .select("id,title,created_at,archived")
+      .select("id,title,created_at")
       .eq("user_id", userId)
       .eq("agent_slug", agentSlug)
-      .eq("archived", false)
       .order("created_at", { ascending: false });
 
     setConversations(data || []);
@@ -64,11 +55,23 @@ export default function ChatPage() {
     if (!convId) return setMessages([]);
     const { data } = await supabase
       .from("messages")
-      .select("id,role,content,created_at")
+      .select("id,role,content")
       .eq("conversation_id", convId)
       .order("created_at", { ascending: true });
-
     setMessages(data || []);
+  }
+
+  async function deleteConversation(id) {
+    await supabase.from("conversations").delete().eq("id", id);
+
+    if (id === conversationId) {
+      setConversationId(null);
+      setMessages([
+        { id: "welcome", role: "assistant", content: getFirstMessage(agentSlug, "") },
+      ]);
+    }
+
+    if (me?.id) await loadConversations(me.id);
   }
 
   useEffect(() => {
@@ -84,7 +87,7 @@ export default function ChatPage() {
       await loadMessages(firstId);
       if (!firstId) {
         setMessages([
-          { id: "welcome", role: "assistant", content: getFirstMessage(agentSlug, ""), created_at: new Date().toISOString() },
+          { id: "welcome", role: "assistant", content: getFirstMessage(agentSlug, "") },
         ]);
       }
       setLoading(false);
@@ -95,13 +98,6 @@ export default function ChatPage() {
     if (endRef.current) endRef.current.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
-  async function startNewConversation() {
-    setConversationId(null);
-    setMessages([
-      { id: "welcome", role: "assistant", content: getFirstMessage(agentSlug, ""), created_at: new Date().toISOString() },
-    ]);
-  }
-
   async function sendMessage() {
     const text = input.trim();
     if (!text || sending) return;
@@ -110,105 +106,78 @@ export default function ChatPage() {
     const tempId = `tmp-${Date.now()}`;
     setMessages((m) => [...m, { id: tempId, role: "user", content: text }]);
 
-    try {
-      const token = await getAccessToken();
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ agentSlug, conversationId, message: text }),
-      });
+    const { data: session } = await supabase.auth.getSession();
+    const token = session?.session?.access_token;
 
-      const data = await res.json();
-      setInput("");
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ agentSlug, conversationId, message: text }),
+    });
 
-      const newConvId = data.conversationId || conversationId;
-      if (newConvId !== conversationId) setConversationId(newConvId);
-      await loadMessages(newConvId);
-      if (me?.id) await loadConversations(me.id);
-    } catch {
-      setError("Erreur API");
-    } finally {
-      setSending(false);
-    }
-  }
+    const data = await res.json();
+    setInput("");
+    setConversationId(data.conversationId);
+    await loadMessages(data.conversationId);
+    if (me?.id) await loadConversations(me.id);
 
-  function logout() {
-    supabase.auth.signOut();
-    window.location.href = "/login";
+    setSending(false);
   }
 
   if (loading) return <div style={{ padding: 24 }}>Chargement…</div>;
 
   return (
     <div style={{ display: "flex", height: "100vh", background: "#0b0b0b", color: "#fff" }}>
+      {/* SIDEBAR */}
       <div style={{ width: 280, borderRight: "1px solid #222", padding: 16 }}>
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-          <button onClick={() => router.push("/agents")} style={btnSmall}>← Retour</button>
-          <button onClick={startNewConversation} style={btnSmall}>+ Nouvelle</button>
-        </div>
-
         <div style={{ fontWeight: 700, marginBottom: 8 }}>Historique</div>
 
         {conversations.map((c) => (
-          <button
+          <div
             key={c.id}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: 10,
+              marginBottom: 6,
+              borderRadius: 10,
+              background: conversationId === c.id ? "#1a1a1a" : "#111",
+              border: conversationId === c.id ? "1px solid #b8860b" : "1px solid #222",
+              cursor: "pointer",
+            }}
             onClick={() => {
               setConversationId(c.id);
               loadMessages(c.id);
             }}
-            style={{
-              width: "100%",
-              textAlign: "left",
-              padding: 12,
-              marginBottom: 8,
-              borderRadius: 12,
-              border: conversationId === c.id ? "1px solid #b8860b" : "1px solid #222",
-              background: "#111",
-              color: "#fff",
-            }}
           >
-            {c.title || "Conversation"}
-          </button>
+            <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+              {c.title || "Conversation"}
+            </div>
+
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                deleteConversation(c.id);
+              }}
+              title="Supprimer"
+              style={{
+                marginLeft: 8,
+                background: "transparent",
+                border: "none",
+                color: "#ff4d4f",
+                cursor: "pointer",
+                fontSize: 14,
+              }}
+            >
+              ✕
+            </button>
+          </div>
         ))}
       </div>
 
+      {/* MAIN */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", padding: 16, borderBottom: "1px solid #222" }}>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <div
-              style={{
-                width: 34,
-                height: 34,
-                borderRadius: "50%",
-                background: "#222",
-                overflow: "hidden",
-              }}
-            >
-              {agent.avatar_url && (
-                <img
-                  src={agent.avatar_url}
-                  alt={agent.name}
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    objectFit: "cover",
-                    objectPosition: "center top",
-                  }}
-                />
-              )}
-            </div>
-            <div>
-              <div style={{ fontWeight: 800 }}>{agent.name}</div>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>{agent.description}</div>
-            </div>
-          </div>
-
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <div style={{ fontSize: 12, opacity: 0.7 }}>{me?.email}</div>
-            <button onClick={logout} style={btnSmall}>Déconnexion</button>
-          </div>
-        </div>
-
         <div style={{ flex: 1, padding: 16, overflow: "auto" }}>
           {messages.map((m) => (
             <div key={m.id} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 12 }}>
@@ -234,16 +203,6 @@ export default function ChatPage() {
     </div>
   );
 }
-
-const btnSmall = {
-  padding: "8px 10px",
-  borderRadius: 10,
-  border: "1px solid #222",
-  background: "#111",
-  color: "#fff",
-  cursor: "pointer",
-  fontSize: 12,
-};
 
 const btnPrimary = {
   padding: "12px 16px",
