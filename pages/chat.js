@@ -8,260 +8,356 @@ export default function ChatPage() {
   const router = useRouter();
   const agentSlug = useMemo(() => {
     const q = router.query?.agent;
-    return typeof q === "string" && q ? q : "emma";
+    return (typeof q === "string" && q) ? q : "emma";
   }, [router.query]);
 
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
 
-  const [user, setUser] = useState(null);
-  const [agent, setAgent] = useState(null);
+  const [me, setMe] = useState(null);
+  const [agent, setAgent] = useState({ name: "Agent", description: "", avatar_url: "" });
 
   const [conversations, setConversations] = useState([]);
-  const [selectedConversationId, setSelectedConversationId] = useState("");
+  const [conversationId, setConversationId] = useState(null);
 
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
 
   const endRef = useRef(null);
 
-  // --- Micro ---
-  const inputRef = useRef(null);
-  const recognitionRef = useRef(null);
-  const [speechSupported, setSpeechSupported] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) return;
-
-    setSpeechSupported(true);
-
-    const rec = new SR();
-    rec.lang = "fr-FR";
-    rec.continuous = false;
-    rec.interimResults = false;
-
-    rec.onresult = (e) => {
-      const text = e?.results?.[0]?.[0]?.transcript?.trim();
-      if (text) {
-        setInput((prev) => (prev ? `${prev} ${text}` : text));
-        setTimeout(() => inputRef.current?.focus(), 0);
-      }
-    };
-
-    rec.onend = () => setIsRecording(false);
-    rec.onerror = () => setIsRecording(false);
-
-    recognitionRef.current = rec;
-    return () => rec.abort();
-  }, []);
-
-  function toggleDictation() {
-    if (!speechSupported || !recognitionRef.current) return;
-    if (isRecording) {
-      recognitionRef.current.stop();
-      setIsRecording(false);
-    } else {
-      recognitionRef.current.start();
-      setIsRecording(true);
-    }
-  }
-
   async function getAccessToken() {
     const { data } = await supabase.auth.getSession();
     return data?.session?.access_token || "";
   }
 
-  async function fetchAgent() {
-    const { data } = await supabase
-      .from("agents")
-      .select("id, slug, name, description, avatar_url")
-      .eq("slug", agentSlug)
-      .maybeSingle();
-    return data;
+  async function loadMe() {
+    const { data } = await supabase.auth.getUser();
+    return data?.user || null;
   }
 
-  async function fetchConversations(agentId, userId) {
-    const { data } = await supabase
+  async function loadAgent() {
+    // Optionnel: table 'agents' (sinon fallback)
+    try {
+      const { data, error } = await supabase
+        .from("agents")
+        .select("name,description,avatar_url")
+        .eq("slug", agentSlug)
+        .maybeSingle();
+      if (!error && data) {
+        setAgent({
+          name: data.name || agentSlug,
+          description: data.description || "",
+          avatar_url: data.avatar_url || "",
+        });
+      } else {
+        setAgent({ name: agentSlug, description: "", avatar_url: "" });
+      }
+    } catch {
+      setAgent({ name: agentSlug, description: "", avatar_url: "" });
+    }
+  }
+
+  async function loadConversations(userId) {
+    const { data, error } = await supabase
       .from("conversations")
-      .select("id, created_at, title")
-      .eq("agent_id", agentId)
+      .select("id,title,created_at,archived")
       .eq("user_id", userId)
-      .order("created_at", { ascending: false });
+      .eq("agent_slug", agentSlug)
+      .eq("archived", false)
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    if (error) throw error;
+    setConversations(data || []);
     return data || [];
   }
 
-  async function createConversation(agentId, userId) {
-    const { data } = await supabase
-      .from("conversations")
-      .insert({ agent_id: agentId, user_id: userId, title: "Conversation" })
-      .select()
-      .single();
-    return data;
-  }
-
-  async function fetchMessages(conversationId) {
-    const { data } = await supabase
+  async function loadMessages(convId) {
+    if (!convId) {
+      setMessages([]);
+      return;
+    }
+    const { data, error } = await supabase
       .from("messages")
-      .select("id, role, content, created_at")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: true });
-    return data || [];
-  }
+      .select("id,role,content,created_at")
+      .eq("conversation_id", convId)
+      .order("created_at", { ascending: true })
+      .limit(200);
 
-  async function insertMessage(conversationId, role, content) {
-    await supabase.from("messages").insert({
-      conversation_id: conversationId,
-      role,
-      content,
-    });
+    if (error) throw error;
+    setMessages(data || []);
   }
 
   useEffect(() => {
-    if (!router.isReady) return;
     (async () => {
-      const { data } = await supabase.auth.getUser();
-      if (!data?.user) return (window.location.href = "/login");
-      setUser(data.user);
+      setLoading(true);
+      setError("");
 
-      const a = await fetchAgent();
-      setAgent(a);
-
-      const convs = await fetchConversations(a.id, data.user.id);
-      if (convs.length) setSelectedConversationId(convs[0].id);
-      else {
-        const c = await createConversation(a.id, data.user.id);
-        setConversations([c]);
-        setSelectedConversationId(c.id);
+      const user = await loadMe();
+      if (!user) {
+        window.location.href = "/login";
+        return;
       }
-      setConversations(convs);
-      setLoading(false);
-    })();
-  }, [router.isReady, agentSlug]);
+      setMe(user);
 
-  useEffect(() => {
-    if (!selectedConversationId) return;
-    (async () => {
-      const msgs = await fetchMessages(selectedConversationId);
-      setMessages(msgs);
-      if (!msgs.length && agent?.slug) {
-        const first = getFirstMessage(agent.slug);
-        if (first) {
-          await insertMessage(selectedConversationId, "assistant", first);
-          setMessages(await fetchMessages(selectedConversationId));
+      await loadAgent();
+
+      try {
+        const convs = await loadConversations(user.id);
+        const firstId = convs?.[0]?.id || null;
+        setConversationId(firstId);
+        await loadMessages(firstId);
+
+        // Si aucune conversation, on montre un message d'accueil local (pas en DB)
+        if (!firstId) {
+          setMessages([
+            { id: "local-welcome", role: "assistant", content: getFirstMessage(agentSlug, ""), created_at: new Date().toISOString() },
+          ]);
         }
+      } catch (e) {
+        console.error(e);
+        setError("Erreur lors du chargement.");
+      } finally {
+        setLoading(false);
       }
     })();
-  }, [selectedConversationId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentSlug]);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    if (endRef.current) endRef.current.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+
+  async function startNewConversation() {
+    // Juste reset local: la conversation sera créée au 1er envoi via /api/chat
+    setConversationId(null);
+    setMessages([
+      { id: "local-welcome", role: "assistant", content: getFirstMessage(agentSlug, ""), created_at: new Date().toISOString() },
+    ]);
+  }
 
   async function sendMessage() {
-    if (!input.trim() || sending) return;
+    setError("");
+    const text = input;
+    const trimmed = text.trim();
+    if (!trimmed || sending) return;
+
     setSending(true);
-    const text = input.trim();
-    setInput("");
 
-    await insertMessage(selectedConversationId, "user", text);
-    setMessages(await fetchMessages(selectedConversationId));
+    // Optimistic UI
+    const tempId = `tmp-${Date.now()}`;
+    setMessages((prev) => [...prev, { id: tempId, role: "user", content: trimmed, created_at: new Date().toISOString() }]);
 
-    const token = await getAccessToken();
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ agentSlug, conversationId: selectedConversationId, message: text }),
-    });
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        window.location.href = "/login";
+        return;
+      }
 
-    const data = await res.json();
-    if (data?.reply) {
-      await insertMessage(selectedConversationId, "assistant", data.reply);
-      setMessages(await fetchMessages(selectedConversationId));
+      const resp = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          agentSlug,
+          conversationId,
+          message: trimmed,
+        }),
+      });
+
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        const msg = data?.message || data?.error || "Erreur interne API";
+        throw new Error(msg);
+      }
+
+      // Clear only on success
+      setInput("");
+
+      // Conversation peut etre creee cote serveur
+      const newConvId = data?.conversationId || conversationId;
+      if (newConvId && newConvId !== conversationId) {
+        setConversationId(newConvId);
+      }
+
+      // Reload DB state (source of truth)
+      if (me?.id) await loadConversations(me.id);
+      await loadMessages(newConvId);
+    } catch (e) {
+      console.error(e);
+      setError(e?.message || "Erreur interne API");
+      // Restore input so the user doesn't lose it
+      setInput(text);
+      // Remove optimistic message
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+    } finally {
+      setSending(false);
     }
-    setSending(false);
-    inputRef.current?.focus();
   }
 
-  if (loading) return null;
+  function logout() {
+    supabase.auth.signOut();
+    window.location.href = "/login";
+  }
+
+  if (loading) {
+    return (
+      <div style={{ padding: 24, fontFamily: "system-ui" }}>
+        Chargement...
+      </div>
+    );
+  }
 
   return (
-    <div style={{ minHeight: "100vh", background: "#050608", color: "#fff", display: "flex", flexDirection: "column" }}>
-      <div style={{ flex: 1, padding: 16, overflowY: "auto" }}>
-        {messages.map((m) => (
-          <div key={m.id} style={{ textAlign: m.role === "user" ? "right" : "left", marginBottom: 12 }}>
-            <div style={{
-              display: "inline-block",
-              padding: 14,
-              borderRadius: 14,
-              background: m.role === "user" ? "#b8860b" : "#0f0f0f",
-              color: m.role === "user" ? "#000" : "#fff",
-            }}>
-              {m.content}
-            </div>
-          </div>
-        ))}
-        <div ref={endRef} />
+    <div style={{ display: "flex", height: "100vh", background: "#0b0b0b", color: "#fff" }}>
+      {/* Sidebar */}
+      <div style={{ width: 280, borderRight: "1px solid #222", padding: 16, boxSizing: "border-box" }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <button onClick={() => router.push("/agents")} style={btnSmall}>
+            ← Retour aux agents
+          </button>
+          <button onClick={startNewConversation} style={btnSmall}>
+            + Nouvelle
+          </button>
+        </div>
+
+        <div style={{ fontWeight: 700, marginBottom: 8 }}>Historique</div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, overflow: "auto", maxHeight: "calc(100vh - 120px)" }}>
+          {conversations.map((c) => (
+            <button
+              key={c.id}
+              onClick={async () => {
+                setConversationId(c.id);
+                await loadMessages(c.id);
+              }}
+              style={{
+                textAlign: "left",
+                padding: 12,
+                borderRadius: 12,
+                border: conversationId === c.id ? "1px solid #b8860b" : "1px solid #222",
+                background: "#111",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+            >
+              <div style={{ fontWeight: 600 }}>{c.title || "(sans titre)"}</div>
+              <div style={{ opacity: 0.6, fontSize: 12 }}>{new Date(c.created_at).toLocaleString()}</div>
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div style={{ padding: 16, display: "flex", gap: 10, borderTop: "1px solid #222" }}>
-        <input
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-          placeholder="Écrire..."
-          style={{ flex: 1, padding: 12, borderRadius: 12, background: "#0f0f0f", color: "#fff", border: "1px solid #222" }}
-        />
+      {/* Main */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: 16, borderBottom: "1px solid #222" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: "50%",
+                background: "#222",
+                overflow: "hidden",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {agent.avatar_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={agent.avatar_url} alt={agent.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              ) : (
+                <span style={{ fontWeight: 700 }}>{agent.name?.[0]?.toUpperCase() || "A"}</span>
+              )}
+            </div>
+            <div>
+              <div style={{ fontWeight: 800 }}>{agent.name}</div>
+              <div style={{ opacity: 0.7, fontSize: 12 }}>{agent.description}</div>
+            </div>
+          </div>
 
-        <button onClick={toggleDictation} style={micBtn}>
-          {isRecording ? stopIcon : micIcon}
-        </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ opacity: 0.7, fontSize: 12 }}>{me?.email}</div>
+            <button onClick={logout} style={btnSmall}>Déconnexion</button>
+          </div>
+        </div>
 
-        <button onClick={sendMessage} style={btnPrimary}>Envoyer</button>
+        <div style={{ flex: 1, padding: 16, overflow: "auto" }}>
+          {messages.map((m) => (
+            <div key={m.id} style={{ marginBottom: 12, display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
+              <div
+                style={{
+                  maxWidth: "70%",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  background: m.role === "user" ? "#3a2a00" : "#151515",
+                  border: "1px solid #222",
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {m.content}
+              </div>
+            </div>
+          ))}
+          <div ref={endRef} />
+        </div>
+
+        {error ? (
+          <div style={{ padding: 12, borderTop: "1px solid #222", background: "#2a0000", color: "#ffd0d0" }}>{error}</div>
+        ) : null}
+
+        <div style={{ padding: 16, borderTop: "1px solid #222", display: "flex", gap: 10 }}>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+              }
+            }}
+            placeholder="Écrire..."
+            style={{
+              flex: 1,
+              padding: "12px 14px",
+              borderRadius: 12,
+              border: "1px solid #222",
+              background: "#0f0f0f",
+              color: "#fff",
+              outline: "none",
+            }}
+            disabled={sending}
+          />
+          <button onClick={sendMessage} style={{ ...btnPrimary, opacity: sending ? 0.7 : 1 }} disabled={sending}>
+            Envoyer
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
-/* ---------- ICONS ---------- */
-
-const micIcon = (
-  <svg width="22" height="22" viewBox="0 0 24 24" fill="#000">
-    <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3z"/>
-    <path d="M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V20h4v-2.08A7 7 0 0 0 19 11z"/>
-  </svg>
-);
-
-const stopIcon = (
-  <svg width="22" height="22" viewBox="0 0 24 24" fill="#000">
-    <rect x="6" y="6" width="12" height="12" rx="2"/>
-  </svg>
-);
-
-/* ---------- STYLES ---------- */
-
-const micBtn = {
-  width: 46,
-  height: 46,
-  borderRadius: 14,
-  border: "1px solid #b8860b",
-  background: "#b8860b",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
+const btnSmall = {
+  padding: "8px 10px",
+  borderRadius: 10,
+  border: "1px solid #222",
+  background: "#111",
+  color: "#fff",
   cursor: "pointer",
+  fontSize: 12,
 };
 
 const btnPrimary = {
-  padding: "12px 18px",
+  padding: "12px 16px",
   borderRadius: 12,
   border: "1px solid #b8860b",
   background: "#b8860b",
   color: "#000",
-  fontWeight: 800,
   cursor: "pointer",
+  fontWeight: 800,
 };
