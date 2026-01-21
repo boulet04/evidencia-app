@@ -141,7 +141,6 @@ export default function ChatPage() {
 
   return (
     <div style={{ display: "flex", height: "100vh", background: "#0b0b0b", color: "#fff" }}>
-      {/* SIDEBAR */}
       <div style={{ width: 280, borderRight: "1px solid #222", padding: 16 }}>
         <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
           <button onClick={() => router.push("/agents")} style={btnSmall}>← Retour</button>
@@ -173,9 +172,7 @@ export default function ChatPage() {
         ))}
       </div>
 
-      {/* MAIN */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        {/* HEADER */}
         <div style={{ display: "flex", justifyContent: "space-between", padding: 16, borderBottom: "1px solid #222" }}>
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <div
@@ -185,16 +182,18 @@ export default function ChatPage() {
                 borderRadius: "50%",
                 background: "#222",
                 overflow: "hidden",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
               }}
             >
               {agent.avatar_url && (
                 <img
                   src={agent.avatar_url}
                   alt={agent.name}
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    objectPosition: "center top",
+                  }}
                 />
               )}
             </div>
@@ -210,7 +209,6 @@ export default function ChatPage() {
           </div>
         </div>
 
-        {/* MESSAGES */}
         <div style={{ flex: 1, padding: 16, overflow: "auto" }}>
           {messages.map((m) => (
             <div key={m.id} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 12 }}>
@@ -222,7 +220,6 @@ export default function ChatPage() {
           <div ref={endRef} />
         </div>
 
-        {/* INPUT */}
         <div style={{ display: "flex", gap: 10, padding: 16, borderTop: "1px solid #222" }}>
           <input
             value={input}
