@@ -4,7 +4,7 @@ import { useRouter } from "next/router";
 import { supabase } from "../lib/supabaseClient";
 import { getFirstMessage } from "../lib/agentPrompts";
 
-/* ===== RENOMMAGE AUTO — LOGIQUE CORRIGÉE ===== */
+/* ===== RENOMMAGE AUTO — INCHANGÉ ===== */
 function buildConversationTitle(text) {
   const stop = new Set(["salut", "bonjour", "hello", "coucou", "hey"]);
 
@@ -14,14 +14,13 @@ function buildConversationTitle(text) {
     .split(/\s+/)
     .filter(Boolean);
 
-  // supprimer uniquement les mots de politesse AU DÉBUT
   while (words.length && stop.has(words[0])) {
     words.shift();
   }
 
   return words.slice(0, 6).join(" ");
 }
-/* =========================================== */
+/* =================================== */
 
 export default function ChatPage() {
   const router = useRouter();
@@ -43,6 +42,7 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
 
   const endRef = useRef(null);
+  const inputRef = useRef(null); // 🔑 FOCUS
 
   // 🎤 MICRO — inchangé
   const recognitionRef = useRef(null);
@@ -112,6 +112,7 @@ export default function ChatPage() {
       .eq("conversation_id", convId)
       .order("created_at", { ascending: true });
     setMessages(data || []);
+    setTimeout(() => inputRef.current?.focus(), 0); // 🔑 FOCUS
   }
 
   async function startNewConversation() {
@@ -119,6 +120,7 @@ export default function ChatPage() {
     setMessages([
       { id: "welcome", role: "assistant", content: getFirstMessage(agentSlug, "") },
     ]);
+    setTimeout(() => inputRef.current?.focus(), 0); // 🔑 FOCUS
   }
 
   async function deleteConversation(id) {
@@ -144,6 +146,7 @@ export default function ChatPage() {
       await loadMessages(firstId);
       if (!firstId) startNewConversation();
       setLoading(false);
+      setTimeout(() => inputRef.current?.focus(), 0); // 🔑 FOCUS
     })();
   }, [agentSlug]);
 
@@ -171,7 +174,6 @@ export default function ChatPage() {
     const data = await res.json();
     setInput("");
 
-    // ✅ RENOMMAGE AUTO AU PREMIER MESSAGE
     if (!conversationId && data.conversationId) {
       const title = buildConversationTitle(text);
       if (title) {
@@ -187,6 +189,7 @@ export default function ChatPage() {
     if (me?.id) await loadConversations(me.id);
 
     setSending(false);
+    setTimeout(() => inputRef.current?.focus(), 0); // 🔑 FOCUS
   }
 
   if (loading) return <div style={{ padding: 24 }}>Chargement…</div>;
@@ -335,6 +338,7 @@ export default function ChatPage() {
         {/* INPUT */}
         <div style={{ display: "flex", gap: 10, padding: 16, borderTop: "1px solid #222" }}>
           <input
+            ref={inputRef}   {/* 🔑 FOCUS */}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && sendMessage()}
