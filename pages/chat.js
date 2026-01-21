@@ -112,7 +112,6 @@ export default function ChatPage() {
       .eq("conversation_id", convId)
       .order("created_at", { ascending: true });
     setMessages(data || []);
-    setTimeout(() => inputRef.current?.focus(), 0); // 🔑 FOCUS
   }
 
   async function startNewConversation() {
@@ -120,7 +119,6 @@ export default function ChatPage() {
     setMessages([
       { id: "welcome", role: "assistant", content: getFirstMessage(agentSlug, "") },
     ]);
-    setTimeout(() => inputRef.current?.focus(), 0); // 🔑 FOCUS
   }
 
   async function deleteConversation(id) {
@@ -146,13 +144,22 @@ export default function ChatPage() {
       await loadMessages(firstId);
       if (!firstId) startNewConversation();
       setLoading(false);
-      setTimeout(() => inputRef.current?.focus(), 0); // 🔑 FOCUS
     })();
   }, [agentSlug]);
 
   useEffect(() => {
     if (endRef.current) endRef.current.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
+
+  /* ===== FOCUS CENTRALISÉ — CLEF ===== */
+  useEffect(() => {
+    if (loading) return;
+    const t = setTimeout(() => {
+      inputRef.current?.focus();
+    }, 50);
+    return () => clearTimeout(t);
+  }, [agentSlug, conversationId, sending]);
+  /* ================================== */
 
   async function sendMessage() {
     const text = input.trim();
@@ -189,7 +196,6 @@ export default function ChatPage() {
     if (me?.id) await loadConversations(me.id);
 
     setSending(false);
-    setTimeout(() => inputRef.current?.focus(), 0); // 🔑 FOCUS
   }
 
   if (loading) return <div style={{ padding: 24 }}>Chargement…</div>;
@@ -338,7 +344,7 @@ export default function ChatPage() {
         {/* INPUT */}
         <div style={{ display: "flex", gap: 10, padding: 16, borderTop: "1px solid #222" }}>
           <input
-            ref={inputRef}   {/* 🔑 FOCUS */}
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && sendMessage()}
