@@ -135,6 +135,10 @@ export default function ChatPage() {
         {conversations.map((c) => (
           <div
             key={c.id}
+            onClick={() => {
+              setConversationId(c.id);
+              loadMessages(c.id);
+            }}
             style={{
               display: "flex",
               alignItems: "center",
@@ -146,12 +150,16 @@ export default function ChatPage() {
               border: conversationId === c.id ? "1px solid #b8860b" : "1px solid #222",
               cursor: "pointer",
             }}
-            onClick={() => {
-              setConversationId(c.id);
-              loadMessages(c.id);
-            }}
           >
-            <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+            <div
+              style={{
+                fontSize: 13,
+                fontWeight: 600,
+                overflow: "hidden",
+                whiteSpace: "nowrap",
+                textOverflow: "ellipsis",
+              }}
+            >
               {c.title || "Conversation"}
             </div>
 
@@ -162,7 +170,6 @@ export default function ChatPage() {
               }}
               title="Supprimer"
               style={{
-                marginLeft: 8,
                 background: "transparent",
                 border: "none",
                 color: "#ff4d4f",
@@ -178,10 +185,94 @@ export default function ChatPage() {
 
       {/* MAIN */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        {/* HEADER AGENT — RESTAURÉ */}
+        <div style={{ display: "flex", justifyContent: "space-between", padding: 16, borderBottom: "1px solid #222" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <button
+              onClick={() => router.push("/agents")}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 8,
+                border: "1px solid #222",
+                background: "#111",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 12,
+              }}
+            >
+              ← Retour
+            </button>
+
+            <div
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: "50%",
+                background: "#222",
+                overflow: "hidden",
+              }}
+            >
+              {agent.avatar_url && (
+                <img
+                  src={agent.avatar_url}
+                  alt={agent.name}
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    objectPosition: "center top",
+                  }}
+                />
+              )}
+            </div>
+
+            <div>
+              <div style={{ fontWeight: 800 }}>{agent.name}</div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>{agent.description}</div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ fontSize: 12, opacity: 0.7 }}>{me.email}</div>
+            <button
+              onClick={() => {
+                supabase.auth.signOut();
+                window.location.href = "/login";
+              }}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 8,
+                border: "1px solid #222",
+                background: "#111",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 12,
+              }}
+            >
+              Déconnexion
+            </button>
+          </div>
+        </div>
+
+        {/* MESSAGES */}
         <div style={{ flex: 1, padding: 16, overflow: "auto" }}>
           {messages.map((m) => (
-            <div key={m.id} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 12 }}>
-              <div style={{ maxWidth: "70%", padding: 12, borderRadius: 12, background: m.role === "user" ? "#3a2a00" : "#151515" }}>
+            <div
+              key={m.id}
+              style={{
+                display: "flex",
+                justifyContent: m.role === "user" ? "flex-end" : "flex-start",
+                marginBottom: 12,
+              }}
+            >
+              <div
+                style={{
+                  maxWidth: "70%",
+                  padding: 12,
+                  borderRadius: 12,
+                  background: m.role === "user" ? "#3a2a00" : "#151515",
+                }}
+              >
                 {m.content}
               </div>
             </div>
@@ -189,27 +280,38 @@ export default function ChatPage() {
           <div ref={endRef} />
         </div>
 
+        {/* INPUT */}
         <div style={{ display: "flex", gap: 10, padding: 16, borderTop: "1px solid #222" }}>
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && sendMessage()}
             placeholder="Écrire…"
-            style={{ flex: 1, padding: 12, borderRadius: 12, background: "#0f0f0f", border: "1px solid #222", color: "#fff" }}
+            style={{
+              flex: 1,
+              padding: 12,
+              borderRadius: 12,
+              background: "#0f0f0f",
+              border: "1px solid #222",
+              color: "#fff",
+            }}
           />
-          <button onClick={sendMessage} style={btnPrimary}>Envoyer</button>
+          <button
+            onClick={sendMessage}
+            style={{
+              padding: "12px 16px",
+              borderRadius: 12,
+              border: "1px solid #b8860b",
+              background: "#b8860b",
+              color: "#000",
+              cursor: "pointer",
+              fontWeight: 800,
+            }}
+          >
+            Envoyer
+          </button>
         </div>
       </div>
     </div>
   );
 }
-
-const btnPrimary = {
-  padding: "12px 16px",
-  borderRadius: 12,
-  border: "1px solid #b8860b",
-  background: "#b8860b",
-  color: "#000",
-  cursor: "pointer",
-  fontWeight: 800,
-};
