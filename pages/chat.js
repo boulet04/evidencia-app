@@ -4,18 +4,24 @@ import { useRouter } from "next/router";
 import { supabase } from "../lib/supabaseClient";
 import { getFirstMessage } from "../lib/agentPrompts";
 
-/* ===== AJOUT UNIQUE ===== */
+/* ===== RENOMMAGE AUTO — LOGIQUE CORRIGÉE ===== */
 function buildConversationTitle(text) {
   const stop = new Set(["salut", "bonjour", "hello", "coucou", "hey"]);
+
   const words = text
     .toLowerCase()
     .replace(/[^a-zàâäéèêëïîôöùûüç0-9\s]/gi, " ")
     .split(/\s+/)
-    .filter((w) => w && !stop.has(w));
+    .filter(Boolean);
 
-  return words.slice(0, 4).join(" ");
+  // supprimer uniquement les mots de politesse AU DÉBUT
+  while (words.length && stop.has(words[0])) {
+    words.shift();
+  }
+
+  return words.slice(0, 6).join(" ");
 }
-/* ======================= */
+/* =========================================== */
 
 export default function ChatPage() {
   const router = useRouter();
@@ -38,7 +44,7 @@ export default function ChatPage() {
 
   const endRef = useRef(null);
 
-  // 🎤 MICRO — INCHANGÉ
+  // 🎤 MICRO — inchangé
   const recognitionRef = useRef(null);
   const [listening, setListening] = useState(false);
 
@@ -165,7 +171,7 @@ export default function ChatPage() {
     const data = await res.json();
     setInput("");
 
-    /* ===== AJOUT UNIQUE ===== */
+    // ✅ RENOMMAGE AUTO AU PREMIER MESSAGE
     if (!conversationId && data.conversationId) {
       const title = buildConversationTitle(text);
       if (title) {
@@ -175,7 +181,6 @@ export default function ChatPage() {
           .eq("id", data.conversationId);
       }
     }
-    /* ======================= */
 
     setConversationId(data.conversationId);
     await loadMessages(data.conversationId);
@@ -188,7 +193,6 @@ export default function ChatPage() {
 
   return (
     <div style={{ display: "flex", height: "100vh", background: "#0b0b0b", color: "#fff" }}>
-      {/* UI STRICTEMENT IDENTIQUE */}
       {/* SIDEBAR */}
       <div style={{ width: 280, borderRight: "1px solid #222", padding: 16 }}>
         <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
