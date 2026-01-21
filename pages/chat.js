@@ -25,6 +25,41 @@ export default function ChatPage() {
 
   const endRef = useRef(null);
 
+  // 🎤 MICRO — ajout unique
+  const recognitionRef = useRef(null);
+  const [listening, setListening] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "fr-FR";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognition.onstart = () => setListening(true);
+    recognition.onend = () => setListening(false);
+    recognition.onerror = () => setListening(false);
+
+    recognition.onresult = (e) => {
+      const text = e.results[0][0].transcript;
+      setInput((prev) => (prev ? prev + " " + text : text));
+    };
+
+    recognitionRef.current = recognition;
+  }, []);
+
+  function toggleMic() {
+    if (!recognitionRef.current) return;
+    listening
+      ? recognitionRef.current.stop()
+      : recognitionRef.current.start();
+  }
+  // 🎤 FIN MICRO
+
   async function loadMe() {
     const { data } = await supabase.auth.getUser();
     return data?.user || null;
@@ -194,10 +229,7 @@ export default function ChatPage() {
         {/* HEADER AGENT */}
         <div style={{ display: "flex", justifyContent: "space-between", padding: 16, borderBottom: "1px solid #222" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <button
-              onClick={() => router.push("/agents")}
-              style={btnSmall}
-            >
+            <button onClick={() => router.push("/agents")} style={btnSmall}>
               ← Retour
             </button>
 
@@ -286,6 +318,32 @@ export default function ChatPage() {
               color: "#fff",
             }}
           />
+
+          {/* 🎤 MICRO */}
+          <button
+            type="button"
+            onClick={toggleMic}
+            title="Dicter un message"
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: "50%",
+              border: "1px solid #222",
+              background: listening ? "#8b0000" : "#111",
+              color: "#fff",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 14a3 3 0 003-3V5a3 3 0 10-6 0v6a3 3 0 003 3z" />
+              <path d="M19 11a7 7 0 01-14 0h2a5 5 0 0010 0h2z" />
+              <path d="M12 18v4h-2v-4h2z" />
+            </svg>
+          </button>
+
           <button
             onClick={sendMessage}
             style={{
