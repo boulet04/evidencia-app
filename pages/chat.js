@@ -43,9 +43,7 @@ export default function ChatPage() {
         .select("name,description,avatar_url")
         .eq("slug", agentSlug)
         .maybeSingle();
-      if (data) {
-        setAgent(data);
-      }
+      if (data) setAgent(data);
     } catch {}
   }
 
@@ -127,7 +125,7 @@ export default function ChatPage() {
       if (newConvId !== conversationId) setConversationId(newConvId);
       await loadMessages(newConvId);
       if (me?.id) await loadConversations(me.id);
-    } catch (e) {
+    } catch {
       setError("Erreur API");
     } finally {
       setSending(false);
@@ -180,8 +178,25 @@ export default function ChatPage() {
         {/* HEADER */}
         <div style={{ display: "flex", justifyContent: "space-between", padding: 16, borderBottom: "1px solid #222" }}>
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <div style={{ width: 44, height: 44, borderRadius: "50%", overflow: "hidden", background: "#222" }}>
-              {agent.avatar_url && <img src={agent.avatar_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
+            <div
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: "50%",
+                background: "#222",
+                overflow: "hidden",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {agent.avatar_url && (
+                <img
+                  src={agent.avatar_url}
+                  alt={agent.name}
+                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                />
+              )}
             </div>
             <div>
               <div style={{ fontWeight: 800 }}>{agent.name}</div>
@@ -216,15 +231,6 @@ export default function ChatPage() {
             placeholder="Écrire…"
             style={{ flex: 1, padding: 12, borderRadius: 12, background: "#0f0f0f", border: "1px solid #222", color: "#fff" }}
           />
-
-          {/* MICRO (UI ONLY) */}
-          <button title="Micro (à venir)" style={btnMic}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-              <path d="M12 14a3 3 0 003-3V5a3 3 0 10-6 0v6a3 3 0 003 3z" stroke="currentColor" strokeWidth="2"/>
-              <path d="M19 11a7 7 0 01-14 0M12 18v4" stroke="currentColor" strokeWidth="2"/>
-            </svg>
-          </button>
-
           <button onClick={sendMessage} style={btnPrimary}>Envoyer</button>
         </div>
       </div>
@@ -250,13 +256,4 @@ const btnPrimary = {
   color: "#000",
   cursor: "pointer",
   fontWeight: 800,
-};
-
-const btnMic = {
-  padding: "12px",
-  borderRadius: "50%",
-  border: "1px solid #222",
-  background: "#111",
-  color: "#fff",
-  cursor: "pointer",
 };
