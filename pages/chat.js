@@ -61,14 +61,18 @@ export default function ChatPage() {
     setMessages(data || []);
   }
 
+  async function startNewConversation() {
+    setConversationId(null);
+    setMessages([
+      { id: "welcome", role: "assistant", content: getFirstMessage(agentSlug, "") },
+    ]);
+  }
+
   async function deleteConversation(id) {
     await supabase.from("conversations").delete().eq("id", id);
 
     if (id === conversationId) {
-      setConversationId(null);
-      setMessages([
-        { id: "welcome", role: "assistant", content: getFirstMessage(agentSlug, "") },
-      ]);
+      startNewConversation();
     }
 
     if (me?.id) await loadConversations(me.id);
@@ -85,11 +89,7 @@ export default function ChatPage() {
       const firstId = convs?.[0]?.id || null;
       setConversationId(firstId);
       await loadMessages(firstId);
-      if (!firstId) {
-        setMessages([
-          { id: "welcome", role: "assistant", content: getFirstMessage(agentSlug, "") },
-        ]);
-      }
+      if (!firstId) startNewConversation();
       setLoading(false);
     })();
   }, [agentSlug]);
@@ -130,6 +130,12 @@ export default function ChatPage() {
     <div style={{ display: "flex", height: "100vh", background: "#0b0b0b", color: "#fff" }}>
       {/* SIDEBAR */}
       <div style={{ width: 280, borderRight: "1px solid #222", padding: 16 }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <button onClick={startNewConversation} style={btnSmall}>
+            + Nouvelle
+          </button>
+        </div>
+
         <div style={{ fontWeight: 700, marginBottom: 8 }}>Historique</div>
 
         {conversations.map((c) => (
@@ -185,20 +191,12 @@ export default function ChatPage() {
 
       {/* MAIN */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        {/* HEADER AGENT — RESTAURÉ */}
+        {/* HEADER AGENT */}
         <div style={{ display: "flex", justifyContent: "space-between", padding: 16, borderBottom: "1px solid #222" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <button
               onClick={() => router.push("/agents")}
-              style={{
-                padding: "6px 10px",
-                borderRadius: 8,
-                border: "1px solid #222",
-                background: "#111",
-                color: "#fff",
-                cursor: "pointer",
-                fontSize: 12,
-              }}
+              style={btnSmall}
             >
               ← Retour
             </button>
@@ -239,15 +237,7 @@ export default function ChatPage() {
                 supabase.auth.signOut();
                 window.location.href = "/login";
               }}
-              style={{
-                padding: "6px 10px",
-                borderRadius: 8,
-                border: "1px solid #222",
-                background: "#111",
-                color: "#fff",
-                cursor: "pointer",
-                fontSize: 12,
-              }}
+              style={btnSmall}
             >
               Déconnexion
             </button>
@@ -315,3 +305,13 @@ export default function ChatPage() {
     </div>
   );
 }
+
+const btnSmall = {
+  padding: "6px 10px",
+  borderRadius: 8,
+  border: "1px solid #222",
+  background: "#111",
+  color: "#fff",
+  cursor: "pointer",
+  fontSize: 12,
+};
