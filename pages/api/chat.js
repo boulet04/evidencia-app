@@ -5,7 +5,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 
-const BUILD_TAG = "API_CHAT_FIX_CSV_SEARCH_V2_2026_01_22";
+const BUILD_TAG = "API_CHAT_MAKE_JSON_PARAGRAPHS_2026_01_22";
 
 function json(res, status, body) {
   res.status(status).setHeader("Content-Type", "application/json");
@@ -13,118 +13,67 @@ function json(res, status, body) {
 }
 
 function normalizeText(s) {
-  return String(s || "")
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Enlève les accents
-    .replace(/[^a-z0-9@._ \-]+/gi, " ")
-    .trim();
+  return String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 }
 
-function pickDelimiter(sampleLine) {
-  const semi = (sampleLine.match(/;/g) || []).length;
-  const comma = (sampleLine.match(/,/g) || []).length;
-  const tab = (sampleLine.match(/\t/g) || []).length;
-  if (tab >= semi && tab >= comma && tab > 0) return "\t";
-  if (semi >= comma && semi > 0) return ";";
-  return ",";
-}
-
+// --- PARSER CSV AMÉLIORÉ ---
 function parseCsv(text) {
-  const raw = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return { headers: [], rows: [] };
-  const delimiter = pickDelimiter(lines[0]);
-
-  const parseLine = (line) => {
-    const out = [];
-    let cur = "";
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') { inQuotes = !inQuotes; continue; }
-      if (!inQuotes && ch === delimiter) { out.push(cur); cur = ""; continue; }
-      cur += ch;
-    }
-    out.push(cur);
-    return out.map(v => v.trim());
-  };
-
-  const headers = parseLine(lines[0]).map((h, i) => h || `col_${i+1}`);
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n").filter(l => l.trim());
+  if (!lines.length) return { headers: [], rows: [] };
+  const sep = lines[0].includes(";") ? ";" : (lines[0].includes("\t") ? "\t" : ",");
+  const parseL = (l) => l.split(sep).map(v => v.replace(/^"|"$/g, '').trim());
+  const headers = parseL(lines[0]);
   const rows = lines.slice(1).map(line => {
-    const values = parseLine(line);
+    const vals = parseL(line);
     const obj = {};
-    headers.forEach((h, i) => { obj[h] = values[i] || ""; });
+    headers.forEach((h, i) => { obj[h] = vals[i] || ""; });
     return obj;
   });
   return { headers, rows };
 }
 
-function extractQueryTokens(userMessage) {
-  const msg = normalizeText(userMessage);
-  const stop = new Set(["le","la","les","un","une","des","pour","dans","avec","chercher","trouve","donne","moi"]);
-  return msg.split(" ").filter(t => t.length >= 2 && !stop.has(t));
-}
-
-function topRelevantRows(rows, userMessage, maxRows = 25) {
-  const tokens = extractQueryTokens(userMessage);
-  if (tokens.length === 0) return rows.slice(0, 5); // Fallback data
-
-  return rows
-    .map(r => {
-      const rowStr = normalizeText(Object.values(r).join(" "));
-      let score = 0;
-      tokens.forEach(t => { if (rowStr.includes(t)) score += 1; });
-      return { row: r, score };
-    })
-    .filter(x => x.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, maxRows)
-    .map(x => x.row);
-}
-
-async function downloadTextFromStorage(supabase, bucket, path) {
-  const { data, error } = await supabase.storage.from(bucket).download(path);
-  if (error || !data) throw new Error(`Download failed: ${error?.message}`);
-  return data.text ? await data.text() : Buffer.from(await data.arrayBuffer()).toString("utf-8");
-}
-
 async function buildSourcesContext({ supabase, context, userMessage }) {
   const sources = context?.sources;
   if (!Array.isArray(sources) || sources.length === 0) return "";
-  const blocks = [];
+  let blocks = [];
+  const tokens = userMessage.toLowerCase().split(" ").filter(t => t.length > 2);
 
   for (const src of sources) {
-    if (!src.path || !src.path.toLowerCase().endsWith(".csv")) continue;
+    if (!src.path?.toLowerCase().endsWith(".csv")) continue;
     try {
-      const text = await downloadTextFromStorage(supabase, src.bucket || "agent_sources", src.path);
+      const { data } = await supabase.storage.from(src.bucket || "agent_sources").download(src.path);
+      const text = await data.text();
       const { headers, rows } = parseCsv(text);
-      const relevant = topRelevantRows(rows, userMessage);
       
-      let block = `FICHIER SOURCE: ${src.name}\nCOLONNES: ${headers.join(", ")}\n`;
-      if (relevant.length > 0) {
-        block += "DONNÉES TROUVÉES:\n" + relevant.map(r => JSON.stringify(r)).join("\n");
-      } else {
-        block += "NOTE: Aucun résultat exact pour cette recherche dans ce fichier.";
-      }
-      blocks.push(block);
-    } catch (e) { console.error("Source error:", e); }
+      // Recherche intelligente dans le CSV
+      const relevant = rows.filter(r => {
+        const rowStr = Object.values(r).join(" ").toLowerCase();
+        return tokens.some(t => rowStr.includes(t));
+      }).slice(0, 10);
+
+      blocks.push(`FICHIER: ${src.name}\nCOLONNES: ${headers.join(", ")}\nDONNÉES: ${relevant.length ? JSON.stringify(relevant) : "Aucune ligne trouvée"}`);
+    } catch (e) { console.error("CSV Error", e); }
   }
-  return blocks.length ? "\n\nCONTEXTE DES FICHIERS:\n" + blocks.join("\n\n") : "";
+  return blocks.length ? "\n\nSOURCES DISPONIBLES:\n" + blocks.join("\n\n") : "";
 }
 
 async function callMistral({ systemPrompt, history, userMessage }) {
+  // On force Mistral à respecter les paragraphes même dans le JSON
+  const formattingInstruction = "\n\nIMPORTANT: Pour les emails, utilise impérativement des doubles sauts de ligne (\\n\\n) entre chaque paragraphe pour que le texte soit aéré et lisible.";
+  
   const messages = [
-    { role: "system", content: systemPrompt },
+    { role: "system", content: systemPrompt + formattingInstruction },
     ...history,
     { role: "user", content: userMessage },
   ];
+
   const r = await fetch("https://api.mistral.ai/v1/chat/completions", {
     method: "POST",
     headers: { Authorization: `Bearer ${MISTRAL_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "mistral-small-latest", messages, temperature: 0.1 }),
+    body: JSON.stringify({ model: "mistral-small-latest", messages, temperature: 0.2 }),
   });
   const data = await r.json();
-  return data?.choices?.[0]?.message?.content || "Désolé, je rencontre une difficulté technique.";
+  return data?.choices?.[0]?.message?.content || "Erreur de réponse.";
 }
 
 export default async function handler(req, res) {
@@ -137,7 +86,7 @@ export default async function handler(req, res) {
     if (!auth?.user) return json(res, 401, { error: "Unauthorized" });
 
     const { agentSlug, conversationId, message } = req.body;
-    const { data: agent } = await supabase.from("agents").select("id, default_system_prompt").eq("slug", agentSlug).single();
+    const { data: agent } = await supabase.from("agents").select("*").eq("slug", agentSlug).single();
 
     let convId = conversationId;
     if (!convId) {
@@ -145,31 +94,42 @@ export default async function handler(req, res) {
       convId = data.id;
     }
 
-    // Sauvegarder message utilisateur
     await supabase.from("messages").insert({ conversation_id: convId, role: "user", content: message });
 
-    // Charger historique récent (10 derniers messages)
-    const { data: historyData } = await supabase.from("messages").select("role, content").eq("conversation_id", convId).order("created_at", { ascending: false }).limit(10);
+    const { data: historyData } = await supabase.from("messages").select("role, content").eq("conversation_id", convId).order("created_at", { ascending: false }).limit(8);
     const history = (historyData || []).reverse().map(m => ({ role: m.role, content: m.content }));
 
-    // Charger config agent
-    const { data: cfg } = await supabase.from("client_agent_configs").select("system_prompt, context").eq("user_id", auth.user.id).eq("agent_id", agent.id).maybeSingle();
-    
-    // Charger prompt global
+    const { data: cfg } = await supabase.from("client_agent_configs").select("*").eq("user_id", auth.user.id).eq("agent_id", agent.id).maybeSingle();
     const { data: glob } = await supabase.from("app_settings").select("value").eq("key", "base_system_prompt").maybeSingle();
 
-    const sourcesText = await buildSourcesContext({ supabase, context: cfg?.context, userMessage: message });
-    
+    const sourcesContext = await buildSourcesContext({ supabase, context: cfg?.context, userMessage: message });
+
     const finalSystemPrompt = [
       glob?.value,
       agent.default_system_prompt,
       cfg?.system_prompt,
-      sourcesText
-    ].filter(Boolean).join("\n\n");
+      sourcesContext
+    ].filter(Boolean).join("\n\n---\n\n");
 
     const reply = await callMistral({ systemPrompt: finalSystemPrompt, history, userMessage: message });
 
-    // Sauvegarder réponse assistant
+    // --- LOGIQUE D'ENVOI MAKE ---
+    // Si l'utilisateur dit "ok envoie" et que la réponse contient un JSON
+    if (normalizeText(message) === "ok envoie" && reply.includes("{") && reply.includes("}")) {
+        try {
+            const jsonMatch = reply.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const emailData = JSON.parse(jsonMatch[0]);
+                // Appel au Webhook Make (remplacez par votre URL si nécessaire ou laissez l'IA le gérer)
+                await fetch(process.env.MAKE_WEBHOOK_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(emailData)
+                });
+            }
+        } catch (e) { console.error("Make trigger failed", e); }
+    }
+
     await supabase.from("messages").insert({ conversation_id: convId, role: "assistant", content: reply });
 
     return json(res, 200, { ok: true, conversationId: convId, reply, buildTag: BUILD_TAG });
