@@ -1,4 +1,3 @@
-// pages/chat.js
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import { supabase } from "../lib/supabaseClient";
@@ -41,8 +40,11 @@ export default function ChatPage() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
 
+  // ÉTAT POUR LE MENU MOBILE
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
   const endRef = useRef(null);
-  const inputRef = useRef(null); // 🔑 FOCUS
+  const inputRef = useRef(null); 
 
   // 🎤 MICRO — inchangé
   const recognitionRef = useRef(null);
@@ -119,15 +121,14 @@ export default function ChatPage() {
     setMessages([
       { id: "welcome", role: "assistant", content: getFirstMessage(agentSlug, "") },
     ]);
+    setIsSidebarOpen(false); // Ferme la sidebar sur mobile après création
   }
 
   async function deleteConversation(id) {
     await supabase.from("conversations").delete().eq("id", id);
-
     if (id === conversationId) {
       startNewConversation();
     }
-
     if (me?.id) await loadConversations(me.id);
   }
 
@@ -151,7 +152,6 @@ export default function ChatPage() {
     if (endRef.current) endRef.current.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
-  /* ===== FOCUS CENTRALISÉ — CLEF ===== */
   useEffect(() => {
     if (loading) return;
     const t = setTimeout(() => {
@@ -159,7 +159,6 @@ export default function ChatPage() {
     }, 50);
     return () => clearTimeout(t);
   }, [agentSlug, conversationId, sending]);
-  /* ================================== */
 
   async function sendMessage() {
     const text = input.trim();
@@ -198,75 +197,91 @@ export default function ChatPage() {
     setSending(false);
   }
 
-  if (loading) return <div style={{ padding: 24 }}>Chargement…</div>;
+  if (loading) return <div style={{ padding: 24, background: "#0b0b0b", color: "#fff", height: "100vh" }}>Chargement…</div>;
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#0b0b0b", color: "#fff" }}>
+    <div className="layout-container">
+      
+      {/* HEADER MOBILE UNIQUEMENT */}
+      <div className="mobile-header">
+        <button onClick={() => setIsSidebarOpen(true)} className="menu-trigger">☰</button>
+        <div className="mobile-agent-info">
+            <span style={{fontWeight: 800, fontSize: 14}}>{agent.name}</span>
+        </div>
+        <button onClick={() => router.push("/agents")} className="menu-trigger">←</button>
+      </div>
+
       {/* SIDEBAR */}
-      <div style={{ width: 280, borderRight: "1px solid #222", padding: 16 }}>
+      <div className={`sidebar ${isSidebarOpen ? 'open' : ''}`}>
+        <div className="sidebar-header">
+            <div style={{ fontWeight: 700 }}>Historique</div>
+            <button className="mobile-only close-btn" onClick={() => setIsSidebarOpen(false)}>✕</button>
+        </div>
+
         <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
           <button onClick={startNewConversation} style={btnSmall}>
             + Nouvelle
           </button>
         </div>
 
-        <div style={{ fontWeight: 700, marginBottom: 8 }}>Historique</div>
-
-        {conversations.map((c) => (
-          <div
-            key={c.id}
-            onClick={() => {
-              setConversationId(c.id);
-              loadMessages(c.id);
-            }}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: 10,
-              marginBottom: 6,
-              borderRadius: 10,
-              background: conversationId === c.id ? "#1a1a1a" : "#111",
-              border: conversationId === c.id ? "1px solid #b8860b" : "1px solid #222",
-              cursor: "pointer",
-            }}
-          >
+        <div className="conv-list">
+            {conversations.map((c) => (
             <div
-              style={{
-                fontSize: 13,
-                fontWeight: 600,
-                overflow: "hidden",
-                whiteSpace: "nowrap",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {c.title || "Conversation"}
-            </div>
-
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                deleteConversation(c.id);
-              }}
-              title="Supprimer"
-              style={{
-                background: "transparent",
-                border: "none",
-                color: "#ff4d4f",
+                key={c.id}
+                onClick={() => {
+                setConversationId(c.id);
+                loadMessages(c.id);
+                setIsSidebarOpen(false); // Ferme après sélection sur mobile
+                }}
+                style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: 10,
+                marginBottom: 6,
+                borderRadius: 10,
+                background: conversationId === c.id ? "#1a1a1a" : "#111",
+                border: conversationId === c.id ? "1px solid #b8860b" : "1px solid #222",
                 cursor: "pointer",
-                fontSize: 14,
-              }}
+                }}
             >
-              ✕
-            </button>
-          </div>
-        ))}
+                <div
+                style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    overflow: "hidden",
+                    whiteSpace: "nowrap",
+                    textOverflow: "ellipsis",
+                }}
+                >
+                {c.title || "Conversation"}
+                </div>
+
+                <button
+                onClick={(e) => {
+                    e.stopPropagation();
+                    deleteConversation(c.id);
+                }}
+                title="Supprimer"
+                style={{
+                    background: "transparent",
+                    border: "none",
+                    color: "#ff4d4f",
+                    cursor: "pointer",
+                    fontSize: 14,
+                }}
+                >
+                ✕
+                </button>
+            </div>
+            ))}
+        </div>
       </div>
 
       {/* MAIN */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        {/* HEADER AGENT */}
-        <div style={{ display: "flex", justifyContent: "space-between", padding: 16, borderBottom: "1px solid #222" }}>
+      <div className="main-content">
+        {/* HEADER AGENT (Caché ou adapté sur mobile) */}
+        <div className="desktop-header">
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <button onClick={() => router.push("/agents")} style={btnSmall}>
               ← Retour
@@ -316,7 +331,7 @@ export default function ChatPage() {
         </div>
 
         {/* MESSAGES */}
-        <div style={{ flex: 1, padding: 16, overflow: "auto" }}>
+        <div className="messages-container">
           {messages.map((m) => (
             <div
               key={m.id}
@@ -327,11 +342,14 @@ export default function ChatPage() {
               }}
             >
               <div
+                className="message-bubble"
                 style={{
-                  maxWidth: "70%",
+                  maxWidth: "75%",
                   padding: 12,
                   borderRadius: 12,
                   background: m.role === "user" ? "#3a2a00" : "#151515",
+                  fontSize: "14px",
+                  lineHeight: "1.4"
                 }}
               >
                 {m.content}
@@ -342,40 +360,21 @@ export default function ChatPage() {
         </div>
 
         {/* INPUT */}
-        <div style={{ display: "flex", gap: 10, padding: 16, borderTop: "1px solid #222" }}>
+        <div className="input-container">
           <input
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && sendMessage()}
             placeholder="Écrire…"
-            style={{
-              flex: 1,
-              padding: 12,
-              borderRadius: 12,
-              background: "#0f0f0f",
-              border: "1px solid #222",
-              color: "#fff",
-            }}
+            className="chat-input"
           />
 
-          {/* 🎤 MICRO */}
           <button
             type="button"
             onClick={toggleMic}
-            title="Dicter un message"
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: "50%",
-              border: "1px solid #222",
-              background: listening ? "#8b0000" : "#111",
-              color: "#fff",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
+            className="mic-btn"
+            style={{ background: listening ? "#8b0000" : "#111" }}
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 14a3 3 0 003-3V5a3 3 0 10-6 0v6a3 3 0 003 3z" />
@@ -384,22 +383,169 @@ export default function ChatPage() {
             </svg>
           </button>
 
-          <button
-            onClick={sendMessage}
-            style={{
-              padding: "12px 16px",
-              borderRadius: 12,
-              border: "1px solid #b8860b",
-              background: "#b8860b",
-              color: "#000",
-              cursor: "pointer",
-              fontWeight: 800,
-            }}
-          >
+          <button onClick={sendMessage} className="send-btn">
             Envoyer
           </button>
         </div>
       </div>
+
+      <style jsx>{`
+        .layout-container {
+          display: flex;
+          height: 100vh;
+          background: #0b0b0b;
+          color: #fff;
+          overflow: hidden;
+        }
+
+        .sidebar {
+          width: 280px;
+          border-right: 1px solid #222;
+          padding: 16px;
+          background: #0b0b0b;
+          display: flex;
+          flex-direction: column;
+          z-index: 100;
+        }
+
+        .sidebar-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .conv-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .main-content {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          position: relative;
+        }
+
+        .desktop-header {
+          display: flex;
+          justify-content: space-between;
+          padding: 16px;
+          border-bottom: 1px solid #222;
+        }
+
+        .mobile-header {
+          display: none;
+        }
+
+        .messages-container {
+          flex: 1;
+          padding: 16px;
+          overflow-y: auto;
+        }
+
+        .input-container {
+          display: flex;
+          gap: 10px;
+          padding: 16px;
+          border-top: 1px solid #222;
+          background: #0b0b0b;
+        }
+
+        .chat-input {
+          flex: 1;
+          padding: 12px;
+          border-radius: 12px;
+          background: #0f0f0f;
+          border: 1px solid #222;
+          color: #fff;
+          outline: none;
+        }
+
+        .mic-btn {
+          width: 44px;
+          height: 44px;
+          border-radius: 50%;
+          border: 1px solid #222;
+          color: #fff;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .send-btn {
+          padding: 12px 16px;
+          border-radius: 12px;
+          border: 1px solid #b8860b;
+          background: #b8860b;
+          color: #000;
+          cursor: pointer;
+          font-weight: 800;
+        }
+
+        .mobile-only { display: none; }
+
+        /* --- RESPONSIVE --- */
+        @media (max-width: 768px) {
+          .mobile-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 15px;
+            background: #111;
+            border-bottom: 1px solid #222;
+            height: 60px;
+          }
+
+          .desktop-header { display: none; }
+
+          .sidebar {
+            position: fixed;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 85%;
+            transform: translateX(-100%);
+            transition: transform 0.3s ease;
+            box-shadow: 10px 0 30px rgba(0,0,0,0.8);
+          }
+
+          .sidebar.open {
+            transform: translateX(0);
+          }
+
+          .mobile-only { display: block; }
+
+          .menu-trigger {
+            background: none;
+            border: none;
+            color: #b8860b;
+            font-size: 24px;
+            cursor: pointer;
+          }
+
+          .close-btn {
+            background: none;
+            border: none;
+            color: #fff;
+            font-size: 20px;
+          }
+
+          .message-bubble {
+            max-width: 90% !important;
+          }
+
+          .input-container {
+            padding: 10px;
+          }
+          
+          .send-btn {
+            padding: 12px 10px;
+            font-size: 13px;
+          }
+        }
+      `}</style>
     </div>
   );
 }
